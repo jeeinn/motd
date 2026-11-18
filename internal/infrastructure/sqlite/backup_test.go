@@ -35,6 +35,13 @@ func TestBackupProducesRestorableSnapshot(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
 	seedForBackup(t, pools, 3)
+	// 0002 起 nodes 有种子数据；用备份时刻的基线做相对断言，避免耦合版块数量。
+	base := countNodes(ctx, pools)
+	var migrationVersions int64
+	if err := pools.reader.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationVersions); err != nil {
+		t.Fatalf("读取迁移版本数: %v", err)
+	}
 
 	backupDir := filepath.Join(t.TempDir(), "backups")
 	info, err := Backup(ctx, pools, backupDir)
@@ -53,8 +60,8 @@ func TestBackupProducesRestorableSnapshot(t *testing.T) {
 			t.Fatalf("备份后写入失败: %v", err)
 		}
 	}
-	if got := countNodes(ctx, pools); got != 5 {
-		t.Fatalf("备份后应有 5 行，实际 %d", got)
+	if got := countNodes(ctx, pools); got != base+2 {
+		t.Fatalf("备份后继续写入 2 行，应为 base+2=%d，实际 %d", base+2, got)
 	}
 
 	result, err := VerifyBackup(ctx, info.Path)
@@ -64,11 +71,11 @@ func TestBackupProducesRestorableSnapshot(t *testing.T) {
 	if result.Integrity != "ok" {
 		t.Fatalf("integrity_check 应为 ok，实际 %q", result.Integrity)
 	}
-	if got := result.TableCounts["nodes"]; got != 3 {
-		t.Fatalf("备份中应有 3 个 nodes，实际 %d", got)
+	if got := result.TableCounts["nodes"]; got != int64(base) {
+		t.Fatalf("备份中 nodes 应为备份时刻的 %d 行，实际 %d", base, got)
 	}
-	if got := result.TableCounts["schema_migrations"]; got != 1 {
-		t.Fatalf("迁移版本应随备份保存，实际 %d", got)
+	if got := result.TableCounts["schema_migrations"]; got != migrationVersions {
+		t.Fatalf("迁移版本应随备份保存，期望 %d，实际 %d", migrationVersions, got)
 	}
 
 	restoredDir := filepath.Join(t.TempDir(), "restored")
@@ -83,8 +90,8 @@ func TestBackupProducesRestorableSnapshot(t *testing.T) {
 	}
 	defer func() { _ = restored.Close() }()
 
-	if got := countNodes(ctx, restored); got != 3 {
-		t.Fatalf("恢复后应为备份点的 3 行，实际 %d", got)
+	if got := countNodes(ctx, restored); got != base {
+		t.Fatalf("恢复后应回到备份点的 %d 行，实际 %d", base, got)
 	}
 	applied, err := Migrate(ctx, restored)
 	if err != nil {
@@ -100,6 +107,7 @@ func TestRestoreToEmptyDirectory(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
 	seedForBackup(t, pools, 2)
+	base := countNodes(ctx, pools)
 
 	info, err := Backup(ctx, pools, t.TempDir())
 	if err != nil {
@@ -126,8 +134,8 @@ func TestRestoreToEmptyDirectory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("恢复后的库不可写: %v", err)
 	}
-	if got := countNodes(ctx, db); got != 3 {
-		t.Fatalf("恢复后写入一行应有 3 行，实际 %d", got)
+	if got := countNodes(ctx, db); got != base+1 {
+		t.Fatalf("恢复后写入一行应为 base+1=%d，实际 %d", base+1, got)
 	}
 }
 

@@ -40,28 +40,31 @@ func insertNodeTx(ctx context.Context, tx *sql.Tx, slug string) error {
 func TestWriterCommitsBeforeAck(t *testing.T) {
 	ctx := context.Background()
 	pools, w := setupWriter(t)
+	// 0002 起 nodes 带 5 行种子数据，一律用相对增量断言，不假设业务表为空。
+	base := countNodes(ctx, pools)
 
 	err := w.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := insertNodeTx(ctx, tx, "a"); err != nil {
 			return err
 		}
 		// 事务尚未提交，读连接（WAL）不应看到这条数据。
-		if n := countNodes(ctx, pools); n != 0 {
-			return fmt.Errorf("事务未提交但数据已对外可见，count=%d", n)
+		if n := countNodes(ctx, pools); n != base {
+			return fmt.Errorf("事务未提交但数据已对外可见，base=%d count=%d", base, n)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
-	if n := countNodes(ctx, pools); n != 1 {
-		t.Fatalf("Submit 返回后数据应已提交，count=%d", n)
+	if n := countNodes(ctx, pools); n != base+1 {
+		t.Fatalf("Submit 返回后数据应已提交，base=%d count=%d", base, n)
 	}
 }
 
 func TestWriterRollsBackOnError(t *testing.T) {
 	ctx := context.Background()
 	pools, w := setupWriter(t)
+	base := countNodes(ctx, pools)
 	sentinel := errors.New("用例主动失败")
 
 	err := w.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -73,8 +76,8 @@ func TestWriterRollsBackOnError(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("应透传用例错误，实际 %v", err)
 	}
-	if n := countNodes(ctx, pools); n != 0 {
-		t.Fatalf("失败事务应回滚，count=%d", n)
+	if n := countNodes(ctx, pools); n != base {
+		t.Fatalf("失败事务应回滚，base=%d count=%d", base, n)
 	}
 }
 
@@ -133,6 +136,7 @@ func TestWriterQueueFull(t *testing.T) {
 func TestWriterTimeoutRollsBack(t *testing.T) {
 	ctx := context.Background()
 	pools, w := setupWriter(t, WithWriteTimeout(60*time.Millisecond), WithMaxRetries(0))
+	base := countNodes(ctx, pools)
 
 	err := w.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := insertNodeTx(ctx, tx, "a"); err != nil {
@@ -148,14 +152,15 @@ func TestWriterTimeoutRollsBack(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("超时应返回 context.DeadlineExceeded，实际 %v", err)
 	}
-	if n := countNodes(ctx, pools); n != 0 {
-		t.Fatalf("超时事务应回滚，count=%d", n)
+	if n := countNodes(ctx, pools); n != base {
+		t.Fatalf("超时事务应回滚，base=%d count=%d", base, n)
 	}
 }
 
 func TestWriterRetriesTransientThenSucceeds(t *testing.T) {
 	ctx := context.Background()
 	pools, w := setupWriter(t, WithMaxRetries(3), WithRetryBaseDelay(time.Millisecond))
+	base := countNodes(ctx, pools)
 	var attempts atomic.Int32
 
 	err := w.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -170,8 +175,8 @@ func TestWriterRetriesTransientThenSucceeds(t *testing.T) {
 	if got := attempts.Load(); got != 3 {
 		t.Fatalf("期望尝试 3 次，实际 %d", got)
 	}
-	if n := countNodes(ctx, pools); n != 1 {
-		t.Fatalf("重试成功后应只有 1 行，count=%d", n)
+	if n := countNodes(ctx, pools); n != base+1 {
+		t.Fatalf("重试成功后应只新增 1 行，base=%d count=%d", base, n)
 	}
 }
 
@@ -210,6 +215,7 @@ func TestWriterNonRetryableStopsImmediately(t *testing.T) {
 func TestWriterConcurrent200(t *testing.T) {
 	ctx := context.Background()
 	pools, w := setupWriter(t, WithRetryBaseDelay(time.Millisecond))
+	base := countNodes(ctx, pools)
 
 	const n = 200
 	var wg sync.WaitGroup
@@ -230,8 +236,8 @@ func TestWriterConcurrent200(t *testing.T) {
 			t.Fatalf("并发写入失败: %v", err)
 		}
 	}
-	if got := countNodes(ctx, pools); got != n {
-		t.Fatalf("期望 %d 行，实际 %d", n, got)
+	if got := countNodes(ctx, pools); got != base+n {
+		t.Fatalf("期望新增 %d 行（base=%d），实际总数 %d", n, base, got)
 	}
 }
 
