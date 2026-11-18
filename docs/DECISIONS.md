@@ -410,3 +410,30 @@
   - 当前 P0 无密码字段，`startComposer` 显式 `setSecret(false)` 声明所有编辑字段非敏感；P1 邮箱密码字段改 `setSecret(true)`，对应 `viewmodel.Field.Secret`。
 - 验证：`cmd/server/line_echo_test.go`（5 个：普通 / 宽字符退格、恶意字节净化、Secret 掩码、粘贴与换行 reset、预置 `/` 顺序）+ 真实 SSH E2E 断言 `//login` 回显与标题 / 正文回显；全量 `go build` / `go vet` / `go test -count=1 ./...` 通过。
 - 关联：`DEVIATIONS.md` R21、`docs/MVP-DELIVERY.md §10`。
+
+---
+
+## ADR-027 终端 TUI 原地重绘：服务端白名单光标控制（MVP 收官）
+
+- 状态：已采纳（2026-11-18，V 先生在 `MVP-DELIVERY.md §10.3` 的 A/B 方案中选 **A「一次到位」**）
+- 结论：
+  1. 连续导航（`j/k/Enter/h/q/n/p`）**原地重绘**，不再每次追加整屏；
+  2. `safe/ansi.go` 白名单从「纯 SGR」扩为「SGR + EL `\x1b[K` + CUU `\x1b[nA` 模板」，两者**只由服务端按上一屏行数生成**，绝不接收用户输入；
+  3. 仍明确禁止 ED 清屏 `2J`、CUP `H/f`、CUD `B`、DECSET 备用屏 `?1049h`、OSC 52 剪贴板、OSC 窗口标题、带参数 EL；用户内容路径（`RenderUser` / `SanitizeText`）不触达任何光标控制；
+  4. `presentation/terminal.RenderFrame` 是光标控制的**唯一消费点**（纯函数）；`pageController` 只负责记住上一屏行数；
+  5. 屏幕连续性：任何非屏幕输出（命令提示、逐字符回显、编辑器、登录文本、错误提示）都 `invalidateScreen()`，下次退回追加模式，避免 `CursorUp` 覆盖错位置；
+  6. 极窄终端发生自动折行时自动降级为追加（宁可多输出也不错位）。
+- 理由：
+  - **体验**：追加式整屏重绘让用户每按一次 `j` 就滚一屏，实测判定不可用；原地重绘是标准 TUI 形态。
+  - **带宽**：§1.2 的 1 Mbps 约束下先解决视觉；当前仍逐行重发整屏内容，**不提前引入 §3.3 的 Frame 增量协议**（那是 P1 浏览器端设计，FF09 避免过度设计）。
+  - **安全**：§3.5 禁止的是「用户提交的控制序列影响终端」，不是「服务端生成的编辑控制」。白名单只放开两条，并配负向注入守卫，红线不破。
+  - **最小改动**：`application/forum`、`application/viewmodel`、`transport/ssh` 协议层、`go.mod` 全部未改。
+- 代价 / 边界：
+  - 依赖终端 VT 兼容（Windows Terminal / 现代 conhost / xterm）。旧版 conhost 若未启用 VT 支持，会退化为字面追加式输出，**功能不受影响**。
+  - 每行 `\r` + EL + 内容会重发整屏字节，差异行优化留 P1。
+  - `screenLines` 是每会话内存状态，重启归零（原则二：持久化数据才是事实）。
+- 验证：
+  - 新增 `presentation/terminal/frame_test.go` 5 项（追加 / 重绘 / 短屏清空 / 窄屏降级 / 白名单序列）；`archtest/safe_test.go` 扩 `allowedANSI` + 3 条新守卫（负向注入、用户路径无光标控制、唯一消费点）。
+  - `cmd/server` 补 `TestNavigationRedrawsInPlace` 与真实 SSH `TestMVPNavigationRedrawsInPlace`；`cmdOnlySGR` 升为 `cmdOnlyWhitelistedANSI`。
+  - **真实 Windows OpenSSH 客户端实测**：连按 `jjj` → 3 次 `\x1b[8A`、24 次 `\x1b[K`（3×8 行）、清屏/OSC/备用屏 0 次；`go build` / `go vet` / `go test -count=1 ./...` 0 FAIL（479 测试函数）。
+- 关联：`DEVIATIONS.md` R22、`docs/MVP-DELIVERY.md §11`。

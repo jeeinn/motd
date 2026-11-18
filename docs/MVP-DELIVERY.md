@@ -153,11 +153,11 @@ MOTD_SSH_ADDR=127.0.0.1:22222 \
 
 | 文件 | 用途 | sha256 |
 | --- | --- | --- |
-| `motd.exe` | 本机 Windows 可直接运行 | `970bf796c2b2783f7923746783d6574cb206e1e0b08cc5b1ecf40b84c546a135` |
-| `bin/motd-linux-amd64` | 交叉编译 `GOOS=linux GOARCH=amd64`，供 VPS/systemd 部署（版本 `mvp-0.2.0`） | `7c3fdf4bb294ec9c57db32843eea95feab18f5e63e2e922a299040973b9e6ec9` |
-| `bin/motdctl.exe` | 备份 / 校验 / 恢复工具 | `00763820c1e66889c84c4ae0be4a5799548602c2d181769a1073fd41f88e4b0e` |
+| `motd.exe` | 本机 Windows 可直接运行 | `553077c181c44d8742319d650d1aac6392d93835836e011a0ead6d8f35c4357e` |
+| `bin/motd-linux-amd64` | 交叉编译 `GOOS=linux GOARCH=amd64`，供 VPS/systemd 部署（版本 `mvp-1.0.0`） | `13459d92b9862867a2518cc95adf0d517afe0345bab17879fb6a3cdce445ec48` |
+| `bin/motdctl.exe` | 备份 / 校验 / 恢复工具 | `952ee37343a3325d09f15c06bd909b305f2d71c96a676fa5a10904fe97e0228a` |
 
-> 校验和为 **§10 回显修订后重新编译**的版本（22:32）。从零启动实测：`data/mvp-smoke3`，`migrations_applied=[1 2 3]`、`/healthz → ok dev queue=0/256 online=0 active=0 commits=0`、无 panic。
+> 校验和为 **§11 收官优化后重新编译**的版本（22:57）。从零启动实测：`data/mvp-final`，`migrations_applied=[1 2 3]`、`/healthz → ok dev queue=0/256 online=0 active=0 commits=0`、无 panic，并以系统 OpenSSH 客户端验证原地重绘字节流（§11.3）。
 
 ### 5.4 真实链路踩坑记录（有复盘价值）
 
@@ -179,7 +179,7 @@ MOTD_SSH_ADDR=127.0.0.1:22222 \
 | P1 | `/login` 屏仍是 P0-19 固定文本行，与四页论坛呈现形态不一致 | R18/R20 独立替换点；`loginPresenter` / `loginFlow.out` / `pollTimer` 待替换，业务链路零改动 |
 | P1 | 编辑器仍是单行提交；多行正文需一次粘贴，且粘贴含换行后退格不能跨行回到上一行 | 回显已由 §10 / ADR-026 补齐；逐字符 `\b` 擦除的边界由 P1 多行编辑器解决 |
 | P1 | 作者名未展示、`karma` 恒 0 / 等级恒 L1、无搜索、点赞、成就落库、浏览器 TUI / Frame 协议 | R11 未补仓储投影；Q5 分档已实现但 P0 无计分来源，刻意不臆造语义 |
-| P1 | 终端页面是「追加输出」而非全屏重绘，无光标定位 / 滚动位置保持 | 为守住 §3.5「只输出纯 SGR」，不引入清屏类 ANSI；P0-25 验收「不丢滚动位置」按语义状态保留 |
+| P1 | 原地重绘仍逐行重发整屏字节（视觉上只有一屏），未做差异行优化 | 刷屏已由 **§11 / ADR-027** 解决；差异行优化属 §3.3 Frame 增量（P1 浏览器端），按 FF09 不提前引入 |
 | P2 | D6 的 `kill -9` 硬杀未演练；`-race` 因本机无 gcc/CGO 未启用 | WAL 提交语义由 `write.go`（提交后才回执）+ 带数据备份恢复演练覆盖；VPS 部署演练时补做 |
 | P2 | 100 连接压测、目标 1000 在线未验证 | A3，评审稿 §1.2 明确不作 P0 验收 |
 | P2 | systemd unit / cron / 22→2222 转发 / 异地备份 / RTO-RPO 定期演练 / Online Backup API | A4，交付附件或 P3；`OPS.md §9` 已有清单骨架 |
@@ -235,7 +235,7 @@ MOTD_SSH_ADDR=127.0.0.1:22222 \
 
 | # | 观察 | 定性 | 处置 |
 | --- | --- | --- | --- |
-| Q1 | 按 `j/k` 每次都在窗口追加输出一整屏 | **当前实现的预期，非缺陷** | 页面层是「追加输出」而非原地重绘；为守住 §3.5「只输出纯 SGR」未引入光标/清屏 ANSI，焦点只能靠整屏重绘表达，已登记为 P1（§6）。改成原地重绘必须扩展 `safe/ansi.go` 白名单与 archtest 守卫，属独立工作，**本次不改** |
+| Q1 | 按 `j/k` 每次都在窗口追加输出一整屏 | **当时的实现预期**（**结论已被 §11 / ADR-027 修订，保留原文供追溯**） | 当时页面层是「追加输出」而非原地重绘；为守住 §3.5「只输出纯 SGR」未引入光标/清屏 ANSI，焦点只能靠整屏重绘表达。当时判断「改成原地重绘必须扩展白名单与守卫，属独立工作，本次不改」——后续由 §10.3 方案对比 → V 先生选 A → §11 实施 |
 | Q2 | 按 `/` 后输入命令「没反应」 | **UX 缺陷 + 当时的安全硬约束**（**② 的结论已被 §10 / ADR-026 修订，保留原文供追溯**） | ① `cl.runes` 已预置 `/`，提示语却写「以 / 开头」，用户补打一个 `/` 得到 `//login` → 未知命令；② **P0-22 零回显**：用户文本在净化前一律不写回终端，所以看不到自己输入的字符。当时判断「零回显不改，但提示必须说清楚」 |
 | Q3 | `/login` 不带参数只回「参数个数不符」 | **可发现性缺陷** | 原 `MinArgs=1`，Parse 直接 `ErrArgCount`，用户不知道要补 `github` |
 | Q4 | 补全 `/login github` 后真实 Device Flow 走通 | **口径订正** | 输出出现 `user_code DC23-363F`、`https://github.com/login/device`、`授权成功，正在建立账号…`，证明本机 `MOTD_GITHUB_CLIENT_ID` 已生效、GitHub 出站可用。此前「真实 OAuth 完全未联调」的标注已按 §4.1 / §6 订正 |
@@ -319,7 +319,7 @@ Device Flow 等待授权 > 20s 且期间用户无输入
 
 **已知限制**：逐字符 `\b` 擦除依赖终端 VT 兼容；粘贴含换行的多行文本后退格不能跨行回到上一行（P1 多行编辑器解决）。
 
-### 10.3 刷屏问题：方案对比（**待 V 先生拍板，本轮未实施**）
+### 10.3 刷屏问题：方案对比（**V 先生已选 A，实施与验收见 §11**）
 
 现状根因：`pageController.move()` 调 `render()`，而 `render()` 是「追加输出」；为守住 §3.5「只输出纯 SGR」没有光标 / 清屏序列，焦点只能靠重绘整屏表达。
 
@@ -332,11 +332,71 @@ Device Flow 等待授权 > 20s 且期间用户无输入
 | 风险 | 新增非 SGR 服务端控制序列，必须补负向注入证明清屏 / OSC 仍被拒 | 零新增 ANSI；但焦点表达弱化 |
 | 与评审稿 | 贴合 §3.3 Frame 增量方向（那是 P1 浏览器端，提前到 SSH 端有 FF09 过度设计风险） | 不触及设计稿任何边界 |
 
-**团长建议**：只求「立刻不刷屏」选 **B**（改动小、零安全面变化）；若打算把终端 TUI 做成长期主界面，选 **A** 一次到位，但需单独一轮做白名单扩展与守卫回归。**两案都不动 `application/forum` 与 ViewModel 结构**。
+**团长建议**：只求「立刻不刷屏」选 **B**（改动小、零安全面变化）；若打算把终端 TUI 做成长期主界面，选 **A** 一次到位。**两案都不动 `application/forum` 与 ViewModel 结构**。
 
-> 待决项不写入完成清单；拍板后追加新 ADR、补里程碑回访。
+> **决策结果（2026-11-18 22:48）**：V 先生明确「终端 TUI 是长期主界面，选 A 一次到位，作为 MVP 最后收官优化」。已追加 `ADR-027` / `DEVIATIONS.md R22`，实施与验收见 **§11**。
 
 ### 10.4 本次实测确认的完成项
 
 - **D2 / D3 / D4 真实机闭环成立**：状态栏 `已登录`、`/new` 发主题「我的 agent 测试」、`/reply` 回复「nnnb!!!」；Q6 限流在真实链路上正确生效并给出剩余秒数（`请 20s 后重试`）。
 - **§9 的连接级心跳修复生效**：`online=1 active=1` 全程稳定，未再归零；「登录已完成但本会话未能升级」不再出现。
+
+---
+
+## 11. MVP 收官：终端 TUI 原地重绘（2026-11-18 22:48–23:00）
+
+> 决策：V 先生在 §10.3 的 A/B 方案中选 **A**——「终端 TUI 是长期主界面，一次到位」。
+> 定位：MVP 最后一次功能优化；不新增依赖、不动 forum 用例 / ViewModel / transport 协议层。
+
+### 11.1 实施内容
+
+| 层 | 改动 |
+| --- | --- |
+| `safe/ansi.go` | 白名单从「纯 SGR」扩为 SGR + EL `\x1b[K` + CUU `\x1b[%dA`；新增 `ClearToEOL()` / `CursorUp(n)`，`n` 只由服务端行数计算 |
+| `presentation/terminal/frame.go`（新） | `RenderFrame(text, prevLines, width)` 纯函数：CUU 回屏首 → 每行 `\r` + EL + 内容 → 新屏更短时补齐清空 → 返回本屏行数；超宽自动降级追加 |
+| `cmd/server/page_controller.go` | 每会话 `screenLines`；`render` 按连续性自动选重绘 / 追加；`writeFixed` 与 `invalidateScreen()` 作废连续性 |
+| `cmd/server/ssh_handler.go` | 纯导航键保持连续性；命令提示、逐字符回显、编辑器、登录轮询、提交结果一律 invalidate |
+| `internal/archtest/safe_test.go` | `sgrOnly()` → `allowedANSI()`；新增 3 条守卫（负向注入 / 用户路径无光标控制 / 唯一消费点） |
+| 测试 | `frame_test.go` 5 项、`TestNavigationRedrawsInPlace`、真实 SSH `TestMVPNavigationRedrawsInPlace`；`cmdOnlySGR` → `cmdOnlyWhitelistedANSI` |
+
+**明确禁止（负向注入逐条验证）**：ED 清屏 `2J`、CUP `H/f`、CUD `B`、DECSET 备用屏 `?1049h`、OSC 52 剪贴板、OSC 窗口标题、带参数 EL `2K`。用户内容路径 `RenderUser` / `SanitizeText` 不引用任何光标控制。
+
+### 11.2 一次验证踩坑（留档）
+
+首次用系统 OpenSSH 客户端验证时输出仍是追加整屏，一度以为降级条件被触发。**真实原因是我只跑了 `go build ./...`（写入构建缓存），没有 `go build -o motd.exe`，客户端连的是旧二进制**；补上重编译后原地重绘立即生效。
+
+> 教训：**任何「跑真机」验证前必须确认被测二进制是刚编译的**。已把该检查纳入本轮验证步骤，并写入项目记忆。
+
+### 11.3 验证结果
+
+- `go build ./...` / `go vet ./...` / `go test -count=1 ./...` **0 FAIL（479 个测试函数）**。
+- **真实 Windows OpenSSH 客户端**（`ssh -tt -p 22228 localhost`，管道喂 `jjj` + `/quit`）：
+
+| 指标 | 实测 |
+| --- | --- |
+| CUU `\x1b[8A` | **3 次**（每次导航回屏首） |
+| EL `\x1b[K` | **24 次**（3 × 8 行） |
+| 版块列表渲染 | 4 次（首屏 + 3 次重绘），光标每次回屏首，**视觉只保留一屏** |
+| 清屏 / OSC / 备用屏 | **0 次** |
+| `/healthz` | `ok dev queue=0/256 online=0 active=0 commits=0` |
+| 启动日志 | `migrations_applied=[1 2 3]`、终端页面就绪、SSH 监听，无 panic、无调试残留 |
+
+- 产物 `mvp-1.0.0` 校验和见 §5.3。
+
+### 11.4 已知限制
+
+- 依赖终端 VT 兼容；旧版 Windows conhost 未启用 VT 时会退化为字面追加输出，**功能不受影响**。
+- 仍逐行重发整屏字节，差异行优化（§3.3 Frame 增量）留 P1；按 FF09 不提前引入。
+- `screenLines` 是每会话内存状态，重启归零（原则二）。
+
+### 11.5 MVP 收官状态
+
+| 项 | 状态 |
+| --- | --- |
+| D1 / D3 / D4 / D5 / D7 | ✅ 达成（真实机验证） |
+| D2 | ✅ 真实 GitHub Device Flow 授权 + 发帖 / 回复闭环已在本机跑通；仅 VPS 凭据注入 / 出站放行未验证 |
+| D6 | ⚠️ 部分：正常关闭重启 + 带数据备份恢复已验，`kill -9` 硬杀与 `-race` 未演练 |
+| 回显 / 刷屏 | ✅ ADR-026 按字段分级回显、ADR-027 原地重绘，均已实测 |
+| 后续项 | VPS systemd 部署自检、`kill -9` 演练、100 连接压测、`/login` 呈现层替换（R18/R20）、搜索 / 投票 / 浏览器 TUI（P1） |
+
+> **文档**：`DECISIONS.md ADR-027`、`DEVIATIONS.md R22`、`P0-PLAN` 头部、`README`、`OPS` 同步；§9 Q1 / §10.3 的旧结论只标注「已修订」不删，便于事后复盘。

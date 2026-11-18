@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -105,8 +106,10 @@ func pressEnter(t *testing.T, ctx context.Context, sess *fakePageSession, pc *pa
 	}
 }
 
-// cmdOnlySGR 是 D5 在页面链路上的判据：输出里出现 ESC 就只能是纯 SGR。
-func cmdOnlySGR(t *testing.T, s string) {
+// cmdOnlyWhitelistedANSI 是 D5 在页面链路上的判据（ADR-027 扩充）：
+// 输出里的 ESC 只能是 SGR（m）、EL 清行（K）、CUU 上移（A）三类服务端白名单序列。
+// 清屏 2J、OSC 52、备用屏 ?1049h、光标定位 H 等一律不接受。
+func cmdOnlyWhitelistedANSI(t *testing.T, s string) {
 	t.Helper()
 	for i := 0; i < len(s); i++ {
 		if s[i] != 0x1b {
@@ -116,14 +119,18 @@ func cmdOnlySGR(t *testing.T, s string) {
 			t.Fatalf("输出含非 CSI 的 ESC 序列: %q", s)
 		}
 		j := i + 2
-		for j < len(s) && s[j] != 'm' {
-			if c := s[j]; (c < '0' || c > '9') && c != ';' {
-				t.Fatalf("ESC 序列不是纯 SGR: %q", s[i:min(i+24, len(s))])
+		for j < len(s) {
+			c := s[j]
+			if c == 'm' || c == 'K' || c == 'A' {
+				break
+			}
+			if (c < '0' || c > '9') && c != ';' {
+				t.Fatalf("ESC 序列不属于 SGR/EL/CUU 白名单: %q", s[i:min(i+24, len(s))])
 			}
 			j++
 		}
 		if j >= len(s) {
-			t.Fatalf("未闭合的 SGR: %q", s[i:])
+			t.Fatalf("未闭合的 ESC 序列: %q", s[i:])
 		}
 		i = j
 	}
@@ -147,7 +154,7 @@ func TestPageControllerD1ShowsNodeList(t *testing.T) {
 	if pc.screen.Kind != viewmodel.ScreenNodes {
 		t.Fatalf("首屏应为版块列表，实际 %v", pc.screen.Kind)
 	}
-	cmdOnlySGR(t, out)
+	cmdOnlyWhitelistedANSI(t, out)
 }
 
 // P0-25：j/k 移动焦点，Enter/h/q 逐层回退且不丢页面状态。
@@ -185,6 +192,53 @@ func TestPageControllerNavigation(t *testing.T) {
 	if pc.screen.Kind != viewmodel.ScreenNodes {
 		t.Fatal("q/h 应回退到版块列表")
 	}
+}
+
+// ADR-027：连续导航原地重绘；任何非屏幕输出后退回追加模式。
+func TestNavigationRedrawsInPlace(t *testing.T) {
+	ctx, h, _, _, _ := setupMVPRuntime(t)
+	sess := newFakePageSession(0)
+	pc := h.newPageController(sess)
+	if err := pc.showNodes(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(sess.output(), "\x1b[K") {
+		t.Fatal("首屏必须是追加模式，不得带光标控制")
+	}
+	firstLines := pc.screenLines
+	if firstLines <= 0 {
+		t.Fatal("首屏应记录占用行数")
+	}
+	sess.reset()
+
+	if err := pc.key(ctx, sess, actionMoveDown); err != nil {
+		t.Fatal(err)
+	}
+	out := sess.output()
+	if !regexp.MustCompile(`\x1b\[\d+A`).MatchString(out) {
+		t.Fatalf("导航应输出 CUU 上移序列（原地重绘），实际 %q", out)
+	}
+	if !strings.Contains(out, "\x1b[K") {
+		t.Fatalf("每行应带 EL 清行，实际 %q", out)
+	}
+	if pc.screenLines != firstLines {
+		t.Fatalf("同一屏重绘后行数应稳定，%d → %d", firstLines, pc.screenLines)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
+
+	// 插入一条固定提示后，光标已离开屏幕末尾，下一次渲染必须退回追加。
+	if err := pc.writeFixed(sess, "（一条提示）"); err != nil {
+		t.Fatal(err)
+	}
+	sess.reset()
+	if err := pc.key(ctx, sess, actionMoveUp); err != nil {
+		t.Fatal(err)
+	}
+	out = sess.output()
+	if regexp.MustCompile(`\x1b\[\d+A`).MatchString(out) {
+		t.Fatalf("提示打断后应退回追加模式，不得再上移光标: %q", out)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
 }
 
 // D3 + D4：已登录会话可直接写；另一个账号能看到主题、正文与回复。
@@ -246,8 +300,8 @@ func TestPageControllerD4TwoUsersSeeEachOthersPosts(t *testing.T) {
 	if !strings.Contains(b.output(), "他人可见回复") || !strings.Contains(b.output(), "第一条正文") {
 		t.Fatalf("详情屏未同时展示首帖与回复: %q", b.output())
 	}
-	cmdOnlySGR(t, a.output())
-	cmdOnlySGR(t, b.output())
+	cmdOnlyWhitelistedANSI(t, a.output())
+	cmdOnlyWhitelistedANSI(t, b.output())
 }
 
 // 访客只读：不进入编辑态、不产生任何写入。
@@ -297,7 +351,7 @@ func TestPageControllerOpenNeverEchoesArgument(t *testing.T) {
 	if !strings.Contains(out, "必须是正整数") {
 		t.Fatalf("应给出固定错误提示: %q", out)
 	}
-	cmdOnlySGR(t, out)
+	cmdOnlyWhitelistedANSI(t, out)
 }
 
 // D5 链路：恶意内容落库后，由另一个会话读出并渲染，输出不得影响其终端。
@@ -318,7 +372,7 @@ func TestPageControllerHostilePostIsSafeForOtherSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.output()
-	cmdOnlySGR(t, out)
+	cmdOnlyWhitelistedANSI(t, out)
 	for _, bad := range []string{"\x1b[2J", "\x1b]52", "\x1b]8", "\x1b]0;", "\r覆盖"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("他人终端收到控制序列 %q", bad)

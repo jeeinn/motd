@@ -38,6 +38,7 @@ ssh -p 2222 localhost
 ```
 
 > 进入后按 `/` 会**自动填入前导斜杠**，直接输入命令名即可（例如 `login github`），Enter 提交；输入会正常回显（字符先经净化，见 `docs/DECISIONS.md ADR-026`），只有密码类 Secret 字段才隐藏。`j/k` 移动、`Enter` 打开、`q` 返回、`/quit` 退出。登录命令是 `/login github`（不是 `/login`）。
+> 导航采用**原地重绘**（`docs/DECISIONS.md ADR-027`），不会滚屏。终端需支持 VT 序列（Windows Terminal / 现代 conhost / xterm）；旧版终端会退化为追加输出，功能不受影响。
 
 首次启动会在 `./data` 下创建 `motd.db` 并自动执行迁移。
 

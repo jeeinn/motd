@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,8 +66,22 @@ func sgrOnly(s string) bool {
 	return true
 }
 
+// allowedANSI 是 ansi.go 里 ESC 字面量的完整白名单（ADR-027）：
+// 纯 SGR、EL 清行、CUU 上移模板。其余一律拒绝，且模板里的 %d 只由
+// 服务端按「上一屏行数」填充，不接收用户输入。
+func allowedANSI(s string) bool {
+	if sgrOnly(s) {
+		return true
+	}
+	switch s {
+	case "\x1b[K", "\x1b[%dA":
+		return true
+	}
+	return false
+}
+
 // TestSafeRendererANSIOnlyFromTable 把「受控 ANSI 生成」变成会失败的测试：
-// ESC 字面量只能出现在 ansi.go，且必须全部是纯 SGR。
+// ESC 字面量只能出现在 ansi.go，且必须属于 allowedANSI 白名单。
 func TestSafeRendererANSIOnlyFromTable(t *testing.T) {
 	root := findModuleRoot(t)
 	dir := filepath.Join(root, "internal", "presentation", "terminal", "safe")
@@ -80,8 +95,8 @@ func TestSafeRendererANSIOnlyFromTable(t *testing.T) {
 			total++
 			if file != "ansi.go" {
 				t.Errorf("%s 出现 \\x1b 字面量：ESC 序列只能定义在 ansi.go 的常量表", file)
-			} else if !sgrOnly(v) {
-				t.Errorf("ansi.go 里的 ESC 字面量必须是纯 SGR，实际 %q", v)
+			} else if !allowedANSI(v) {
+				t.Errorf("ansi.go 里的 ESC 字面量必须属于 SGR/EL/CUU 白名单，实际 %q", v)
 			}
 		}
 	}
@@ -103,8 +118,88 @@ func TestSafeGuardDetectsInjectedANSI(t *testing.T) {
 	if len(found["bad.go"]) != 1 {
 		t.Fatalf("注入的 ESC 字面量必须被检出，实际 %v", found)
 	}
-	if sgrOnly(found["bad.go"][0]) {
-		t.Fatal("注入的清屏序列不能被误判为合法 SGR")
+	if allowedANSI(found["bad.go"][0]) {
+		t.Fatal("注入的清屏序列不能被误判为合法白名单序列")
+	}
+}
+
+// TestCursorControlGuardRejectsForbiddenSequences 是 ADR-027 的负向注入：
+// 放开 EL/CUU 之后，清屏、光标定位、备用屏、OSC 剪贴板/标题、带参数 EL
+// 必须仍然被拒。逐条验证，避免「白名单放宽一次，红线全线失守」。
+func TestCursorControlGuardRejectsForbiddenSequences(t *testing.T) {
+	bad := []string{
+		"\x1b[2J",          // ED 清屏
+		"\x1b[J",           // ED 无参数
+		"\x1b[H", "\x1b[f", // CUP 光标定位
+		"\x1b[B",             // CUD 下移
+		"\x1b[?1049h",        // DECSET 备用屏
+		"\x1b[2K",            // 带参数的 EL（只允许无参数 K）
+		"\x1b]52;c;YWJj\x07", // OSC 52 剪贴板
+		"\x1b]0;pwned\x07",   // OSC 改窗口标题
+		"\x1b[31m\x1b[2J",    // SGR 后面夹带清屏
+	}
+	for _, s := range bad {
+		if allowedANSI(s) {
+			t.Errorf("禁止序列被误判为合法: %q", s)
+		}
+	}
+	for _, s := range []string{"\x1b[0m", "\x1b[1;4m", "\x1b[K", "\x1b[%dA"} {
+		if !allowedANSI(s) {
+			t.Errorf("白名单序列被误拒: %q", s)
+		}
+	}
+}
+
+// TestUserContentPathHasNoCursorControl 守住 §3.5 红线：用户内容路径
+// （RenderUser / SanitizeText / Markdown 解析）绝不调用光标控制。
+func TestUserContentPathHasNoCursorControl(t *testing.T) {
+	root := findModuleRoot(t)
+	dir := filepath.Join(root, "internal", "presentation", "terminal", "safe")
+	for _, name := range []string{"render.go", "sanitize.go", "markdown.go"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, banned := range []string{"CursorUp(", "ClearToEOL(", "cursorUpFmt", "clearToEOLANSI"} {
+			if strings.Contains(string(b), banned) {
+				t.Errorf("%s 不得引用光标控制 %q：用户内容路径与服务端控制必须分离", name, banned)
+			}
+		}
+	}
+}
+
+// TestCursorControlsOnlyUsedByFrame 保证光标控制只有一个消费点：
+// presentation/terminal 的 RenderFrame。cmd 层只通过它间接使用。
+func TestCursorControlsOnlyUsedByFrame(t *testing.T) {
+	root := findModuleRoot(t)
+	internalDir := filepath.Join(root, "internal")
+	allowed := map[string]bool{
+		"internal/presentation/terminal/safe/ansi.go": true, // 定义处
+		"internal/presentation/terminal/frame.go":     true, // 唯一调用处
+	}
+	err := filepath.WalkDir(internalDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(b), "CursorUp(") && !strings.Contains(string(b), "ClearToEOL(") {
+			return nil
+		}
+		if !allowed[rel] {
+			t.Errorf("%s 不得直接调用光标控制（只允许 ansi.go 定义 / frame.go 消费）", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("扫描 internal 失败: %v", err)
 	}
 }
 

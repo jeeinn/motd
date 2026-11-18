@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -327,4 +328,53 @@ func TestMVPLoginCommandHintOnRealSSH(t *testing.T) {
 	// ADR-026：正常输入必须回显（净化后），随后才是命令解析结果。
 	c.out.waitSince(t, mark, "//login")
 	c.out.waitSince(t, mark, "未知命令")
+}
+
+// ADR-027：真实 SSH 客户端连按 j/k 时应原地重绘（CUU + EL），
+// 不再每次追加一整屏；且清屏 / OSC / 备用屏等禁止序列绝不出现。
+func TestMVPNavigationRedrawsInPlace(t *testing.T) {
+	_, h, rt, pools, _ := setupMVPRuntime(t)
+	srv, err := sshd.New(sshd.Config{
+		Addr:        "127.0.0.1:0",
+		DataDir:     t.TempDir(),
+		MaxConns:    10,
+		IdleTimeout: 30 * time.Second,
+		Resolver:    auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
+		Presence:    rt.Presence,
+		Handler:     h,
+	})
+	if err != nil {
+		t.Fatalf("启动 SSH 服务: %v", err)
+	}
+	serveCtx, cancel := context.WithCancel(context.Background())
+	go func() { _ = srv.Serve(serveCtx) }()
+	addr := srv.Addr()
+	t.Cleanup(func() {
+		cancel()
+		srv.Close()
+	})
+	if addr == "" {
+		t.Fatal("SSH 监听未就绪")
+	}
+
+	c := dialMVP(t, addr, newMVPKey(t))
+	defer c.close()
+	mark := c.out.mark()
+	c.out.waitSince(t, mark, "/dev/ai")
+
+	mark = c.out.mark()
+	c.send(t, "jjj") // 焦点 1 → 4
+	c.out.waitSince(t, mark, ">  4")
+	segment := c.out.text()[mark:]
+	if !regexp.MustCompile(`\x1b\[\d+A`).MatchString(segment) {
+		t.Fatalf("连续导航应原地重绘（CUU 上移），实际 %q", segment)
+	}
+	if !strings.Contains(segment, "\x1b[K") {
+		t.Fatalf("重绘应逐行 EL 清行，实际 %q", segment)
+	}
+	for _, bad := range []string{"\x1b[2J", "\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[H"} {
+		if strings.Contains(segment, bad) {
+			t.Fatalf("重绘泄露禁止序列 %q: %q", bad, segment)
+		}
+	}
 }

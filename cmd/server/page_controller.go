@@ -65,6 +65,9 @@ type pageController struct {
 	editor   *pageEditor
 	// 行编辑回显器：与页面状态一样每会话一份（ADR-026）。
 	echo *lineEcho
+	// 上一屏占用的行数（ADR-027）。>0 表示屏幕连续、可原地重绘；
+	// 任何非屏幕输出（提示/回显/登录文本）都会把它清零退回追加模式。
+	screenLines int
 }
 
 type editorStage uint8
@@ -147,12 +150,20 @@ func (p *pageController) render(sess pageSession) error {
 		// 宁可只给一行固定提示，也不把可疑内容写进 PTY。
 		return p.writeFixed(sess, "页面渲染失败，已停止输出")
 	}
-	_, err = io.WriteString(sess, toCRLF(text))
+	// screenLines>0 → 屏幕连续，原地重绘；=0 → 中间插入过其它输出，追加。
+	// RenderFrame 在极窄终端发生自动折行时也会自行降级为追加。
+	frame, lines := terminal.RenderFrame(toCRLF(text), p.screenLines, int(width))
+	p.screenLines = lines
+	_, err = io.WriteString(sess, frame)
 	return err
 }
 
+// invalidateScreen 由调用方在输出任何非屏幕文本前调用（ADR-027）。
+func (p *pageController) invalidateScreen() { p.screenLines = 0 }
+
 // writeFixed 只输出服务端编译期常量，走 RenderSystem 路径。
 func (p *pageController) writeFixed(sess pageSession, text string) error {
+	p.invalidateScreen() // 非屏幕输出打断连续性，下次渲染必须追加
 	rendered, err := safe.RenderSystem(text, safe.StylePlain)
 	if err != nil {
 		return err
