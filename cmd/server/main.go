@@ -2,7 +2,7 @@
 //
 // 当前阶段：第四波 M2 认证。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
 // 写入队列、论坛用例与插件事件链装配、身份解析、GitHub Device Flow 客户端、
-// 设备码状态机与 SSH 入口，并提供运维探针 /healthz。
+// 设备码状态机、账号登录事务与 SSH 入口，并提供运维探针 /healthz。
 // 登录交互、公钥绑定与终端页面按 docs/P0-PLAN.md 逐项接入。
 package main
 
@@ -125,6 +125,12 @@ func run() error {
 	deviceAuth := newDeviceFlowService(pools, writer, deviceFlow)
 	logger.Info("设备码状态机就绪", "store", "device_auth_states", "modes", "pending|authorized|denied|expired")
 
+	// 账号登录事务（P0-17）：§4.3 三步判定与 users+identities 原子创建都在
+	// 同一个写事务内；users / identities 已在 0001_init.sql 建好，无新迁移。
+	// GetUser / GetEmails 仍在写事务之外（ADR-022 边界），/login 交互属 P0-19。
+	login := newLoginService(writer, deviceFlow)
+	logger.Info("账号登录事务就绪", "store", "users+identities", "provider", auth.ProviderGitHub)
+
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:        cfg.SSHAddr,
 		DataDir:     cfg.DataDir,
@@ -132,7 +138,7 @@ func run() error {
 		IdleTimeout: cfg.SSHIdleTimeout,
 		Resolver:    resolver,
 		Presence:    rt.Presence,
-		Handler:     newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth),
+		Handler:     newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login),
 		Logger:      logger,
 	})
 	if err != nil {

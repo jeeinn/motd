@@ -92,10 +92,21 @@ motdctl restore <backup-file> --target <path>
 ### Device Flow 状态表（P0-16）
 
 - `device_auth_states` 在 `0001_init.sql` 已建好，**部署时无需额外迁移**；启动日志 `migrations_applied=[1 2 3]` 即表示就绪，另有 `设备码状态机就绪 store=device_auth_states`。
-- 该表**只存设备码中间态，绝不存令牌**：`access_token` 只在服务端进程内交 P0-17 查 `/user` 后立即丢弃（Q3 / ADR-022）。备份文件里也不会出现令牌。
+- 该表**只存设备码中间态，绝不存令牌**：`access_token` 只在服务端进程内交 P0-17 调 `/user` 与 `/user/emails` 完成建号或登录后立即丢弃（Q3 / ADR-022 / ADR-023）。备份文件里也不会出现令牌。
 - 状态四态 `pending / authorized / denied / expired`；终态不可变，过期码不再轮询。轮询间隔 `polling_interval` 会随 GitHub `slow_down` 持久化放大，启动后按新会话重新从 5s 起算。
 - 表会**保留所有历史行**（含过期与终态），只增不删；`idx_device_auth_states_expiry` 已存在。P0 数据量极小，无需运维干预；P1 可加定期清理 job（清理条件 `status <> 'pending' AND expires_at < now - 保留窗口`，且须避开在途登录）。**不要手工 DELETE 表内行**——正在轮询的会话会因 `ErrDeviceAuthNotFound` 中断。
 - 排查登录卡住时优先看三点：`MOTD_GITHUB_CLIENT_ID` 是否注入、VPS 出站 `github.com:443` / `api.github.com:443` 是否放行、状态行是否停在 `pending` 但 `expires_at` 已过（下轮门禁会自动迁 `expired` 并提示重新发起）。
+
+### 账号与身份（P0-17）
+
+- `users` / `identities` 在 `0001_init.sql` 已建好，**部署无需额外迁移**；启动日志 `账号登录事务就绪 store=users+identities provider=github` 即表示装配成功。
+- **身份主键是 `(provider, provider_uid)`，`provider_uid` 取 GitHub 数字 id**（不是 login、不是邮箱）。因此改 GitHub 用户名不影响账号归属，`users.id` 也不会变。
+- **`users.primary_email` 允许重复，不要给它加唯一索引**：这是「禁止按邮箱自动合并」的结构保证（ADR-023 / §7 R7）。两个不同 GitHub UID 用同一邮箱登录会各自建号，并给后者返回「请先登录原账号再 `/link`」的提示——这是预期行为，不是数据异常。
+- **`identities` 的 `UNIQUE (provider, provider_uid)` 不能删**：它是并发首登幂等的最后防线。撞唯一约束时用例会整体重试并转为登录，不会产生第二个账号。
+- 用户名由 GitHub login 派生：两字中文会补下划线（`张三` → `张三_`），超长截断到 20 字符，同名冲突追加数字后缀（`alice` → `alice2`）。`users.username` 是 `COLLATE NOCASE UNIQUE`，大小写变体算同名。
+- **账号行不要手工改 `status` 再期望能登录**：登录只接受 `active`；`pending / deleting / deleted` 会被拒绝（失败关闭）。注销流程应由应用侧驱动，不要直接 UPDATE。
+- 令牌不落库：`users` / `identities` 两张表内不存在任何 token 列。备份文件里不会出现 `gho_` 前缀的访问令牌。
+- 排查登录失败：`GitHub 用户资料失败` / `邮箱列表失败` 看 VPS 出站 443 与 client_id；`账号状态不允许登录` 看 `users.status`；`用户名候选全部被占用` 属极端情况（同一 login 下 20 个候选全被占），可人工改 `users.username` 后重试。
 
 ## 4. 恢复流程
 

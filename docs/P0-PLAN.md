@@ -1,9 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 / P0-15 / P0-16 已完成
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 / P0-15 / P0-16 / P0-17 已完成
 > 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.4（插件权限）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
 > 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
-> 更新：2026-11-18 14:38
+> 更新：2026-11-18 15:35
 
 ---
 
@@ -208,12 +208,20 @@
   6. **状态机不持有节奏**：不 sleep、不起 ticker，`NextInterval` 结果经 `PollResult.NextInterval` 交 P0-19 会话循环；`slow_down` 的新间隔持久化到 `polling_interval`。archtest 用 AST 禁 `time.Sleep`/`NewTicker`/`After` 等，并校验四态枚举与 DDL CHECK 逐字一致（避免误命中 `users.status`）。
   7. 51 个新增测试（领域 8 / 状态机 22 / 真实 SQLite 15 含 4 条端到端 / archtest 6 含负向注入）；全量 build/vet/test 与从零启动实测通过，日志出现「设备码状态机就绪」。本项只做状态机与持久化，`/login` 交互、账号事务、会话升级分别属 P0-17 / P0-19。
 
-**P0-17 账号创建与登录事务**
-- 产出：`application/auth.Login` —— 按 §4.3 顺序判定：`(provider, provider_uid)` 命中即登录；邮箱命中但身份未命中**不自动合并**，提示先登录原账号再 `/link`；都不命中则原子创建 `users` + `identities`
+**P0-17 账号创建与登录事务** ✅
+- 产出：`application/auth.LoginService.Login` —— 按 §4.3 顺序判定：`(provider, provider_uid)` 命中即登录；邮箱命中但身份未命中**不自动合并**，提示先登录原账号再 `/link`；都不命中则原子创建 `users` + `identities`
 - 规则：`provider_uid` 取 GitHub 数字 `id`；只接受 primary 且 `email_verified` 的邮箱；用户名冲突由 `NOCASE UNIQUE` 兜底并追加数字后缀重试
 - 用户名必须先过 `domain/user.ValidateUsername`（Q1–Q7 后规则：中文 / 英文字母 / 数字 / `_` / `-`，3–20 字符，无空白；事实来源见 ADR-005），不能只依赖 DDL
 - 验收：并发同 UID 首登只产生一个用户（唯一约束 + 重试）；邮箱相同但 UID 不同必须建成两个账号
 - 依赖：P0-15、P0-06 ｜ 量级：1.5
+- 执行补充：
+  1. **表已存在，无新迁移**：`users` / `identities` 在 `0001_init.sql` 已建好（`username` COLLATE NOCASE UNIQUE、`identities` 有 `UNIQUE (provider, provider_uid)`），本项只补用例与仓储，`migrations_applied` 仍为 `[1 2 3]`。
+  2. **R16 口径消解（§4.3 步骤 2 与验收的张力）**：设计稿写「邮箱命中 → 不自动合并、提示 /link」，验收写「邮箱相同但 UID 不同必须建成两个账号」，字面相冲。结合 R7（`primary_email` 无唯一约束是有意设计）解为：**邮箱命中不阻断、不复用旧账号，仍为新 UID 建独立账号，只把「先登录原账号再 /link」作为 `LoginResult.Notice` 返回**。三条口径因此同时成立，§8 的账号接管风险仍守住。Notice 为固定文案、不含邮箱/login 原文。
+  3. **网络在写事务之外，判定与创建在同一写事务内**：`GetUser` / `GetEmails` 在 `store.Write` 之前完成（ADR-022 同一边界，不占唯一写连接）；§4.3 三步判定与 `users`+`identities` 插入绑定同一事务快照，消灭并发首登的 TOCTOU。因此 `LoginWriteTx` 不设独立读端口。
+  4. **唯一约束是最后防线，冲突整体重试**：`identities.UNIQUE(provider, provider_uid)` → `ErrIdentityConflict`、`users.username` 的 NOCASE UNIQUE → `ErrUsernameConflict`，用例层捕获后整体重试（最多 3 次，首轮已回滚无半成品）。身份冲突重试时重新查命中即转为登录，这是「并发同 UID 只产生一个用户」的实现方式（真实 SQLite 10 goroutine 实测）。
+  5. **用户名派生**：清洗非法字符 → 截断 20 码点 → 不足 3 字符**优先补下划线**（「张三」→「张三_」，保留中文可读性）、清洗后为空才回退 `gh<uid>` → 保留名 `_0` → 必须过 `ValidateUsername`；冲突时 `base/base2/base3...`，加后缀前按 20 码点截断基准名。仓储 `InsertUser` 再校验一次兜底（ADR-005）。
+  6. **令牌绝不落库**：登录相关结构体无 token 字段，`access_token` 只在 `Login` 参数与两次 GET 之间进程内流转；archtest 六条守卫（两表无 token 列、`primary_email` 无 UNIQUE、`identities` 有 `UNIQUE(provider,provider_uid)`、结构体无 token 字段、`FindAccountByEmail` 返回值必须被丢弃、`provider_uid` 由 `FormatInt(ID,10)` 生成）全部含负向注入。
+  7. 63 个新增测试（纯函数 19 / 用例 20 / 真实 SQLite 12 含 10 goroutine 并发 / archtest 12）；全量 build/vet/test 与从零启动实测通过，日志出现「账号登录事务就绪 store=users+identities」。**修复的真实缺陷**：两字中文 login 曾整名降级为 `gh<uid>`，改为补下划线保留原名。
 
 **P0-18 公钥绑定**
 - 产出：`/keys`、`/key add`、`/key rm <fingerprint>` 与绑定用例
@@ -423,8 +431,9 @@ Q1 与 Q3 是结构性决策。若后续要改，M0 的依赖守卫与 M2 的认
 | R13 | Device Flow 错误码完整清单 | R3 补完后 7 个 | 官方文档实为 **8 个**：多 `unsupported_grant_type`；且过期码表格写 `expired_token`、正文写 `token_expired` | 8 个全部显式分类，过期码双兼容；写进 P0-15 与 ADR-021 |
 | R14 | Device Flow 与 REST API 的 `Accept` 头 | 计划统一 `Accept: application/json` | Device Flow 两端点默认 form-urlencoded，须显式要 `application/json`；`/user`、`/user/emails` 官方推荐 `application/vnd.github+json` | 按端点分两套，混用会把表单文本当成成功响应；负向测试锁死，写进 P0-15 |
 | R15 | Device Flow 状态机的迁移表与轮询门禁 | 计划只写「`pending → authorized\|denied\|expired`」与「过期码不再轮询」 | 「状态迁移」与「保持 pending 但更新间隔」是两类操作；「过期」既可能是 GitHub 的 `expired_token`，也可能是本地 `expires_at` 到点；且读状态与写回跨一次最长 10s 的网络调用，存在迟到覆盖终态的竞态 | 合法迁移严格限定 3 条（4×4 穷举拒绝其余）；`slow_down` 走独立 `UpdateInterval`；门禁三态 `GateReady/GateTerminal/GateExpired`，过期路径不发网络；所有写回用 CAS（`WHERE status=?`），取消优先。写进 P0-16 与 ADR-022 |
+| R16 | §4.3 步骤 2「邮箱命中不自动合并」与 P0-17 验收「邮箱相同 UID 不同建成两个账号」 | §4.3 写「不自动合并，提示先登录原账号再 `/link`」，验收写「必须建成两个账号」 | 两句字面相冲：若按「提示」理解成阻断，第二个 UID 就建不出账号，验收必失败。R7 已确认 `primary_email` 无唯一约束是「禁止按邮箱自动合并」的有意设计，因此唯一自洽解是「不阻断、不复用旧账号、仍建独立账号 + 返回 Notice」 | 三步判定：① UID 命中即登录；② 邮箱命中只生成固定文案 `Notice`，不合并、不复用、不阻断；③ 为新 UID 原子建号。写进 P0-17 与 ADR-023，并加 AST 守卫「`FindAccountByEmail` 返回值必须被丢弃」 |
 
-R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界，R13 / R14 是 P0-15 对照 GitHub 官方文档新发现的两处偏差（错误码清单与 `Accept` 头），R15 是 P0-16 把计划中一句话验收拆成可执行状态机时补齐的语义边界。其余为计划内调整。
+R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界，R13 / R14 是 P0-15 对照 GitHub 官方文档新发现的两处偏差（错误码清单与 `Accept` 头），R15 是 P0-16 把计划中一句话验收拆成可执行状态机时补齐的语义边界，R16 是 P0-17 把 §4.3 与验收对齐时消解的口径冲突。其余为计划内调整。
 
 ---
 
@@ -447,4 +456,5 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 15. **下一步：第四波 M2 认证**，按 `P0-14 → 15 → 16 → 17 → 18 → 19 → 20` 推进，每项严格「实现 → 全量回归通过 → 单独提交 → 下一步」。
 16. **P0-14 公钥身份解析已完成**（ADR-020）：`application/auth.KeyLookup` 端口 + `auth.NewResolver` 三状态 + `sqlite.SSHKeyLookup` 只读查 `ssh_keys`；查库失败一律拒绝认证不降级访客、archtest 禁止业务层解析客户端公钥文本、`forum.ActorFromPrincipal` 落实访客只读；`cmd/server` 移除 `guestResolver` 占位。从零启动实测日志出现「身份解析就绪 mode=ssh_keys」，host key 指纹与格式契约一致；`ssh_keys` 表已在 `0001_init.sql`，本项无新迁移。**P0-15 已完成**（见下条）。
 17. **P0-15 GitHub Device Flow 客户端已完成**（ADR-021）：`application/auth.DeviceFlowClient` 端口 + 4 个值对象 + `ClassifyDeviceError` / `NextInterval` 纯函数；`infrastructure/github` 用标准库实现 4 个端点（端点可注入、`httptest` 假端点）、**8 个错误码**显式分类、`slow_down` 取响应新 `interval` 否则 +5 秒、两套 `Accept` 头、请求 10s 硬超时与 1 MiB 响应限长；`config` 读取 `MOTD_GITHUB_CLIENT_ID`，缺值时两个 POST 返回 `auth.ErrClientIDMissing` 且不发请求、启动不 panic；archtest 两条静态守卫（认证层禁 import HTTP/JSON、本包禁出现 `client_secret`）均含负向注入。**零新增第三方依赖**，本项不建表、不写库、不 sleep。全量回归 30 个包通过，从零启动实测 `client_id_configured=false|true` 两分支正常、日志不回显凭据值。**下一步 P0-16 Device Flow 状态机**（`device_auth_states` 持久化与 `pending → authorized|denied|expired` 迁移），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。
-18. **P0-16 Device Flow 状态机已完成**（ADR-022）：`device_auth_states` 表已在 `0001_init.sql`，**无新迁移**；`application/auth` 四态枚举 + `CanTransition` 迁移表（4×4 穷举只 3 条合法）+ `EvaluatePoll` 三态门禁，`DeviceAuthStore` UoW 端口与 `DeviceFlowService`（`Start`/`Poll`/`Cancel`），`sqlite.DeviceAuthRepos` 读走读池、写走 `Writer.Submit` 且全部 CAS。网络调用一律在写事务之外，状态机不 sleep / 不起 ticker（节奏交 P0-19），令牌只在进程内交 P0-17、绝不落库。archtest 三条守卫（禁阻塞式时间调用、四态枚举与 DDL CHECK 一致、状态表无 token 列）均含负向注入。51 个新增测试，全量 build/vet/test 通过，从零启动实测日志出现「设备码状态机就绪 store=device_auth_states」。**下一步 P0-17 账号创建与登录事务**（按 §4.3 顺序判定、`provider_uid` 取 GitHub 数字 id、只接受 primary+verified 邮箱、用户名冲突加数字后缀重试），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。
+18. **P0-16 Device Flow 状态机已完成**（ADR-022）：`device_auth_states` 表已在 `0001_init.sql`，**无新迁移**；`application/auth` 四态枚举 + `CanTransition` 迁移表（4×4 穷举只 3 条合法）+ `EvaluatePoll` 三态门禁，`DeviceAuthStore` UoW 端口与 `DeviceFlowService`（`Start`/`Poll`/`Cancel`），`sqlite.DeviceAuthRepos` 读走读池、写走 `Writer.Submit` 且全部 CAS。网络调用一律在写事务之外，状态机不 sleep / 不起 ticker（节奏交 P0-19），令牌只在进程内交 P0-17、绝不落库。archtest 三条守卫（禁阻塞式时间调用、四态枚举与 DDL CHECK 一致、状态表无 token 列）均含负向注入。51 个新增测试，全量 build/vet/test 通过，从零启动实测日志出现「设备码状态机就绪 store=device_auth_states」。
+19. **P0-17 账号创建与登录事务已完成**（ADR-023）：`users` / `identities` 已在 `0001_init.sql`，**无新迁移**；`application/auth` 的值对象与纯函数（`NewIdentityProfile` / `SelectPrimaryVerifiedEmail` / `DeriveUsername` / `AllocateUsername`）+ `LoginStore` UoW 端口 + `LoginService.Login`，`sqlite.LoginRepos` 在同一写事务内完成 §4.3 三步判定与两表原子创建。`GetUser` / `GetEmails` 在写事务之外；唯一约束冲突映射为哨兵后整体重试（最多 3 次），身份冲突重试即转为登录。**R16 消解**：邮箱命中只返回固定 `Notice`，不合并、不复用、不阻断，同邮箱不同 UID 建成两个账号（并加 AST 守卫强制 `FindAccountByEmail` 返回值被丢弃）。用户名派生保留中文可读性（两字中文补下划线）、冲突加数字后缀、仓储二次过 `ValidateUsername`。令牌绝不落库（六条 archtest 守卫含负向注入 + 端到端扫全表文本列）。63 个新增测试（含 10 goroutine 并发只建 1 个号），全量 build/vet/test 通过，从零启动实测日志出现「账号登录事务就绪 store=users+identities provider=github」。**下一步 P0-18 公钥绑定**（`/keys`、`/key add`、`/key rm <fingerprint>`，只绑定认证阶段服务端已持有的公钥指纹），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。

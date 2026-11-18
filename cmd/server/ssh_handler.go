@@ -22,14 +22,23 @@ import (
 type inputHandler struct {
 	reg *command.Registry
 
-	// deviceFlow 由 P0-15 装配，deviceAuth 由 P0-16 装配；两者都供 P0-19 的
-	// /login 会话循环消费。端口类型在 application/auth，cmd 不碰 HTTP / SQL 细节。
+	// deviceFlow 由 P0-15 装配，deviceAuth 由 P0-16 装配，login 由 P0-17 装配；
+	// 三者都供 P0-19 的 /login 会话循环消费。端口类型在 application/auth，
+	// cmd 不碰 HTTP / SQL 细节。
 	deviceFlow auth.DeviceFlowClient
 	deviceAuth *auth.DeviceFlowService
+	login      *auth.LoginService
 }
 
 func newInputHandler() *inputHandler {
 	return &inputHandler{reg: command.Default()}
+}
+
+// withLogin 注入 P0-17 登录事务。P0-19 拿到状态机的 PollResult.Token 后调用
+// LoginService.Login，再用返回的 UserID 升级会话；P0 本项只装配不接线。
+func (h *inputHandler) withLogin(svc *auth.LoginService) *inputHandler {
+	h.login = svc
+	return h
 }
 
 // withDeviceFlow 注入 GitHub Device Flow 客户端，保持 newInputHandler() 的无参
