@@ -18,6 +18,9 @@ const (
 	DefaultPollInterval = 5
 	// SlowDownStep 是 slow_down 时在上次 interval 基础上累加的秒数（官方明确 5 秒）。
 	SlowDownStep = 5
+	// DefaultExpiresIn 是 GitHub 未返回 expires_in 时的兜底秒数（官方默认 900s）。
+	// P0-16 用它计算 device_auth_states.expires_at；设备码绝不允许"永不过期"。
+	DefaultExpiresIn = 900
 )
 
 // ErrClientIDMissing 表示未配置 MOTD_GITHUB_CLIENT_ID。

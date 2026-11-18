@@ -89,6 +89,14 @@ motdctl restore <backup-file> --target <path>
 - 出站要求：VPS 需允许访问 `github.com:443`（Device Flow 两端点）与 `api.github.com:443`（`/user`、`/user/emails`）。本机 `httptest` 测试不需要外网。
 - 真实联调（D2 手工验收）与 P0-28 部署自检前必须就位。
 
+### Device Flow 状态表（P0-16）
+
+- `device_auth_states` 在 `0001_init.sql` 已建好，**部署时无需额外迁移**；启动日志 `migrations_applied=[1 2 3]` 即表示就绪，另有 `设备码状态机就绪 store=device_auth_states`。
+- 该表**只存设备码中间态，绝不存令牌**：`access_token` 只在服务端进程内交 P0-17 查 `/user` 后立即丢弃（Q3 / ADR-022）。备份文件里也不会出现令牌。
+- 状态四态 `pending / authorized / denied / expired`；终态不可变，过期码不再轮询。轮询间隔 `polling_interval` 会随 GitHub `slow_down` 持久化放大，启动后按新会话重新从 5s 起算。
+- 表会**保留所有历史行**（含过期与终态），只增不删；`idx_device_auth_states_expiry` 已存在。P0 数据量极小，无需运维干预；P1 可加定期清理 job（清理条件 `status <> 'pending' AND expires_at < now - 保留窗口`，且须避开在途登录）。**不要手工 DELETE 表内行**——正在轮询的会话会因 `ErrDeviceAuthNotFound` 中断。
+- 排查登录卡住时优先看三点：`MOTD_GITHUB_CLIENT_ID` 是否注入、VPS 出站 `github.com:443` / `api.github.com:443` 是否放行、状态行是否停在 `pending` 但 `expires_at` 已过（下轮门禁会自动迁 `expired` 并提示重新发起）。
+
 ## 4. 恢复流程
 
 1. **停服**：`systemctl stop motd`。

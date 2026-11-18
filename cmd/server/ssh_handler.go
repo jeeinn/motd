@@ -22,9 +22,10 @@ import (
 type inputHandler struct {
 	reg *command.Registry
 
-	// deviceFlow 由 P0-15 装配，P0-16 状态机 / P0-19 的 /login 消费。
-	// 端口类型是 application/auth.DeviceFlowClient，cmd 不碰 HTTP 细节。
+	// deviceFlow 由 P0-15 装配，deviceAuth 由 P0-16 装配；两者都供 P0-19 的
+	// /login 会话循环消费。端口类型在 application/auth，cmd 不碰 HTTP / SQL 细节。
 	deviceFlow auth.DeviceFlowClient
+	deviceAuth *auth.DeviceFlowService
 }
 
 func newInputHandler() *inputHandler {
@@ -35,6 +36,14 @@ func newInputHandler() *inputHandler {
 // 签名不变（现有会话层测试零改动）。P0-16 之后由页面控制器直接读取该字段。
 func (h *inputHandler) withDeviceFlow(df auth.DeviceFlowClient) *inputHandler {
 	h.deviceFlow = df
+	return h
+}
+
+// withDeviceAuth 注入 P0-16 状态机。同样保持无参构造，会话层测试零改动。
+// deviceAuth 的生命周期由进程持有（内部不 sleep、不起 goroutine），
+// 轮询节奏在 P0-19 由 SSH 会话循环按 PollResult.NextInterval 驱动。
+func (h *inputHandler) withDeviceAuth(svc *auth.DeviceFlowService) *inputHandler {
+	h.deviceAuth = svc
 	return h
 }
 

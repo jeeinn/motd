@@ -1,8 +1,9 @@
 // Command server 是 motd 的单进程入口：Go 单体 + SQLite + SSH TUI。
 //
 // 当前阶段：第四波 M2 认证。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
-// 写入队列、论坛用例与插件事件链装配、身份解析、GitHub Device Flow 客户端与 SSH 入口，
-// 并提供运维探针 /healthz。状态机、登录交互与终端页面按 docs/P0-PLAN.md 逐项接入。
+// 写入队列、论坛用例与插件事件链装配、身份解析、GitHub Device Flow 客户端、
+// 设备码状态机与 SSH 入口，并提供运维探针 /healthz。
+// 登录交互、公钥绑定与终端页面按 docs/P0-PLAN.md 逐项接入。
 package main
 
 import (
@@ -118,6 +119,12 @@ func run() error {
 		"client_id_configured", cfg.GitHubClientID != "",
 		"scope", auth.DeviceScope)
 
+	// Device Flow 状态机（P0-16）：状态持久化在 device_auth_states（0001_init.sql
+	// 已建表，无新迁移），读走读池、写走写入队列。状态机不 sleep、不起 ticker，
+	// 轮询节奏由 P0-19 的 SSH 会话循环持有；此处只装配，/login 交互在 P0-19 接入。
+	deviceAuth := newDeviceFlowService(pools, writer, deviceFlow)
+	logger.Info("设备码状态机就绪", "store", "device_auth_states", "modes", "pending|authorized|denied|expired")
+
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:        cfg.SSHAddr,
 		DataDir:     cfg.DataDir,
@@ -125,7 +132,7 @@ func run() error {
 		IdleTimeout: cfg.SSHIdleTimeout,
 		Resolver:    resolver,
 		Presence:    rt.Presence,
-		Handler:     newInputHandler().withDeviceFlow(deviceFlow),
+		Handler:     newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth),
 		Logger:      logger,
 	})
 	if err != nil {

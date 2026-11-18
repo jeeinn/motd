@@ -1,9 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 / P0-15 已完成
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 / P0-15 / P0-16 已完成
 > 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.4（插件权限）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
 > 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
-> 更新：2026-11-18 14:12
+> 更新：2026-11-18 14:38
 
 ---
 
@@ -194,11 +194,19 @@
   4. 安全边界：请求 10s 硬超时、响应体限 1 MiB、错误消息不带响应体 / token / client_id；缺 `client_id` 时两个 POST 返回 `auth.ErrClientIDMissing` 且不发请求，启动不 panic；archtest 静态守卫禁止本包引入 `client_secret`（负向注入实测）。
   5. 28 个新增测试函数；从零启动实测 `client_id_configured=false|true` 两分支均正常，日志不回显凭据值。本项**不建表、不写库、不 sleep**，状态机与 `device_auth_states` 属 P0-16。
 
-**P0-16 Device Flow 状态机**
+**P0-16 Device Flow 状态机** ✅
 - 产出：`device_auth_states` 的读写与状态迁移用例（`pending → authorized|denied|expired`）
 - 规则：状态跨请求存活因此必须持久化，不复用 `oauth_states`；`session_ref` 关联发起登录的 SSH 会话；同会话重复发起以最后一次为准并作废旧码
 - 验收：状态迁移非法路径被拒绝；过期码不再轮询
 - 依赖：P0-08、P0-15 ｜ 量级：1
+- **执行补充（2026-11-18）**：ADR-022。
+  1. **表已在 `0001_init.sql`，本项无新迁移**（`migrations_applied` 仍为 `[1 2 3]`）：四态 CHECK、`device_code` UNIQUE、`polling_interval`、`expires_at` + 过期索引齐全。只补 `application/auth` 纯领域（枚举 / `CanTransition` / `EvaluatePoll`）、`DeviceAuthStore` UoW 端口、`DeviceFlowService`（`Start`/`Poll`/`Cancel`）与 `sqlite.DeviceAuthRepos`。
+  2. **合法迁移 3 条**，4×4 矩阵穷举拒绝终态出发 / `pending→pending` / 未知值；`slow_down` 改间隔走独立 `UpdateInterval`，不算迁移。同会话重复发起在**同一事务**内批量作废旧 pending（`→ expired`）再插新码，任一步失败整体回滚。
+  3. **过期码不再轮询**由纯门禁 `EvaluatePoll` 落实：仅 `pending && now < expires_at` 可轮询；终态不轮询且不写库，过期先 CAS 迁 `expired` 再返回，两种路径都**不发网络请求**。`now == expires_at` 视为过期。
+  4. **网络不占写事务**（§2.6）：顺序固定「只读查状态（读池）→ 门禁 → 网络 → CAS 写回」；`UPDATE ... WHERE id=? AND status=?` 的 `RowsAffected==0` 区分 `ErrDeviceAuthNotFound` / `ErrStateConflict`，**取消优先**，迟到的成功令牌不覆盖 `denied`。非 `*PollError` 的网络错误不改状态、交上层重试。
+  5. **令牌绝不落库**：`DeviceAuthState` 结构上无 token 字段，`access_token` 只在 `PollResult.Token` 进程内交 P0-17；archtest 守卫禁止状态表出现 token 列。
+  6. **状态机不持有节奏**：不 sleep、不起 ticker，`NextInterval` 结果经 `PollResult.NextInterval` 交 P0-19 会话循环；`slow_down` 的新间隔持久化到 `polling_interval`。archtest 用 AST 禁 `time.Sleep`/`NewTicker`/`After` 等，并校验四态枚举与 DDL CHECK 逐字一致（避免误命中 `users.status`）。
+  7. 51 个新增测试（领域 8 / 状态机 22 / 真实 SQLite 15 含 4 条端到端 / archtest 6 含负向注入）；全量 build/vet/test 与从零启动实测通过，日志出现「设备码状态机就绪」。本项只做状态机与持久化，`/login` 交互、账号事务、会话升级分别属 P0-17 / P0-19。
 
 **P0-17 账号创建与登录事务**
 - 产出：`application/auth.Login` —— 按 §4.3 顺序判定：`(provider, provider_uid)` 命中即登录；邮箱命中但身份未命中**不自动合并**，提示先登录原账号再 `/link`；都不命中则原子创建 `users` + `identities`
@@ -414,8 +422,9 @@ Q1 与 Q3 是结构性决策。若后续要改，M0 的依赖守卫与 M2 的认
 | R12 | 领域事件「可靠投递」的实现边界 | §2.4 要求领域事件可靠投递、可持久化 | P0 只做单进程内同步派发；进程崩溃会丢未处理事件，且无 outbox 表 | P0 范围内可靠（同步、失败可观测）；**P1 前置**：补 `domain_event_outbox` 表，与业务写入同事务落库后再投递（ADR-015） |
 | R13 | Device Flow 错误码完整清单 | R3 补完后 7 个 | 官方文档实为 **8 个**：多 `unsupported_grant_type`；且过期码表格写 `expired_token`、正文写 `token_expired` | 8 个全部显式分类，过期码双兼容；写进 P0-15 与 ADR-021 |
 | R14 | Device Flow 与 REST API 的 `Accept` 头 | 计划统一 `Accept: application/json` | Device Flow 两端点默认 form-urlencoded，须显式要 `application/json`；`/user`、`/user/emails` 官方推荐 `application/vnd.github+json` | 按端点分两套，混用会把表单文本当成成功响应；负向测试锁死，写进 P0-15 |
+| R15 | Device Flow 状态机的迁移表与轮询门禁 | 计划只写「`pending → authorized\|denied\|expired`」与「过期码不再轮询」 | 「状态迁移」与「保持 pending 但更新间隔」是两类操作；「过期」既可能是 GitHub 的 `expired_token`，也可能是本地 `expires_at` 到点；且读状态与写回跨一次最长 10s 的网络调用，存在迟到覆盖终态的竞态 | 合法迁移严格限定 3 条（4×4 穷举拒绝其余）；`slow_down` 走独立 `UpdateInterval`；门禁三态 `GateReady/GateTerminal/GateExpired`，过期路径不发网络；所有写回用 CAS（`WHERE status=?`），取消优先。写进 P0-16 与 ADR-022 |
 
-R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界，R13 / R14 是 P0-15 对照 GitHub 官方文档新发现的两处偏差（错误码清单与 `Accept` 头）。其余为计划内调整。
+R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界，R13 / R14 是 P0-15 对照 GitHub 官方文档新发现的两处偏差（错误码清单与 `Accept` 头），R15 是 P0-16 把计划中一句话验收拆成可执行状态机时补齐的语义边界。其余为计划内调整。
 
 ---
 
@@ -438,3 +447,4 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 15. **下一步：第四波 M2 认证**，按 `P0-14 → 15 → 16 → 17 → 18 → 19 → 20` 推进，每项严格「实现 → 全量回归通过 → 单独提交 → 下一步」。
 16. **P0-14 公钥身份解析已完成**（ADR-020）：`application/auth.KeyLookup` 端口 + `auth.NewResolver` 三状态 + `sqlite.SSHKeyLookup` 只读查 `ssh_keys`；查库失败一律拒绝认证不降级访客、archtest 禁止业务层解析客户端公钥文本、`forum.ActorFromPrincipal` 落实访客只读；`cmd/server` 移除 `guestResolver` 占位。从零启动实测日志出现「身份解析就绪 mode=ssh_keys」，host key 指纹与格式契约一致；`ssh_keys` 表已在 `0001_init.sql`，本项无新迁移。**P0-15 已完成**（见下条）。
 17. **P0-15 GitHub Device Flow 客户端已完成**（ADR-021）：`application/auth.DeviceFlowClient` 端口 + 4 个值对象 + `ClassifyDeviceError` / `NextInterval` 纯函数；`infrastructure/github` 用标准库实现 4 个端点（端点可注入、`httptest` 假端点）、**8 个错误码**显式分类、`slow_down` 取响应新 `interval` 否则 +5 秒、两套 `Accept` 头、请求 10s 硬超时与 1 MiB 响应限长；`config` 读取 `MOTD_GITHUB_CLIENT_ID`，缺值时两个 POST 返回 `auth.ErrClientIDMissing` 且不发请求、启动不 panic；archtest 两条静态守卫（认证层禁 import HTTP/JSON、本包禁出现 `client_secret`）均含负向注入。**零新增第三方依赖**，本项不建表、不写库、不 sleep。全量回归 30 个包通过，从零启动实测 `client_id_configured=false|true` 两分支正常、日志不回显凭据值。**下一步 P0-16 Device Flow 状态机**（`device_auth_states` 持久化与 `pending → authorized|denied|expired` 迁移），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。
+18. **P0-16 Device Flow 状态机已完成**（ADR-022）：`device_auth_states` 表已在 `0001_init.sql`，**无新迁移**；`application/auth` 四态枚举 + `CanTransition` 迁移表（4×4 穷举只 3 条合法）+ `EvaluatePoll` 三态门禁，`DeviceAuthStore` UoW 端口与 `DeviceFlowService`（`Start`/`Poll`/`Cancel`），`sqlite.DeviceAuthRepos` 读走读池、写走 `Writer.Submit` 且全部 CAS。网络调用一律在写事务之外，状态机不 sleep / 不起 ticker（节奏交 P0-19），令牌只在进程内交 P0-17、绝不落库。archtest 三条守卫（禁阻塞式时间调用、四态枚举与 DDL CHECK 一致、状态表无 token 列）均含负向注入。51 个新增测试，全量 build/vet/test 通过，从零启动实测日志出现「设备码状态机就绪 store=device_auth_states」。**下一步 P0-17 账号创建与登录事务**（按 §4.3 顺序判定、`provider_uid` 取 GitHub 数字 id、只接受 primary+verified 邮箱、用户名冲突加数字后缀重试），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。

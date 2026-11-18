@@ -282,3 +282,27 @@
   1. 首轮 `go vet` 报 `device_test.go` 把 `auth.DeviceCode` 误写成本包 `DeviceCode`，改为包限定后通过。
   2. 首轮全量回归 `TestClassifyDeviceErrorUnknownIsSanitized` 误报：`strings.Contains(msg, "\x9b")` 是**字节级**匹配，会命中中文「回」的 UTF-8 次字节 `0x9B`。改为 `strings.ContainsRune`（按 rune 比较）——与 P0-23 里 C1 CSI 与 UTF-8 continuation byte 混淆是同一类陷阱，只是这次踩在测试自身而非实现上。净化逻辑本身正确，无需改动。
 - 验证：新增 28 个测试函数（`application/auth` 7：9 个错误码 / 未知码净化 / `safeCode` / interval 回落 / token 有效性 / `NextInterval` 10 组 / 序列不缩小；`infrastructure/github` 16：两个端点的请求形状与请求体精确断言、9 个错误码、第一步错误、非 2xx 不泄漏、`/user` 与 `/user/emails` 头与字段、缺 token / 缺 client_id、响应体限长、非 JSON 拒绝、context 取消、端点默认值、`flexInt` 5 组、轮询序列；`internal/archtest` 4：两条静态守卫 + 各自负向注入；`internal/config` 1：`MOTD_GITHUB_CLIENT_ID` 读取与去空白）。全量 `go build` / `go vet` / `go test ./...` 通过（30 个包）；从零启动实测两种分支均出现 `GitHub Device Flow 客户端就绪 client_id_configured=false|true scope="read:user user:email"`，无 panic，日志不回显凭据值。
+
+## ADR-022 Device Flow 状态机：状态持久化、CAS 防迟到覆盖、网络不占写事务、节奏交给终端
+
+- 状态：已实现（P0-16，2026-11-18），第四波 M2 第三项
+- 结论：
+  - **表已存在，无新迁移**：`device_auth_states` 在 `0001_init.sql` 已建好（`device_code` UNIQUE、`status` CHECK 四态、`session_ref`、`polling_interval`、`expires_at` + 过期索引）。与 P0-14 的 `ssh_keys` 同理，P0-16 只补读写与用例，`migrations_applied` 仍为 `[1 2 3]`。设计稿 §4.4.1 要求「不复用 `oauth_states`」，独立表天然满足。
+  - **三层分离**：`application/auth/state.go` 放四态枚举、`CanTransition` 迁移表、`EvaluatePoll` 轮询门禁（纯函数）；`state_port.go` 定义 `DeviceAuthStore = Reader + UnitOfWork`（与 forum.Repos 同构，application 不碰 SQL）；`state_machine.go` 的 `DeviceFlowService` 编排 `Start` / `Poll` / `Cancel`。实现落 `infrastructure/sqlite.DeviceAuthRepos`，cmd 装配（`device_wiring.go`）。
+  - **合法迁移只有 3 条**：`pending → authorized | denied | expired`。终态出发、`pending → pending`、未知状态一律 `ErrInvalidTransition`（4×4 矩阵穷举测试）。`slow_down` 改间隔不算状态迁移，走独立的 `UpdateInterval`。
+  - **同会话重复发起以最后一次为准**：`Start` 在**同一事务**内先 `SupersedeSessionPending` 把该 `session_ref` 下所有 pending 批量迁为 `expired`，再插入新 pending；任何一步失败整体回滚，不留「旧的已作废、新的没写进」的中间态（真实 SQLite + UNIQUE 冲突实测）。
+  - **过期码不再轮询**：`EvaluatePoll` 是纯门禁，只有 `pending && now < expires_at` 才 `GateReady`；`GateTerminal`（终态）直接返回且**不写库**，`GateExpired` 先 CAS 迁 `expired` 再返回，两种路径**都不发网络请求**。`now == expires_at` 视为过期，不留边界窗口。
+  - **网络调用一律在写事务之外**（§2.6 / ADR-010）：`RequestDeviceCode` / `PollAccessToken` 单次最长 10s，绝不能占唯一写连接。顺序固定为「只读查状态（读池）→ 门禁 → 网络 → CAS 写回」。fake client 在测试里记录网络调用时是否正处于写事务中，检出即失败。
+  - **CAS 防迟到覆盖**：因为「读状态」与「写回」跨了一次网络调用，期间用户可能按 Esc 取消或重复发起。`Transition` / `UpdateInterval` 的 `UPDATE ... WHERE id = ? AND status = ?` 用 `RowsAffected == 0` 判冲突，再复查区分 `ErrDeviceAuthNotFound` 与 `ErrStateConflict`。**取消优先**：迟到的成功令牌被 CAS 拒绝后立即作废，绝不把 `denied` 覆盖回 `authorized`（内存 fake 与真实 SQLite 双重实测）。
+  - **令牌绝不落库**：`DeviceAuthState` / `NewDeviceAuthState` 结构上没有 token 字段，`access_token` 只在 `PollResult.Token` 里进程内交给 P0-17。archtest 守卫扫描 `0001_init.sql` 的 `device_auth_states` 段落，禁止出现任何 token 列（负向注入实测）；端到端测试直接查 DB 全部文本列确认不含令牌值。
+  - **状态机不持有节奏**：不 `time.Sleep`、不起 ticker / timer。轮询间隔以 `PollResult.NextInterval` 交给 P0-19 的 SSH 会话循环；`slow_down` 的 `NextInterval` 结果持久化到 `polling_interval`（跨请求存活，P0-15 的纯函数复用）。archtest 用 AST 扫描 `application/auth` 非测试源码，禁止 `time.Sleep` / `NewTicker` / `NewTimer` / `Tick` / `After` / `AfterFunc`（负向注入实测）。理由：状态机必须能在无真实等待下穷举回归，且不能拖住 SSH 会话 goroutine。
+  - **四态枚举与 DDL 不漂移**：archtest 解析 `0001_init.sql` 里 `device_auth_states` 段落的 `CHECK (status IN (...))`，与 `state.go` 的四个 `StatusXxx` 常量逐字比对。刻意只取该表段落，避免误命中 `users.status` 的 CHECK（`active/pending/deleting/deleted`）。
+  - **失败关闭细节**：空 `session_ref` 会被去空白后拒绝（否则批量作废会误伤所有空 ref 记录）；空 / 不完整的设备码响应、空令牌都返回明确哨兵；非 `*PollError` 的网络错误（5xx / 超时）**不改状态**、原样返回让上层重试，绝不把一次网络抖动误判成用户拒绝；`expires_in <= 0` 回落 `DefaultExpiresIn=900`、`interval <= 0` 回落 `DefaultPollInterval=5`。`Cancel` 对终态幂等，重复按 Esc 不报错也不再写库。
+- 理由：状态跨请求存活是 §4.4.1 的硬要求，必须落库；但轮询是长耗时外部调用，若把网络塞进写事务会直接违反 §2.6 的单写连接模型。用「事务外读 + 网络 + 事务内 CAS」既满足两者，又顺带解决了迟到结果与取消/重复发起的竞态。节奏归终端而非状态机，是为了让 P0-19 能在 `Esc` 时立即取消，而不是等一个 sleep 醒来。
+- 已知边界：
+  1. P0-16 只做状态机与持久化，`/login` 终端呈现、轮询循环、会话升级属 P0-19；账号创建/登录事务属 P0-17。状态机已装配到 `inputHandler.deviceAuth`，但尚未接线到命令分发。
+  2. `GetUser` / `GetEmails` 在 P0-16 不调用（stub 直接报错），令牌交 P0-17 使用；P0 不持久化令牌、不实现 refresh。
+  3. 没有定时清理过期 `device_auth_states` 行的任务；`idx_device_auth_states_expiry` 已存在，P1 可加清理 job。P0 数据量小，过期行只影响表大小不影响正确性（门禁保证不再轮询）。
+  4. 「同会话重复发起」按 `session_ref` 字符串匹配，P0 由 SSH 会话 ID 提供；多实例部署时该语义仍在单库内成立，无需分布式锁。
+- 实测发现并修复的真实缺陷：首轮 `go build` 报 `PollTerminal redeclared` —— P0-15 的 `PollStatus`（GitHub 错误码分类）已占用 `PollTerminal`。门禁枚举改用 `GateReady` / `GateTerminal` / `GateExpired` 前缀，语义上把「错误码分类」与「轮询门禁」彻底分开，避免后续读代码时混淆两个不同的决策域。
+- 验证：新增 **51 个测试函数**（`application/auth` 领域层 8：枚举合法性 / 4×4 迁移矩阵穷举 / 门禁 7 组 / 门禁全集闭合 / 间隔回落 / 会话标识 / 终态提示 / Outcome 字符串；状态机 22：Start 落库与字段、网络不在写事务、重复发起作废、空会话 / 网络失败 / 响应不完整 / expires 回落 / 事务回滚；Poll 过期不轮询、终态不轮询不写库、pending 继续、slow_down 持久化与序列不缩小、成功 authorized 且令牌不落库、空令牌、8 个终态错误码（子测试）、传输错误不改状态、CAS 拒绝迟到结果、空码 / 不存在；Cancel 迁移 / 幂等 / 不存在；nil 依赖 panic）。`infrastructure/sqlite` 15：往返读写、空 session_ref 落 NULL、DDL 拒绝脏状态、UNIQUE、批量作废只命中同会话 pending、作废目标非法、CAS 成功/冲突/缺行/非法路径、间隔 CAS、事务回滚，以及 4 条端到端（真实 SQLite + 真实 Writer + stub client：完整轮询序列、过期码不轮询、重复码事务回滚、迟到结果不能覆盖取消）。`internal/archtest` 6：状态机不阻塞时间 / 枚举与 DDL 一致 / 状态表无 token 列 + 各自负向注入。全量 `go build` / `go vet` / `go test ./...` 通过（30 个包）；从零启动实测出现 `设备码状态机就绪 store=device_auth_states modes=pending|authorized|denied|expired`、`migrations_applied=[1 2 3]`（无新迁移），无 panic。
