@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
@@ -28,6 +29,9 @@ type inputHandler struct {
 	deviceFlow auth.DeviceFlowClient
 	deviceAuth *auth.DeviceFlowService
 	login      *auth.LoginService
+	// keys 由 P0-18 装配。构造顺序上它依赖 SSH Server（会话撤销实现），
+	// 而 Server 又持有本 handler，因此用 setter 后填，避免装配循环。
+	keys *auth.KeyBindingService
 }
 
 func newInputHandler() *inputHandler {
@@ -53,6 +57,12 @@ func (h *inputHandler) withDeviceFlow(df auth.DeviceFlowClient) *inputHandler {
 // 轮询节奏在 P0-19 由 SSH 会话循环按 PollResult.NextInterval 驱动。
 func (h *inputHandler) withDeviceAuth(svc *auth.DeviceFlowService) *inputHandler {
 	h.deviceAuth = svc
+	return h
+}
+
+// withKeyBinding 注入 P0-18 公钥绑定用例。同样保持无参构造，会话层测试零改动。
+func (h *inputHandler) withKeyBinding(svc *auth.KeyBindingService) *inputHandler {
+	h.keys = svc
 	return h
 }
 
@@ -113,12 +123,12 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			if !ok {
 				return nil
 			}
-			if h.handle(sess, m, &cl) {
+			if h.handle(ctx, sess, m, &cl) {
 				return nil
 			}
 		case <-ticker.C:
 			for _, m := range dec.Poll() {
-				if h.handle(sess, m, &cl) {
+				if h.handle(ctx, sess, m, &cl) {
 					return nil
 				}
 			}
@@ -130,7 +140,7 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	}
 }
 
-func (h *inputHandler) handle(sess *sshd.Session, m input.KeyMsg, cl *commandLine) bool {
+func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, m input.KeyMsg, cl *commandLine) bool {
 	action, line, pasteLen := applyKey(cl, m)
 	switch action {
 	case actionQuit:
@@ -147,10 +157,129 @@ func (h *inputHandler) handle(sess *sshd.Session, m input.KeyMsg, cl *commandLin
 		_, _ = io.WriteString(sess, "（取消）\r\n")
 	case actionSubmit:
 		inv, err := h.reg.Parse(line)
-		_, _ = io.WriteString(sess, formatResult(h.reg, inv, err))
+		out := formatResult(h.reg, inv, err)
+		if err == nil {
+			// P0-18：/keys 与 /key 走真实业务动作；其余仍由 P0-24 页面控制器接入。
+			// 解析失败时只输出固定文案，绝不把 inv.Args 原文写回终端。
+			switch inv.Name {
+			case "keys":
+				out = h.runKeys(ctx, sess)
+			case "key":
+				out = h.runKey(ctx, sess, inv)
+			}
+		}
+		_, _ = io.WriteString(sess, out)
 		return inv.Name == "quit" && err == nil
 	}
 	return false
+}
+
+// runKeys 列出当前账号未吊销的公钥。指纹来自 ssh_keys 表（服务端数据源），
+// 且逐条再过一次 ValidFingerprint 白名单，脏数据也不会把控制字符写进终端。
+func (h *inputHandler) runKeys(ctx context.Context, sess *sshd.Session) string {
+	if h.keys == nil {
+		return "公钥管理尚未就绪\r\n"
+	}
+	p := sess.Principal()
+	if !p.IsUser() {
+		return "请先 /login github 登录后管理公钥\r\n"
+	}
+	list, err := h.keys.List(ctx, p.UserID)
+	if err != nil {
+		return "读取公钥列表失败\r\n"
+	}
+	if len(list) == 0 {
+		return "当前账号未绑定公钥\r\n"
+	}
+	var b strings.Builder
+	b.WriteString("已绑定公钥：\r\n")
+	for _, k := range list {
+		if !auth.ValidFingerprint(k.Fingerprint) {
+			continue
+		}
+		_, _ = fmt.Fprintf(&b, "  %s\r\n", k.Fingerprint)
+	}
+	return b.String()
+}
+
+// runKey 分发 /key add 与 /key rm <fingerprint>。
+//
+// 安全边界（§4.6 / P0-18 验收）：
+//   - 子命令由 auth.ParseKeyCommand 严格收口，add 恰好 1 个参数，
+//     伪造的公钥字符串连用例入口都进不去；
+//   - BindRequest 的 Fingerprint / PublicKey **只从 Session 读取**
+//     （服务端认证阶段产物），绝不来自 inv.Args；
+//   - 输出全是服务端固定文案，不回显指纹 / 公钥 / 错误信息原文。
+func (h *inputHandler) runKey(ctx context.Context, sess *sshd.Session, inv command.Invocation) string {
+	if h.keys == nil {
+		return "公钥管理尚未就绪\r\n"
+	}
+	cmd, err := auth.ParseKeyCommand(inv.Args)
+	if err != nil {
+		return "用法：/key add 或 /key rm <fingerprint>（不接受公钥文本参数）\r\n"
+	}
+	p := sess.Principal()
+	if !p.IsUser() {
+		return "请先 /login github 登录后管理公钥\r\n"
+	}
+
+	switch cmd.Kind {
+	case auth.KeySubAdd:
+		res, err := h.keys.Bind(ctx, auth.BindRequest{
+			UserID:      p.UserID,
+			Fingerprint: sess.Fingerprint(),
+			PublicKey:   sess.PublicKey(),
+		})
+		return bindResultText(res, err)
+	case auth.KeySubRemove:
+		res, err := h.keys.Unbind(ctx, auth.UnbindRequest{
+			UserID:      p.UserID,
+			Fingerprint: cmd.Fingerprint,
+		})
+		return unbindResultText(res, err)
+	default:
+		return "用法：/key add 或 /key rm <fingerprint>\r\n"
+	}
+}
+
+// bindResultText / unbindResultText 把结果映射成**固定文案**。
+// 刻意不用 err.Error()：错误信息可能带外部数据，一旦写回终端就是渲染旁路
+// （P0-22 / P0-23 的零回显与分层渲染约束提前落地）。
+func bindResultText(res auth.BindResult, err error) string {
+	switch {
+	case err == nil && res.Created:
+		return "已绑定当前连接的公钥\r\n"
+	case err == nil:
+		return "当前连接的公钥已绑定，无需重复操作\r\n"
+	case errors.Is(err, auth.ErrBindingRequiresLogin):
+		return "请先登录后再绑定公钥\r\n"
+	case errors.Is(err, auth.ErrKeyBoundToOtherUser):
+		return "该公钥已属于其他账号，无法绑定\r\n"
+	case errors.Is(err, auth.ErrKeyRevokedBinding):
+		return "该公钥已吊销，无法重新绑定\r\n"
+	case errors.Is(err, auth.ErrInvalidPublicKey), errors.Is(err, auth.ErrInvalidFingerprint),
+		errors.Is(err, auth.ErrEmptyFingerprint):
+		return "当前连接的公钥信息不合法，无法绑定\r\n"
+	default:
+		return "绑定公钥失败，请稍后重试\r\n"
+	}
+}
+
+func unbindResultText(res auth.UnbindResult, err error) string {
+	switch {
+	case err == nil && res.Revoked:
+		return fmt.Sprintf("已解绑公钥，撤销在线会话 %d 个\r\n", res.SessionsClosed)
+	case err == nil:
+		return fmt.Sprintf("该公钥此前已解绑（撤销在线会话 %d 个）\r\n", res.SessionsClosed)
+	case errors.Is(err, auth.ErrBindingRequiresLogin):
+		return "请先登录后再解绑公钥\r\n"
+	case errors.Is(err, auth.ErrKeyNotFound):
+		return "未找到该公钥绑定\r\n"
+	case errors.Is(err, auth.ErrKeyBoundToOtherUser):
+		return "无法解绑其他账号的公钥\r\n"
+	default:
+		return "解绑公钥失败，请稍后重试\r\n"
+	}
 }
 
 // applyKey 是纯状态机，不碰 IO，便于在没有 SSH 会话的情况下回归。

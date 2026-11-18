@@ -1,9 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 / P0-15 / P0-16 / P0-17 已完成
-> 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.4（插件权限）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 / P0-15 / P0-16 / P0-17 / P0-18 已完成
+> 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.4（插件权限）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）、§4.6（公钥绑定）
 > 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
-> 更新：2026-11-18 15:35
+> 更新：2026-11-18 16:25
 
 ---
 
@@ -223,12 +223,21 @@
   6. **令牌绝不落库**：登录相关结构体无 token 字段，`access_token` 只在 `Login` 参数与两次 GET 之间进程内流转；archtest 六条守卫（两表无 token 列、`primary_email` 无 UNIQUE、`identities` 有 `UNIQUE(provider,provider_uid)`、结构体无 token 字段、`FindAccountByEmail` 返回值必须被丢弃、`provider_uid` 由 `FormatInt(ID,10)` 生成）全部含负向注入。
   7. 63 个新增测试（纯函数 19 / 用例 20 / 真实 SQLite 12 含 10 goroutine 并发 / archtest 12）；全量 build/vet/test 与从零启动实测通过，日志出现「账号登录事务就绪 store=users+identities」。**修复的真实缺陷**：两字中文 login 曾整名降级为 `gh<uid>`，改为补下划线保留原名。
 
-**P0-18 公钥绑定**
+**P0-18 公钥绑定** ✅
 - 产出：`/keys`、`/key add`、`/key rm <fingerprint>` 与绑定用例
 - 核心约束（§4.6）：绑定的是**认证阶段服务端已持有的 `ssh.PublicKey` 的指纹**，不接受客户端提交的公钥文本；未持有私钥证明的连接不得绑定
 - 规则：一钥只属一号；解绑只影响该钥；解绑后撤销相关会话；访客会话升级失败时保留访客态不落半成品
 - 验收：伪造提交"别人的公钥字符串"无法完成绑定
 - 依赖：P0-14、P0-17 ｜ 量级：1
+- **执行补充（2026-11-18，ADR-024）**：
+  1. **表已存在，无新迁移**：`ssh_keys` 在 `0001_init.sql` 已建好（`fingerprint` UNIQUE、`revoked_at` 可空、`public_key TEXT NOT NULL`），`migrations_applied` 仍为 `[1 2 3]`。只补用例、仓储、认证产物传递与命令分发，与 P0-14/16/17 同一模式。
+  2. **指纹与公钥文本的唯一来源**：`publicKeyCallback` 把 `gossh.FingerprintSHA256(key)` 与 `gossh.MarshalAuthorizedKey(key)` 一并放进 `Permissions.Extensions` → `Session.Fingerprint()` / `Session.PublicKey()`。客户端必须先持有私钥通过公钥挑战，服务端才拿到 `ssh.PublicKey`；这不是「客户端提交的公钥文本」。文本先过 `auth.ValidatePublicKeyText`（非空 / 单行 / 无控制字符 / ≤8192 字符）才落库，P0 不解析、不回显。
+  3. **伪造提交被两道门挡住**：命令表里 `/key` 的 `MaxArgs=2` 是粗筛；`auth.ParseKeyCommand` 进一步要求 `add` **恰好 1 个参数**、`rm` 恰好 2 个且第二个必须是 `ValidFingerprint` 格式的**指纹标识符**。因此 `/key add ssh-rsa AAAA...` 连用例入口都进不去。archtest 用 AST 钉死 `BindRequest.Fingerprint` / `.PublicKey` 只能取 `sess.Fingerprint()` / `sess.PublicKey()`（负向注入实测）。
+  4. **四态判定在同一写事务内**：未命中→插入；已吊销→`ErrKeyRevokedBinding`（吊销是安全动作，P0 不提供重新激活）；他人占用→`ErrKeyBoundToOtherUser`；本人占用→幂等零写入。`fingerprint UNIQUE` 被并发撞上→`ErrKeyConflict`→整体重试（≤3 次，首轮已回滚无半成品）。真实 SQLite 6 goroutine 不同账号同指纹实测恰好 1 个创建、其余全部拒绝。
+  5. **R17：解绑是软吊销，不是物理删除**（见 §7）：`UPDATE ... SET revoked_at=? WHERE fingerprint=? AND user_id=? AND revoked_at IS NULL`，行保留。`WHERE user_id` 钉住归属（不得解绑他人钥匙），`revoked_at IS NULL` 保证幂等。物理 DELETE 会让该指纹从 P0-14 的「命中已吊销→拒绝认证」退化成「未命中→访客放行」，等于把吊销反过来放宽权限；archtest 静态禁止 `DELETE FROM ssh_keys`，运行时回归确认解绑后 `SSHKeyLookup.Lookup` 返回 `Revoked=true`。
+  6. **解绑后撤销会话，且只在事务提交之后**：`SessionRevoker` 端口定义在 `application/auth`，实现落在 `transport/ssh.Server`（维护 `fingerprint → *Session` 索引，`RevokeSessions` 关闭所有同指纹 channel）。这是纯内存动作、不写库、不可回滚，因此绝不进写事务闭包；archtest 用 AST 校验 `RevokeSessions` 调用位置在 `Write` 之后。真实 SSH 端到端实测：2 个同指纹会话被撤销、第 3 个不同指纹会话不受影响。**用例刻意不持有 Session**：绑定失败时事务整体回滚、会话不改狀態，P0-19 的登录升级必须等 `Bind` 成功才把 guest 提升为 user。
+  7. **零回显**：`/keys` 只输出 DB 里读出且再次过 `ValidFingerprint` 白名单的指纹；`/key` 的成功 / 失败文案全是服务端固定文本（`bindResultText` / `unbindResultText`），不输出 `inv.Args`、指纹、公钥文本或 `err.Error()` 原文。`formatResult` 的既有零回显约束不变。archtest 守卫 `sess.PublicKey()` 在 handler 里只允许出现一次（且仅在 `BindRequest` 里）。
+  8. 58 个新增测试（纯函数 6 / 用例 22 / 真实 SQLite 9 含两组并发 / SSH 会话撤销 3 / 命令分发 6 / archtest 12 含 6 条负向注入）；全量 `go build` / `go vet` / `go test -count=1 ./...` 通过（30 个包，共 280 个测试函数），从零启动实测日志出现「公钥绑定就绪 store=ssh_keys revoker=ssh_sessions」、`migrations_applied=[1 2 3]`，无 panic。**本项不碰 `auth_events`（P0-20）、不开 HTTP 端点（Q3）**。
 
 **P0-19 登录交互与会话升级**
 - 产出：终端内的 Device Flow 呈现（`user_code` + `verification_uri` + 剩余时间 + 取消键）、轮询期间的界面状态、成功后会话从 `guest` 升级为 `user`
@@ -432,8 +441,9 @@ Q1 与 Q3 是结构性决策。若后续要改，M0 的依赖守卫与 M2 的认
 | R14 | Device Flow 与 REST API 的 `Accept` 头 | 计划统一 `Accept: application/json` | Device Flow 两端点默认 form-urlencoded，须显式要 `application/json`；`/user`、`/user/emails` 官方推荐 `application/vnd.github+json` | 按端点分两套，混用会把表单文本当成成功响应；负向测试锁死，写进 P0-15 |
 | R15 | Device Flow 状态机的迁移表与轮询门禁 | 计划只写「`pending → authorized\|denied\|expired`」与「过期码不再轮询」 | 「状态迁移」与「保持 pending 但更新间隔」是两类操作；「过期」既可能是 GitHub 的 `expired_token`，也可能是本地 `expires_at` 到点；且读状态与写回跨一次最长 10s 的网络调用，存在迟到覆盖终态的竞态 | 合法迁移严格限定 3 条（4×4 穷举拒绝其余）；`slow_down` 走独立 `UpdateInterval`；门禁三态 `GateReady/GateTerminal/GateExpired`，过期路径不发网络；所有写回用 CAS（`WHERE status=?`），取消优先。写进 P0-16 与 ADR-022 |
 | R16 | §4.3 步骤 2「邮箱命中不自动合并」与 P0-17 验收「邮箱相同 UID 不同建成两个账号」 | §4.3 写「不自动合并，提示先登录原账号再 `/link`」，验收写「必须建成两个账号」 | 两句字面相冲：若按「提示」理解成阻断，第二个 UID 就建不出账号，验收必失败。R7 已确认 `primary_email` 无唯一约束是「禁止按邮箱自动合并」的有意设计，因此唯一自洽解是「不阻断、不复用旧账号、仍建独立账号 + 返回 Notice」 | 三步判定：① UID 命中即登录；② 邮箱命中只生成固定文案 `Notice`，不合并、不复用、不阻断；③ 为新 UID 原子建号。写进 P0-17 与 ADR-023，并加 AST 守卫「`FindAccountByEmail` 返回值必须被丢弃」 |
+| R17 | 解绑的落库形态：物理删除还是软吊销 | 设计稿 §4.6 只写「解绑只影响该钥」「解绑后撤销相关会话」，未定义 `ssh_keys` 行是删是留 | P0-14 的三状态依赖 `ssh_keys.revoked_at`：若 `DELETE` 行，该指纹会从「命中已吊销 → 拒绝认证」退化成「未命中 → 访客放行」，等于把吊销动作反过来**放宽**权限。因此解绑 = `UPDATE ... SET revoked_at`，行永久保留 | `KeyBindingWriteTx.Revoke` 用 `SET revoked_at` 且 `WHERE user_id=?`（不得解绑他人钥匙）；archtest 静态禁止 `DELETE FROM ssh_keys`；运行时回归确认解绑后 `SSHKeyLookup.Lookup` 返回 `Revoked=true`、`COUNT(*)` 仍为 1。写进 P0-18 与 ADR-024 |
 
-R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界，R13 / R14 是 P0-15 对照 GitHub 官方文档新发现的两处偏差（错误码清单与 `Accept` 头），R15 是 P0-16 把计划中一句话验收拆成可执行状态机时补齐的语义边界，R16 是 P0-17 把 §4.3 与验收对齐时消解的口径冲突。其余为计划内调整。
+R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界，R13 / R14 是 P0-15 对照 GitHub 官方文档新发现的两处偏差（错误码清单与 `Accept` 头），R15 是 P0-16 把计划中一句话验收拆成可执行状态机时补齐的语义边界，R16 是 P0-17 把 §4.3 与验收对齐时消解的口径冲突，R17 是 P0-18 把「解绑」落成 SQL 时发现的设计稿空白（删行会反转吊销语义）。其余为计划内调整。
 
 ---
 
@@ -457,4 +467,5 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 16. **P0-14 公钥身份解析已完成**（ADR-020）：`application/auth.KeyLookup` 端口 + `auth.NewResolver` 三状态 + `sqlite.SSHKeyLookup` 只读查 `ssh_keys`；查库失败一律拒绝认证不降级访客、archtest 禁止业务层解析客户端公钥文本、`forum.ActorFromPrincipal` 落实访客只读；`cmd/server` 移除 `guestResolver` 占位。从零启动实测日志出现「身份解析就绪 mode=ssh_keys」，host key 指纹与格式契约一致；`ssh_keys` 表已在 `0001_init.sql`，本项无新迁移。**P0-15 已完成**（见下条）。
 17. **P0-15 GitHub Device Flow 客户端已完成**（ADR-021）：`application/auth.DeviceFlowClient` 端口 + 4 个值对象 + `ClassifyDeviceError` / `NextInterval` 纯函数；`infrastructure/github` 用标准库实现 4 个端点（端点可注入、`httptest` 假端点）、**8 个错误码**显式分类、`slow_down` 取响应新 `interval` 否则 +5 秒、两套 `Accept` 头、请求 10s 硬超时与 1 MiB 响应限长；`config` 读取 `MOTD_GITHUB_CLIENT_ID`，缺值时两个 POST 返回 `auth.ErrClientIDMissing` 且不发请求、启动不 panic；archtest 两条静态守卫（认证层禁 import HTTP/JSON、本包禁出现 `client_secret`）均含负向注入。**零新增第三方依赖**，本项不建表、不写库、不 sleep。全量回归 30 个包通过，从零启动实测 `client_id_configured=false|true` 两分支正常、日志不回显凭据值。**下一步 P0-16 Device Flow 状态机**（`device_auth_states` 持久化与 `pending → authorized|denied|expired` 迁移），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。
 18. **P0-16 Device Flow 状态机已完成**（ADR-022）：`device_auth_states` 表已在 `0001_init.sql`，**无新迁移**；`application/auth` 四态枚举 + `CanTransition` 迁移表（4×4 穷举只 3 条合法）+ `EvaluatePoll` 三态门禁，`DeviceAuthStore` UoW 端口与 `DeviceFlowService`（`Start`/`Poll`/`Cancel`），`sqlite.DeviceAuthRepos` 读走读池、写走 `Writer.Submit` 且全部 CAS。网络调用一律在写事务之外，状态机不 sleep / 不起 ticker（节奏交 P0-19），令牌只在进程内交 P0-17、绝不落库。archtest 三条守卫（禁阻塞式时间调用、四态枚举与 DDL CHECK 一致、状态表无 token 列）均含负向注入。51 个新增测试，全量 build/vet/test 通过，从零启动实测日志出现「设备码状态机就绪 store=device_auth_states」。
-19. **P0-17 账号创建与登录事务已完成**（ADR-023）：`users` / `identities` 已在 `0001_init.sql`，**无新迁移**；`application/auth` 的值对象与纯函数（`NewIdentityProfile` / `SelectPrimaryVerifiedEmail` / `DeriveUsername` / `AllocateUsername`）+ `LoginStore` UoW 端口 + `LoginService.Login`，`sqlite.LoginRepos` 在同一写事务内完成 §4.3 三步判定与两表原子创建。`GetUser` / `GetEmails` 在写事务之外；唯一约束冲突映射为哨兵后整体重试（最多 3 次），身份冲突重试即转为登录。**R16 消解**：邮箱命中只返回固定 `Notice`，不合并、不复用、不阻断，同邮箱不同 UID 建成两个账号（并加 AST 守卫强制 `FindAccountByEmail` 返回值被丢弃）。用户名派生保留中文可读性（两字中文补下划线）、冲突加数字后缀、仓储二次过 `ValidateUsername`。令牌绝不落库（六条 archtest 守卫含负向注入 + 端到端扫全表文本列）。63 个新增测试（含 10 goroutine 并发只建 1 个号），全量 build/vet/test 通过，从零启动实测日志出现「账号登录事务就绪 store=users+identities provider=github」。**下一步 P0-18 公钥绑定**（`/keys`、`/key add`、`/key rm <fingerprint>`，只绑定认证阶段服务端已持有的公钥指纹），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。
+19. **P0-17 账号创建与登录事务已完成**（ADR-023）：`users` / `identities` 已在 `0001_init.sql`，**无新迁移**；`application/auth` 的值对象与纯函数（`NewIdentityProfile` / `SelectPrimaryVerifiedEmail` / `DeriveUsername` / `AllocateUsername`）+ `LoginStore` UoW 端口 + `LoginService.Login`，`sqlite.LoginRepos` 在同一写事务内完成 §4.3 三步判定与两表原子创建。`GetUser` / `GetEmails` 在写事务之外；唯一约束冲突映射为哨兵后整体重试（最多 3 次），身份冲突重试即转为登录。**R16 消解**：邮箱命中只返回固定 `Notice`，不合并、不复用、不阻断，同邮箱不同 UID 建成两个账号（并加 AST 守卫强制 `FindAccountByEmail` 返回值被丢弃）。用户名派生保留中文可读性（两字中文补下划线）、冲突加数字后缀、仓储二次过 `ValidateUsername`。令牌绝不落库（六条 archtest 守卫含负向注入 + 端到端扫全表文本列）。63 个新增测试（含 10 goroutine 并发只建 1 个号），全量 build/vet/test 通过，从零启动实测日志出现「账号登录事务就绪 store=users+identities provider=github」。
+20. **P0-18 公钥绑定已完成**（ADR-024）：`ssh_keys` 已在 `0001_init.sql`，**无新迁移**；`application/auth` 的 `ParseKeyCommand` / `NormalizeFingerprint` / `ValidatePublicKeyText` / `KeyBindingStore` UoW / `SessionRevoker` 端口 / `KeyBindingService`（`List` / `Bind` / `Unbind`），`sqlite.KeyBindingRepos` 读走读池、写走 `Writer.Submit`。认证阶段把 `gossh.MarshalAuthorizedKey(key)` 放进 `Permissions` → `Session.PublicKey()`，`transport/ssh.Server` 实现会话撤销索引。**R17**：解绑用 `SET revoked_at` 软吊销而非 DELETE（删行会让「吊销→拒绝认证」退化成「访客放行」）。四态判定与插入同一写事务，UNIQUE 冲突整体重试；`RevokeSessions` 只在事务提交后调用（archtest 用 AST 钉死顺序）。`/key add` 恰好 1 参、指纹只来自 Session，伪造公钥文本被 `ParseKeyCommand` + 两条 AST 守卫挡死；结果文案全为服务端固定文本，零回显。58 个新增测试（含真实 SSH 两同指纹会话撤销、6 goroutine 并发只 1 个创建、6 条负向注入），全量 `go build` / `go vet` / `go test -count=1 ./...`（30 包 / 280 个测试函数）通过，从零启动实测日志出现「公钥绑定就绪 store=ssh_keys revoker=ssh_sessions」、`migrations_applied=[1 2 3]`。**下一步 P0-19 登录交互与会话升级**（Device Flow 终端呈现、轮询循环、`guest → user` 升级并把当前连接公钥自动绑定；依赖 P0-16/23/24，其中 P0-24 页面尚未实现，需先评估是否可按 Q3 用最小交互层接入或调整波次），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。M2 剩余 P0-19 / P0-20；P0 全部完成后仍需交付 §8 第 14 条的逐步部署指引与 D7 带真实数据的恢复演练。

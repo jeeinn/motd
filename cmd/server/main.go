@@ -2,8 +2,8 @@
 //
 // 当前阶段：第四波 M2 认证。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
 // 写入队列、论坛用例与插件事件链装配、身份解析、GitHub Device Flow 客户端、
-// 设备码状态机、账号登录事务与 SSH 入口，并提供运维探针 /healthz。
-// 登录交互、公钥绑定与终端页面按 docs/P0-PLAN.md 逐项接入。
+// 设备码状态机、账号登录事务、公钥绑定与 SSH 入口，并提供运维探针 /healthz。
+// 登录交互与终端页面按 docs/P0-PLAN.md 逐项接入。
 package main
 
 import (
@@ -131,6 +131,10 @@ func run() error {
 	login := newLoginService(writer, deviceFlow)
 	logger.Info("账号登录事务就绪", "store", "users+identities", "provider", auth.ProviderGitHub)
 
+	// P0-18 公钥绑定：Revoker 是 SSH Server（它握有全部在线 Session）。
+	// Server 依赖 Handler、Handler 又要用 KeyBindingService，因此先建 handler、
+	// 再建 Server，最后用 setter 把用例回填，打破装配循环。
+	handler := newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:        cfg.SSHAddr,
 		DataDir:     cfg.DataDir,
@@ -138,13 +142,16 @@ func run() error {
 		IdleTimeout: cfg.SSHIdleTimeout,
 		Resolver:    resolver,
 		Presence:    rt.Presence,
-		Handler:     newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login),
+		Handler:     handler,
 		Logger:      logger,
 	})
 	if err != nil {
 		return fmt.Errorf("初始化 SSH 服务失败: %w", err)
 	}
+	keyBinding := newKeyBindingService(pools, writer, sshSrv)
+	handler.withKeyBinding(keyBinding)
 	logger.Info("SSH host key 就绪", "fingerprint", sshSrv.HostKeyFingerprint())
+	logger.Info("公钥绑定就绪", "store", "ssh_keys", "revoker", "ssh_sessions", "modes", "keys|key add|key rm")
 
 	sshErr := make(chan error, 1)
 	go func() {

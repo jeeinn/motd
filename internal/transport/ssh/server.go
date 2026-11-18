@@ -85,13 +85,17 @@ type Server struct {
 	hostFingerprint string
 	serverConfig    *gossh.ServerConfig
 
-	slots  chan struct{}
-	mu     sync.Mutex
-	ln     net.Listener
-	conns  map[net.Conn]struct{}
-	wg     sync.WaitGroup
-	closed chan struct{}
-	once   sync.Once
+	slots chan struct{}
+	mu    sync.Mutex
+	ln    net.Listener
+	conns map[net.Conn]struct{}
+	// sessions 是 P0-18 的会话撤销索引：解绑公钥后要关掉所有仍用该指纹的
+	// 在线会话。独立锁，避免与 conns 的互斥形成锁环。
+	sessMu   sync.Mutex
+	sessions map[string]*Session
+	wg       sync.WaitGroup
+	closed   chan struct{}
+	once     sync.Once
 }
 
 func New(cfg Config) (*Server, error) {
@@ -116,6 +120,7 @@ func New(cfg Config) (*Server, error) {
 		hostFingerprint: fp,
 		slots:           make(chan struct{}, cfg.MaxConns),
 		conns:           make(map[net.Conn]struct{}),
+		sessions:        make(map[string]*Session),
 		ln:              ln,
 		closed:          make(chan struct{}),
 	}
@@ -164,6 +169,16 @@ func (s *Server) publicKeyCallback(conn gossh.ConnMetadata, key gossh.PublicKey)
 		return nil, ErrServerFull
 	}
 	fp := gossh.FingerprintSHA256(key)
+	// P0-18：把服务端持有的 ssh.PublicKey 序列化文本一并放进 Permissions。
+	// 客户端必须先持有私钥通过公钥挑战，服务端才拿得到 key；这不是「客户端
+	// 提交的公钥文本」。用 application 的纯校验函数兜底，脏文本不入库不进内存。
+	pk := ""
+	if serialized := gossh.MarshalAuthorizedKey(key); len(serialized) > 0 {
+		candidate := strings.TrimSpace(string(serialized))
+		if auth.ValidatePublicKeyText(candidate) == nil {
+			pk = candidate
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	p, err := s.cfg.Resolver.Resolve(ctx, fp)
@@ -175,6 +190,7 @@ func (s *Server) publicKeyCallback(conn gossh.ConnMetadata, key gossh.PublicKey)
 	}
 	return &gossh.Permissions{Extensions: map[string]string{
 		"fingerprint": fp,
+		"public_key":  pk,
 		"kind":        strconv.FormatUint(uint64(p.Kind), 10),
 		"user_id":     strconv.FormatInt(p.UserID, 10),
 	}}, nil
@@ -191,6 +207,15 @@ func principalFromPermissions(perm *gossh.Permissions) (auth.Principal, string) 
 		p.UserID = uid
 	}
 	return p, fp
+}
+
+// publicKeyFromPermissions 与 principalFromPermissions 分开，保持后者的
+// 双返回值签名不变（既有契约测试零改动）。值同样只来自服务端认证阶段。
+func publicKeyFromPermissions(perm *gossh.Permissions) string {
+	if perm == nil {
+		return ""
+	}
+	return perm.Extensions["public_key"]
 }
 
 // Serve 阻塞直到 ctx 取消或 Close 调用；返回时连接 goroutine 已全部退出。
@@ -307,6 +332,7 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 	go gossh.DiscardRequests(reqs)
 
 	p, fp := principalFromPermissions(sc.Permissions)
+	pk := publicKeyFromPermissions(sc.Permissions)
 	// 连接级关闭信号：chans 关闭即 SSH 连接已断，该连接上的所有 session 一起收掉。
 	// 不能用「channel 读到 EOF」代替——客户端只 CloseWrite 输入方向时，
 	// 服务端仍应继续输出，那是合法状态而非连接断开。
@@ -319,13 +345,13 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 		s.wg.Add(1)
 		go func(nch gossh.NewChannel) {
 			defer s.wg.Done()
-			s.handleSession(ctx, nch, p, fp, connDone)
+			s.handleSession(ctx, nch, p, fp, pk, connDone)
 		}(nch)
 	}
 	close(connDone)
 }
 
-func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth.Principal, fp string, connDone <-chan struct{}) {
+func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth.Principal, fp, pk string, connDone <-chan struct{}) {
 	ch, reqs, err := nch.Accept()
 	if err != nil {
 		return
@@ -337,7 +363,9 @@ func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth
 	}
 	defer s.cfg.Presence.Disconnect(id)
 
-	sess := newSession(id, ch, fp, p, s.cfg.Presence, s.cfg.IdleTimeout)
+	sess := newSession(id, ch, fp, pk, p, s.cfg.Presence, s.cfg.IdleTimeout)
+	s.trackSession(sess, true)
+	defer s.trackSession(sess, false)
 	defer sess.Close()
 
 	go func() {

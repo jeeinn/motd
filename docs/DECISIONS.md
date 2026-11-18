@@ -332,3 +332,29 @@
   5. 邮箱归属只查 `users.primary_email`，不查 `identities.email`：前者是账号主邮箱，后者是该身份源返回的历史快照，用它判定会把「同一 UID 换过邮箱」误判成「邮箱属于别人」。
 - 实测发现并修复的真实缺陷：首轮回归 `TestDeriveUsername/中文保留` 报 `得到 "gh1"，期望 "张三"` —— 「张三」只有 2 个码点，被「不足 3 字符」分支直接整名丢弃、回退成 `gh<uid>`，中文可读性丢失。改为**先补下划线到 3 字符**（`张三_`，仍合法），只有清洗后完全为空才回退 `gh<uid>`。测试期望与实现同时修正，`TestDeriveUsernameAlwaysProducesLegalName` 增加 9 组极端输入（空串、纯标点、ESC 序列、30 个汉字、纯下划线、纯中划线、保留名）全部产出合法用户名。
 - 验证：新增 **63 个测试函数**。`application/auth` 纯函数 19：数字 id 必填 / provider_uid 格式 / 只选 primary+verified / 邮箱 normalize / 非法邮箱 / 控制字符 / 用户名派生 9 组表驱动 / 极端输入恒合法 / 码点截断 / 分配器（首个可用、数字后缀、后缀不越界、耗尽、错误透传、默认次数）/ 候选生成 / Notice 无外部数据 / 哨兵互异 / Created 语义。`application/auth` 用例 20：空 token 不触网不开事务、网络不在写事务内、GetUser/GetEmails 失败不落库、非法资料开事务前拒绝、命中身份不写库、三种非 active 状态拒绝、原子创建字段校验、InsertIdentity 失败整体回滚、无验证邮箱跳过步骤 2、邮箱命中不合并且不复用旧 ID、同邮箱不同 UID 建两账号、Notice 不回显外部数据、用户名冲突加后缀、用户名额冲突整体重试、身份冲突重试后转为登录、重试耗尽、8 goroutine 并发同 UID 只建 1 个号、不调 Device/Poll 端点、nil 依赖 panic。`infrastructure/sqlite` 12：真实 SQLite 端到端建号字段、重复登录幂等、同邮箱两账号（含 primary_email 相同）、NOCASE 大小写冲突加后缀、仓储拒绝非法用户名、仓储拒绝非 active、UNIQUE 冲突整体回滚（users 不留孤儿）、10 goroutine 并发只建 1 个号、令牌不落库（扫全部文本列）、身份/邮箱未命中哨兵、NOCASE 探测、pending 账号拒绝登录。`internal/archtest` 12：两张表无 token 列 / primary_email 无 UNIQUE / identities 有 UNIQUE(provider,provider_uid) / 登录结构体无 token 字段 / FindAccountByEmail 返回值被丢弃 / provider_uid 由 FormatInt(ID,10) 生成，六条均含负向注入。全量 `go build` / `go vet` / `go test ./...` 通过（30 个包）；从零启动实测出现 `账号登录事务就绪 store=users+identities provider=github`、`migrations_applied=[1 2 3]`（无新迁移），无 panic。
+
+## ADR-024 公钥绑定：只认服务端持有的公钥、软吊销、会话撤销在事务之后
+
+- 状态：已实现（P0-18，2026-11-18），第四波 M2 第五项
+- 结论：
+  - **表已存在，无新迁移**：`ssh_keys` 在 `0001_init.sql` 已建好（`fingerprint TEXT NOT NULL UNIQUE`、`public_key TEXT NOT NULL`、`revoked_at INTEGER` 可空、`idx_ssh_keys_user` 覆盖 `(user_id, revoked_at)`）。与 P0-14/16/17 同一模式：只补用例、仓储、认证产物传递与命令分发，`migrations_applied` 仍为 `[1 2 3]`。
+  - **指纹与公钥文本的唯一来源是认证阶段服务端持有的 `ssh.PublicKey`**：`publicKeyCallback` 在客户端通过公钥挑战后，把 `gossh.FingerprintSHA256(key)` 与 `gossh.MarshalAuthorizedKey(key)` 一并放进 `Permissions.Extensions`；`Session.Fingerprint()` / `Session.PublicKey()` 只读暴露。application 层既不解析公钥（P0-14 的 `collectAuthPublicKeyParsing` 守卫继续生效），也不从命令参数反推指纹。文本先过 `ValidatePublicKeyText`（非空 / 单行 / 无控制字符与 NUL / ≤8192 字符）才落库，P0 不解析、不回显。
+  - **「伪造提交别人的公钥字符串」由三道门挡住**：① 命令表 `/key` 的 `MaxArgs=2` 粗筛；② `auth.ParseKeyCommand` 要求 `add` **恰好 1 个参数**、`rm` 恰好 2 个且第二个必须是 `ValidFingerprint` 格式的**指纹标识符**（不是公钥文本）；③ archtest AST 守卫要求 `BindRequest.Fingerprint` / `.PublicKey` 的值只能是 `sess.Fingerprint()` / `sess.PublicKey()`，并限制 `sess.PublicKey()` 在 handler 里只出现一次（不得写回终端）。三条均含负向注入或行为回归。
+  - **四态判定与插入绑定同一个写事务**：未命中 → `Insert`；命中已吊销 → `ErrKeyRevokedBinding`；命中他人 → `ErrKeyBoundToOtherUser`；命中本人 → 幂等零写入。`KeyBindingWriteTx` 不设独立读端口（同 ADR-023 的 TOCTOU 理由）。`fingerprint UNIQUE` 被并发撞上 → `ErrKeyConflict` → 整体重试（≤3 次，首轮已回滚无半成品），下一轮重新查命中后转为幂等或拒绝。真实 SQLite 6 goroutine 不同账号同指纹实测恰好 1 个创建、其余全部拒绝；10 goroutine 同账号同指纹实测最终 1 行。
+  - **§7 R17：解绑是软吊销，不是物理删除**。`UPDATE ssh_keys SET revoked_at=? WHERE fingerprint=? AND user_id=? AND revoked_at IS NULL`。`user_id` 钉住归属（不得解绑他人钥匙），`revoked_at IS NULL` 保证幂等，行永久保留。理由：P0-14 的三状态靠 `revoked_at` 区分「拒绝认证」；若 `DELETE` 行，该指纹会退化成「未命中 → 访客放行」，等于把吊销动作反过来**放宽**权限。archtest 静态禁止 `DELETE FROM ssh_keys`；运行时回归确认解绑后 `SSHKeyLookup.Lookup` 返回 `Revoked=true`、`COUNT(*)` 仍为 1，`/keys` 列表排除该行。
+  - **解绑后撤销相关会话，且只在事务提交之后**：`SessionRevoker` 端口定义在 `application/auth`，实现落在 `transport/ssh.Server`（`sessions map[string]*Session` + 独立锁，`RevokeSessions` 按指纹关闭所有匹配 channel）。这是纯内存动作、不写库、不可回滚，因此绝不进写事务闭包（失败时不能提前踢人）；archtest 用 AST 比较 `Write` 的 `End()` 与 `RevokeSessions` 的 `Pos()` 钉死顺序。真实 SSH 端到端实测：2 个同指纹会话被撤销、第 3 个不同指纹会话不受影响。
+  - **用例刻意不持有 SSH Session**：`KeyBindingService` 不改任何会话状态。绑定失败时 DB 事务整体回滚、会话保持原状态、不落半成品（§4.6 验收）；P0-19 的 `guest → user` 升级必须等 `Bind` 成功才发生。当前 `Session.principal` 只读且无 setter，P0-19 需补一个受限的升级方法。
+  - **零回显不变**：`/keys` 只输出 DB 里读出且再次过 `ValidFingerprint` 白名单的指纹；`/key` 的成功 / 失败文案全是服务端固定文本（`bindResultText` / `unbindResultText`），不输出 `inv.Args`、指纹、公钥文本或 `err.Error()` 原文。`formatResult` 的既有约束与 P0-22 / P0-23 的分层渲染边界保持。
+  - **装配循环用 setter 后填化解**：`sshd.Server` 依赖 `Handler`，`Handler` 要用 `KeyBindingService`，而 `KeyBindingService` 又依赖 `Server`（作为 `SessionRevoker`）。`main.go` 先建 handler → 再 `sshd.New` → 最后 `newKeyBindingService(pools, writer, sshSrv)` + `handler.withKeyBinding(...)`，沿用 P0-15/16/17 的无参构造 + setter 模式，会话层测试零改动。
+- 理由：公钥是凭证不是身份，绑定一旦允许「客户端提交一段文本」，任何连接都能把自己的公钥挂到别人账号上。所以约束不能靠纪律，必须靠结构：来源只能是认证阶段的服务端对象、参数只能是格式受限的指纹标识符、判定与写入同一事务、撤销动作与事务成功绑定、结果文案不含任何外部数据。
+- 已知边界：
+  1. `/key rm <fingerprint>` 的参数确实来自用户文本，但它是**指纹标识符**且过 `ValidFingerprint`，不是公钥文本；与 §4.6 禁止的「提交公钥字符串」是两回事。
+  2. `public_key` 列 P0 只落库不读取、不展示；`label` 恒为空，`last_used_at` 不更新（P1 的 `/keys` 详情页与登录时刷新 `last_used_at` 再补）。
+  3. **已吊销钥匙不可重新绑定**：吊销通常是钥匙泄露后的安全动作，重新激活会恢复其认证能力。P0 不提供重新激活；确需时属 P1 的显式流程（且必须重新走私钥证明）。
+  4. 会话撤销按指纹精确匹配、同指纹多会话一起关闭，不区分会话当时是访客还是登录态（认证快照绑定的是连接而非账号）。
+  5. P0-19 的自动绑定（D2：登录成功后当前连接公钥自动绑定到新账号）直接复用 `KeyBindingService.Bind`，不经命令表；本项不实现 `/login` 交互与轮询循环。
+  6. `auth_events` 未写（P0-20 安全日志与限流）；本项不引入任何限流计数与 HTTP 端点（Q3）。
+- 实测踩坑：
+  1. 新测试里的 `testFingerprint` 与既有 `resolver_test.go` 同包重名 → 改名 `kbTestFingerprint`；全量 `go vet` 先于 `go test` 拦下。
+  2. 装配循环（见上）若直接把 `KeyBindingService` 注入 `sshd.New` 会形成鸡生蛋，改用 setter 后填。
+- 验证：新增 **58 个测试函数**（`application/auth` 纯函数 6 + 用例 22；`infrastructure/sqlite` 真实 SQLite 9 含两组并发；`transport/ssh` 3 含真实客户端双会话撤销；`cmd/server` 命令分发 6；`internal/archtest` 12 含 6 条负向注入）。全量 `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 通过（30 个包、共 280 个测试函数）；从零启动实测日志出现 `公钥绑定就绪 store=ssh_keys revoker=ssh_sessions modes="keys|key add|key rm"`、`migrations_applied=[1 2 3]`（无新迁移），无 panic。

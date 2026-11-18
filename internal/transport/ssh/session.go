@@ -28,6 +28,7 @@ type Session struct {
 	id          string
 	ch          gossh.Channel
 	fingerprint string
+	publicKey   string // 认证阶段服务端持有的 ssh.PublicKey 序列化文本（P0-18）
 	principal   auth.Principal
 	reg         *presence.Registry
 	idle        time.Duration
@@ -50,9 +51,11 @@ func newSessionID() string {
 	return "s-" + hex.EncodeToString(b[:])
 }
 
-func newSession(id string, ch gossh.Channel, fp string, p auth.Principal, reg *presence.Registry, idle time.Duration) *Session {
+// newSession 的 fp / pk 都来自认证阶段服务端持有的 ssh.PublicKey，
+// 不是客户端自由提交的文本（§4.6 / P0-18）。Handler 只能读、不能改。
+func newSession(id string, ch gossh.Channel, fp, pk string, p auth.Principal, reg *presence.Registry, idle time.Duration) *Session {
 	s := &Session{
-		id: id, ch: ch, fingerprint: fp, principal: p, reg: reg, idle: idle,
+		id: id, ch: ch, fingerprint: fp, publicKey: pk, principal: p, reg: reg, idle: idle,
 		done: make(chan struct{}),
 	}
 	s.timer = time.AfterFunc(idle, func() { _ = s.Close() })
@@ -109,6 +112,11 @@ func (s *Session) Done() <-chan struct{} { return s.done }
 func (s *Session) ID() string                { return s.id }
 func (s *Session) Fingerprint() string       { return s.fingerprint }
 func (s *Session) Principal() auth.Principal { return s.principal }
+
+// PublicKey 返回认证阶段服务端序列化出的公钥文本，供 P0-18 的 /key add 使用。
+// 值来自 gossh.MarshalAuthorizedKey(key)，已在 publicKeyCallback 里过
+// auth.ValidatePublicKeyText；不解析、不回显，只作 ssh_keys.public_key 落库。
+func (s *Session) PublicKey() string { return s.publicKey }
 
 func (s *Session) SetState(state presence.State) error { return s.reg.SetState(s.id, state) }
 

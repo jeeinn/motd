@@ -53,6 +53,9 @@ var defaultCommands = []Command{
 	{Name: "reply", Usage: "/reply", Summary: "回复当前主题", MaxArgs: 0},
 	{Name: "login", Usage: "/login github", Summary: "GitHub Device Flow 登录", MinArgs: 1, MaxArgs: 1, Aliases: []string{"signin"}},
 	{Name: "keys", Usage: "/keys", Summary: "管理已绑定公钥", MaxArgs: 0},
+	// P0-18：/key add 绑定「当前连接」的公钥，不接受任何公钥文本参数；
+	// /key rm <fingerprint> 只接指纹标识符（由 auth.ParseKeyCommand 严格收口）。
+	{Name: "key", Usage: "/key add | /key rm <fingerprint>", Summary: "绑定当前连接公钥 / 解绑指定指纹", MinArgs: 1, MaxArgs: 2},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 }

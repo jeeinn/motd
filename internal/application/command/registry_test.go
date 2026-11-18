@@ -7,7 +7,7 @@ import (
 )
 
 func TestDefaultRegistryHasP0Commands(t *testing.T) {
-	want := []string{"top", "open", "new", "reply", "login", "keys", "help", "quit"}
+	want := []string{"top", "open", "new", "reply", "login", "keys", "key", "help", "quit"}
 	all := Default().All()
 	if len(all) != len(want) {
 		t.Fatalf("P0 命令应为 %d 条，实际 %d", len(want), len(all))
