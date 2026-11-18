@@ -2,8 +2,9 @@
 //
 // 当前阶段：第四波 M2 认证。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
 // 写入队列、论坛用例与插件事件链装配、身份解析、GitHub Device Flow 客户端、
-// 设备码状态机、账号登录事务、公钥绑定与 SSH 入口，并提供运维探针 /healthz。
-// 登录交互与终端页面按 docs/P0-PLAN.md 逐项接入。
+// 设备码状态机、账号登录事务、公钥绑定、登录交互与 SSH 入口，并提供 /healthz。
+// P0-19 的登录交互是进程内最小交互层（docs/DEVIATIONS.md R18），终端页面
+// 仍按 docs/P0-PLAN.md 第五波 P0-24 接入，届时只替换呈现层。
 package main
 
 import (
@@ -152,6 +153,10 @@ func run() error {
 	handler.withKeyBinding(keyBinding)
 	logger.Info("SSH host key 就绪", "fingerprint", sshSrv.HostKeyFingerprint())
 	logger.Info("公钥绑定就绪", "store", "ssh_keys", "revoker", "ssh_sessions", "modes", "keys|key add|key rm")
+	// P0-19：/login github 走进程内 Device Flow（Q3，不开 HTTP 端点）；
+	// 呈现层是固定文本的最小交互层，P0-24 落地时替换（DEVIATIONS.md R18/R20）。
+	logger.Info("登录交互就绪", "mode", "minimal_in_process", "presentation", "fixed_text",
+		"provider", "github", "replace_at", "P0-24")
 
 	sshErr := make(chan error, 1)
 	go func() {

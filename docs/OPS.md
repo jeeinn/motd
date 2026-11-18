@@ -108,6 +108,16 @@ motdctl restore <backup-file> --target <path>
 - 令牌不落库：`users` / `identities` 两张表内不存在任何 token 列。备份文件里不会出现 `gho_` 前缀的访问令牌。
 - 排查登录失败：`GitHub 用户资料失败` / `邮箱列表失败` 看 VPS 出站 443 与 client_id；`账号状态不允许登录` 看 `users.status`；`用户名候选全部被占用` 属极端情况（同一 login 下 20 个候选全被占），可人工改 `users.username` 后重试。
 
+### 登录交互（P0-19，最小交互层）
+
+- 启动日志 `登录交互就绪 mode=minimal_in_process presentation=fixed_text provider=github replace_at=P0-24` 表示 `/login github` 已装配；`replace_at=P0-24` 明确提示**当前呈现层是临时的**，属于 `docs/DEVIATIONS.md` R18/R20，不是最终页面。
+- **整条链路在进程内**（Q3）：`SSH session → application/auth → infrastructure/github`，**没有任何业务 HTTP 端点**，`/healthz` 之外不要为登录放行端口。出站仍需 `github.com:443` / `api.github.com:443`。
+- 终端只展示 `user_code` / `verification_uri` / 剩余时间与固定状态行；**`device_code` 与 `access_token` 永不写终端、永不落库、永不进日志**。备份与 `device_auth_states` 里都不会出现 `gho_` 前缀令牌。
+- 轮询在服务端按 `interval`（钳制到 5–60 秒）进行，间隔由 GitHub 响应的 `interval` / `slow_down` 决定，**运维侧不要试图改小**。连续网络错误重试 3 次后自动终止并提示重新 `/login github`，不会无限占用连接。
+- `Esc` 取消会把该次 `device_auth_states` 迁为 `denied`；状态停在 `pending` 且 `expires_at` 已过时，下轮门禁自动迁 `expired`。**不要手工 DELETE 该表行**（在途登录会因 `ErrDeviceAuthNotFound` 中断）。
+- 登录成功后当前连接公钥自动绑定（D2）；断开重连由 `ssh_keys` 指纹直接解析为登录态（D3），无需再次 `/login`。
+- **已知边界（R19）**：若当前连接公钥已属于其他账号，账号会创建成功但**本次会话保持访客态**，终端给出固定提示；此时 `device_auth_states` 是 `authorized` 终态，不是失败。换一把未绑定的公钥重连后重新 `/login` 即可（UID 命中即登录）。详见 `DECISIONS.md ADR-025`。
+
 ## 4. 恢复流程
 
 1. **停服**：`systemctl stop motd`。

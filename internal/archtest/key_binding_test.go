@@ -45,10 +45,15 @@ func parseGoFilesIn(dir string) ([]*ast.File, []*token.FileSet, error) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. BindRequest 的指纹 / 公钥文本只能来自服务端 Session
+// 1. BindRequest 的指纹 / 公钥文本只能来自服务端会话门面
+//
+// P0-18 时唯一来源是 *sshd.Session（变量名 sess）；P0-19 的登录自动绑定
+// 改走 loginConn 端口（变量名 conn），二者都是「认证阶段服务端持有的对象」，
+// 不是客户端可提交的文本。白名单只允许这两个 receiver，其余一律拒绝，
+// 防止把 inv.Args / 任意变量放宽进来（DEVIATIONS.md R19 / ADR-025）。
 // ---------------------------------------------------------------------------
 
-func isSessCall(e ast.Expr, wantSel string) bool {
+func isServerHeldCall(e ast.Expr, wantSel string) bool {
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
@@ -58,7 +63,14 @@ func isSessCall(e ast.Expr, wantSel string) bool {
 		return false
 	}
 	x, ok := sel.X.(*ast.Ident)
-	return ok && x.Name == "sess"
+	if !ok {
+		return false
+	}
+	switch x.Name {
+	case "sess", "conn":
+		return true
+	}
+	return false
 }
 
 // collectBadBindSources 返回违规描述以及扫描到的 BindRequest 字面量总数。
@@ -91,8 +103,8 @@ func collectBadBindSources(dir string) ([]string, int, error) {
 				}
 				switch key.Name {
 				case "Fingerprint", "PublicKey":
-					if !isSessCall(kv.Value, key.Name) {
-						out = append(out, "BindRequest."+key.Name+" 不是来自 sess."+key.Name+"()")
+					if !isServerHeldCall(kv.Value, key.Name) {
+						out = append(out, "BindRequest."+key.Name+" 不是来自服务端会话门面（sess./conn.）"+key.Name+"()")
 					}
 				}
 			}
@@ -161,6 +173,53 @@ func good(sess *Session) {
 	}
 	if len(found) != 0 {
 		t.Fatalf("服务端 Session 取值不应被判违规: %v", found)
+	}
+}
+
+// P0-19：loginConn 端口（conn.*）是合法来源，但白名单不能被放宽成任意 receiver。
+func TestBindRequestAcceptsLoginConnPort(t *testing.T) {
+	tmp := t.TempDir()
+	src := `package main
+
+func finish(conn loginConn) {
+	_ = auth.BindRequest{
+		Fingerprint: conn.Fingerprint(),
+		PublicKey:   conn.PublicKey(),
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmp, "login_flow.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, total, err := collectBadBindSources(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(found) != 0 {
+		t.Fatalf("conn.* 应被视为服务端会话门面，total=%d found=%v", total, found)
+	}
+}
+
+func TestBindRequestRejectsUnknownReceiver(t *testing.T) {
+	tmp := t.TempDir()
+	src := `package main
+
+func bad(other interface{}) {
+	_ = auth.BindRequest{
+		Fingerprint: other.Fingerprint(),
+		PublicKey:   other.PublicKey(),
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmp, "bad.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, _, err := collectBadBindSources(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("未知 receiver 必须被拒绝（2 处），实际 %v", found)
 	}
 }
 

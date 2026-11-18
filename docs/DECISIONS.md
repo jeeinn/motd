@@ -358,3 +358,32 @@
   1. 新测试里的 `testFingerprint` 与既有 `resolver_test.go` 同包重名 → 改名 `kbTestFingerprint`；全量 `go vet` 先于 `go test` 拦下。
   2. 装配循环（见上）若直接把 `KeyBindingService` 注入 `sshd.New` 会形成鸡生蛋，改用 setter 后填。
 - 验证：新增 **58 个测试函数**（`application/auth` 纯函数 6 + 用例 22；`infrastructure/sqlite` 真实 SQLite 9 含两组并发；`transport/ssh` 3 含真实客户端双会话撤销；`cmd/server` 命令分发 6；`internal/archtest` 12 含 6 条负向注入）。全量 `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 通过（30 个包、共 280 个测试函数）；从零启动实测日志出现 `公钥绑定就绪 store=ssh_keys revoker=ssh_sessions modes="keys|key add|key rm"`、`migrations_applied=[1 2 3]`（无新迁移），无 panic。
+
+---
+
+## ADR-025 登录交互：按 Q3 用最小交互层接 P0-19，偏差集中登记
+
+- 状态：已实现（P0-19，2026-11-18），第四波 M2 第六项；**R18 / R19 / R20** 见 §7 与 `docs/DEVIATIONS.md`
+- 结论：
+  - **波次冲突由用户拍板消解**：`P0-PLAN.md §4` 依赖图写 `A24 → A19`（P0-19 依赖 P0-24 终端页面），但 `§5` 把 P0-24 排在第五波、P0-19 排在第四波。V 先生 2026-11-18 明确选推荐方案：**按 Q3 用最小交互层接 P0-19**（复用 P0-22 命令表 + P0-23 `RenderSystem` / `RenderUser` 输出固定文本 + 进程内轮询），**P0-24 落地时再替换呈现层**，与 P0-22 既定的「页面控制器替换 handle 分发」模式一致，**不改协议层**。同时要求「同步更新设计稿或新建文档记录不一致之处」——评审稿按既有纪律**不回改**，改为新建 `docs/DEVIATIONS.md` 作为偏差单一事实源（R1~R20 总表 + 边界/替换清单 + 逐条核对表）。
+  - **不变 / 替换的边界写死在文档里**：`transport/ssh` 解码器与会话协议（仅补 `Session.UpgradeToUser`）、`application/command` 注册表、`application/auth` 四个既有用例（P0-15/16/17/18）**全部零改动**；替换点只有 `cmd/server/login_view.go`（`loginPresenter`）、`login_flow.go` 的 `out io.Writer` 注入与 `Serve` 循环里的 `pollTimer` / `pollCh` 分支。P0-24 接入 `ViewModel` 双 Renderer 时无需重写业务链路。
+  - **表已存在，无新迁移**：`device_auth_states` / `users` / `identities` / `ssh_keys` 均在 `0001_init.sql`，`migrations_applied` 仍为 `[1 2 3]`。
+  - **呈现分层不合并**（§3.5 / ADR-019）：`loginPresenter.line` 只吃编译期固定文案 → `safe.RenderSystem`；`user_code` / `verification_uri` / `username` 属外部数据，先过 `auth.ProjectLoginView` 格式白名单（只收 `[A-Z0-9-]` 的 user_code、`https://` 且 URI 安全字符集的 verification_uri；不合法则**失败关闭**并作废设备码），再走 `safe.RenderUser` 净化路径。`LF → CRLF` 在呈现层完成。两类文本**绝不拼进同一次渲染调用**。`LoginResult.Notice` 只有等于白名单常量 `auth.EmailOccupiedNotice` 才允许进 `RenderSystem`。
+  - **轮询节奏归会话循环，网络调用异步化**：`DeviceFlowService` 仍不 sleep / 不起 ticker（ADR-022），`auth.LoginDirective` / `ClassifyPoll` 把结果映射成 `Continue` / `Authorized` / `Terminal` / `Retry`；间隔统一过 `ClampInterval`（`[5, 60]` 秒）。`Serve` 用 `time.Timer` 持有节奏，`Poll` 放进独立 goroutine 经 channel 回传——单次网络最长 10s，若同步执行会阻塞 Esc；取消后迟到的结果由 `flow.active` 判定丢弃，ADR-022 的 CAS 保证「取消优先」。连续网络错误按 `Retry` 处理（**不误判为用户拒绝**），上限 `LoginMaxNetworkRetries = 3` 后失败关闭。
+  - **`device_code` 与 `access_token` 都不进呈现结构**：`LoginView` / `LoginDirective` 刻意不含这两类字段；`device_code` 只保存在 `loginFlow` 进程内字段用于 `Poll`，`access_token` 只在 `finish` 的栈上进程内交 `LoginService`。archtest 静态扫描 `cmd/server/login_*.go` 的所有写终端调用，禁止参数里出现 `.Token` / `.DeviceCode` / `deviceCode` / `.Message`（响应原文），并含负向注入。
+  - **`guest → user` 唯一升级入口**：`presence.Registry.AttachUser` 只允许 `UserID == 0 → > 0` 一次；`ssh.Session.UpgradeToUser` 三道门（`userID > 0`、当前必须访客、presence 绑定成功）全过才写 `principal`，且 `principal` 读写都走 `s.mu`（消除数据竞争）。archtest 钉死 `session.go` 里 `s.principal =` 只有一处。
+  - **R19：账号事务与自动绑定不是同一原子单元**。授权后顺序 `Login → Bind → UpgradeToUser`，**三步全成功才升级**。`Bind` 直接复用 `KeyBindingService.Bind`、**不经命令表**（ADR-024 第 5 条），`BindRequest` 的指纹 / 公钥只来自 `loginConn` 端口（即认证阶段服务端持有的 `ssh.PublicKey`）。`Bind` 或 `Upgrade` 失败时账号已建但**会话保持访客态**、返回固定文案，不落「已登录却无绑定」的半成品；此时设备码是 `authorized` 终态而非 `denied`（后者只由 Esc / 用户拒绝产生）。
+  - **P0-18 的 archtest 守卫按端口语义扩展，强度不降**：`TestBindRequestSourcesAreServerHeld` 原先把来源钉死为 `sess.*`，P0-19 的 `conn.*`（`loginConn`）被误报。改为白名单 `sess.* | conn.*`（二者都是服务端会话门面，**不是客户端可提交的文本**），并新增两条负向注入：`conn.*` 应被接受、`other.*` 等未知 receiver 必须被拒绝。守卫仍要求方法名精确匹配 `Fingerprint()` / `PublicKey()`，`inv.Args[...]` 依旧拦死。
+  - **Q3 不变**：`cmd/server/main.go` 的 `probeMux` 仍只有 `/healthz`；交互层静态守卫禁止 `net/http` import 与 `time.Sleep` / `NewTicker`。启动日志 `登录交互就绪 mode=minimal_in_process presentation=fixed_text replace_at=P0-24` 明确标注临时形态。
+- 理由：把 P0-19 押后到 P0-24 会让 D2 在第四波无法验收，把 P0-24 提前则要一次性引入 ViewModel 页面框架、超出 M2 范围；最小交互层是唯一既守住 Q3「进程内调用」、又不让临时代码伪装成最终设计的做法。偏差不写进文档，事后最容易发生的错误就是「照着 P0-19 的固定文本继续加页面逻辑」，把呈现职责永久焊死在 handler 里。
+- 已知边界：
+  1. **呈现形态是临时降级**：剩余时间只在发起屏给固定文本，轮询期间输出固定「等待授权中」行，无全屏重绘 / 光标控制。P0-24 落地时按 `DEVIATIONS.md` 第 3 节清单替换，业务链路零改动。
+  2. **R19 的诚实边界**：`Bind` 失败时 `users` / `identities` 已提交（账号真实存在），当前连接只是没升级；用户需换一把公钥重连后重新 `/login`，届时 UID 命中即登录并重新尝试绑定。P0 不做补偿事务（会违反 §2.6 单写连接模型）。
+  3. `Esc` 取消只在 `flow.active` 时生效；`Cancel` 在连接退出时用独立 2s 上下文执行，避免 `ctx` 已取消导致写不回 `denied`。
+  4. D2 的「手工跑通」仍待真实 `MOTD_GITHUB_CLIENT_ID` 在测试 VPS 上联调；本轮 D2 由真实 SQLite + 假 GitHub 端点（进程内 fake `DeviceFlowClient`）覆盖，不依赖外网。
+  5. `auth_events` 未写（P0-20），本项不引入任何限流计数；`-race` 全量检测因本机无 gcc / CGO 未启用，按既定安排后置到 D7 之后。
+- 实测踩坑：
+  1. P0-18 的 `BindRequest` AST 守卫把 `conn.Fingerprint()` 判为违规（见上「守卫扩展」）——这是**守卫假设与端口抽象不匹配**，不是实现缺陷；修法是把白名单从「变量名」提升到「会话门面语义」，同时补未知 receiver 的负向注入，确保没有放宽成任意来源。
+  2. `ProjectLoginView` 的 `strings.TrimSpace` 会吃掉尾部换行，测试用例里 `"ABCD-EFGH\n"` 意外通过；改为内部控制字符（`ABCD\nEFGH`）才真正验证「失败关闭」。
+  3. `normalizeVerificationURI` 的字符白名单不含 `\t` / `\n` / 尖括号，URI 中间夹控制字符会被拒绝，符合预期。
+- 验证：新增 **49 个测试函数**（`application/auth` 领域 11；`presence` 3；`transport/ssh` 会话升级 6 含 8 goroutine 并发只成功 1 次；`cmd/server` 呈现 5 + 交互 / D2 集成 11；`internal/archtest` 13 含 6 条负向注入与文档一致性守卫）。全量 `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 通过（30 个包；核心 6 包共 336 个测试函数）；从零启动实测日志出现 `登录交互就绪 mode=minimal_in_process presentation=fixed_text provider=github replace_at=P0-24`、`migrations_applied=[1 2 3]`，无 panic。`docs/DEVIATIONS.md` 由 archtest 守卫校验存在性与 R18~R20 关键段落。

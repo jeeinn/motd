@@ -20,6 +20,8 @@ var (
 	ErrDuplicateSession = errors.New("会话已存在")
 	ErrUnknownSession   = errors.New("会话不存在")
 	ErrInvalidSession   = errors.New("会话参数不合法")
+	// ErrAlreadyAttached 表示会话已绑定过用户，拒绝重复 / 横向升级（P0-19）。
+	ErrAlreadyAttached = errors.New("会话已绑定用户，不可重复升级")
 )
 
 // Kind 是连接入口类型。P0 只有 SSH；Web / CLI 为 P1 预留。
@@ -132,6 +134,31 @@ func (r *Registry) Touch(id string) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrUnknownSession, id)
 	}
+	s.LastSeenAt = r.now().UTC()
+	r.sessions[id] = s
+	return nil
+}
+
+// AttachUser 把一条访客连接升级为已登录用户（P0-19 的 guest → user）。
+//
+// 只允许 UserID == 0 → userID > 0 **一次**：重复升级或把会话横向改成另一个
+// 账号一律拒绝。理由是会话升级发生在 OAuth 完成之后，若允许二次调用，
+// 任何后续登录流程都能把当前连接挂到别的账号上（账号接管面）。
+// 纯内存动作，不写 SQLite（§2.6 / ADR-016）。
+func (r *Registry) AttachUser(id string, userID int64) error {
+	if id == "" || userID <= 0 {
+		return ErrInvalidSession
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.sessions[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownSession, id)
+	}
+	if s.UserID != 0 {
+		return ErrAlreadyAttached
+	}
+	s.UserID = userID
 	s.LastSeenAt = r.now().UTC()
 	r.sessions[id] = s
 	return nil

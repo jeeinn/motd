@@ -109,9 +109,45 @@ func (s *Session) Close() error {
 
 func (s *Session) Done() <-chan struct{} { return s.done }
 
-func (s *Session) ID() string                { return s.id }
-func (s *Session) Fingerprint() string       { return s.fingerprint }
-func (s *Session) Principal() auth.Principal { return s.principal }
+func (s *Session) ID() string          { return s.id }
+func (s *Session) Fingerprint() string { return s.fingerprint }
+
+// Principal 返回身份快照。读写都走 s.mu：P0-19 引入了一次运行期写入
+// （UpgradeToUser），若这里无锁读会与升级形成数据竞争。
+func (s *Session) Principal() auth.Principal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.principal
+}
+
+// UpgradeToUser 是 guest → user 的**唯一**升级入口（P0-19 / ADR-024 第 6 条）。
+//
+// 三道门同时生效：
+//   - userID 必须 > 0；
+//   - 当前必须是访客（已登录会话不可重复升级、更不可横向改成别人的账号）；
+//   - presence 注册表里的 UserID 也必须成功从 0 绑定（与内存在线状态一致）。
+//
+// 成功后才写 principal；任一门失败都保持访客态，不留「已登录却未绑定」
+// 的半成品会话（§4.6 验收）。本方法只改身份快照，不触碰协议层与 channel。
+func (s *Session) UpgradeToUser(userID int64) error {
+	if userID <= 0 {
+		return auth.ErrSessionUpgradeRejected
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.principal.IsUser() {
+		return auth.ErrSessionUpgradeRejected
+	}
+	if err := s.reg.AttachUser(s.id, userID); err != nil {
+		return err
+	}
+	s.principal = auth.Principal{
+		Kind:           auth.KindUser,
+		UserID:         userID,
+		KeyFingerprint: s.fingerprint,
+	}
+	return nil
+}
 
 // PublicKey 返回认证阶段服务端序列化出的公钥文本，供 P0-18 的 /key add 使用。
 // 值来自 gossh.MarshalAuthorizedKey(key)，已在 publicKeyCallback 里过

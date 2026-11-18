@@ -16,7 +16,9 @@ import (
 )
 
 // inputHandler 把 SSH 字节流归一化后交给命令注册表的唯一入口（§3.2）。
-// P0-24 的页面控制器替换 handle 的业务分发，但解码器与命令表不变。
+// P0-19 起在 handle 分发里接入 /login 最小交互层（docs/DEVIATIONS.md R18）。
+// P0-24 的页面控制器只替换 loginPresenter / loginFlow 的呈现职责，
+// 解码器、命令表与 transport/ssh 协议层保持不变。
 //
 // 安全约束：绝不把 KeyMsg.Raw / KeyMsg.Text 写回终端。用户提交的文本
 // 只能经 P0-23 的净化 + 白名单渲染后才能出现；在此之前一律零回显。
@@ -65,6 +67,31 @@ func (h *inputHandler) withKeyBinding(svc *auth.KeyBindingService) *inputHandler
 	h.keys = svc
 	return h
 }
+
+// newLoginFlow 为一次 /login 创建独立的交互编排器。四个依赖（状态机、登录
+// 事务、公钥绑定、呈现）都来自已装配的进程级单例；flow 本身是每会话对象，
+// 持有 device_code 但绝不持有 token（token 只在 finish 的栈上短暂存在）。
+func (h *inputHandler) newLoginFlow() (*loginFlow, bool) {
+	if h.deviceAuth == nil || h.login == nil || h.keys == nil {
+		return nil, false
+	}
+	return &loginFlow{
+		device: h.deviceAuth,
+		login:  h.login,
+		keys:   h.keys,
+		now:    time.Now,
+	}, true
+}
+
+// handleOutcome 是一次输入事件对会话循环的结论。P0-19 把「启动登录」显式
+// 建模出来，避免把长生命周期的登录循环塞进 handle 的返回值里。
+type handleOutcome uint8
+
+const (
+	outcomeContinue handleOutcome = iota
+	outcomeQuit
+	outcomeStartLogin
+)
 
 // commandLine 是斜杠命令的行编辑缓冲。P0-22 只做收集与提交，不回显原文。
 type commandLine struct {
@@ -115,36 +142,132 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	}()
 
 	var cl commandLine
+	var flow *loginFlow
+	var pollTimer *time.Timer
+	var pollC <-chan time.Time
+	var pollResultC <-chan loginPollMsg
+
+	// stopPoll 收掉定时器与两个 channel；登录结束 / 取消 / 会话退出都要调。
+	stopPoll := func() {
+		if pollTimer != nil {
+			pollTimer.Stop()
+			pollTimer = nil
+		}
+		pollC = nil
+		pollResultC = nil
+	}
+	defer stopPoll()
+
+	// cancelActive 在连接退出时作废未完成的设备码。此时 ctx 可能已取消，
+	// 因此另起一个短超时上下文，保证 Cancel 真的能写回 denied。
+	cancelActive := func() {
+		if flow == nil || !flow.active {
+			return
+		}
+		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		flow.cancel(cctx, sess)
+		flow = nil
+		stopPoll()
+	}
+
+	// handleOne 是主循环里唯一处理单条 KeyMsg 的入口：登录态下只认 Esc / Ctrl-C，
+	// 其余按键零回显；非登录态走原有的命令表分发。
+	handleOne := func(m input.KeyMsg) bool {
+		if flow != nil && flow.active {
+			if isLoginCancelKey(m) {
+				flow.cancel(ctx, sess)
+				flow = nil
+				stopPoll()
+			}
+			return false
+		}
+		switch h.handle(ctx, sess, m, &cl) {
+		case outcomeQuit:
+			return true
+		case outcomeStartLogin:
+			f, ok := h.newLoginFlow()
+			if !ok {
+				_, _ = io.WriteString(sess, auth.LoginTextNotReady+"\r\n")
+				return false
+			}
+			delay, active, err := f.begin(ctx, sess, sess)
+			if err != nil || !active {
+				return false
+			}
+			flow = f
+			pollTimer = time.NewTimer(delay)
+			pollC = pollTimer.C
+		}
+		return false
+	}
+
 	ticker := time.NewTicker(sshd.EscPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case m, ok := <-msgs:
 			if !ok {
+				cancelActive()
 				return nil
 			}
-			if h.handle(ctx, sess, m, &cl) {
+			if handleOne(m) {
 				return nil
 			}
 		case <-ticker.C:
 			for _, m := range dec.Poll() {
-				if h.handle(ctx, sess, m, &cl) {
+				if handleOne(m) {
 					return nil
 				}
 			}
+		case <-pollC:
+			if flow == nil || !flow.active {
+				stopPoll()
+				continue
+			}
+			// 网络调用最长 10s，异步执行才能让 Esc 即时取消；取消后迟到的结果
+			// 由下面的 flow.active 判定丢弃（ADR-022 的 CAS 保证取消优先）。
+			code := flow.pollCode()
+			ch := make(chan loginPollMsg, 1)
+			go func() {
+				r, err := h.deviceAuth.Poll(ctx, code)
+				select {
+				case ch <- loginPollMsg{result: r, err: err}:
+				case <-ctx.Done():
+				case <-sess.Done():
+				}
+			}()
+			pollResultC = ch
+			pollC = nil // 等待本次结果期间不再触发新的 Poll
+		case pm := <-pollResultC:
+			if flow == nil || !flow.active {
+				stopPoll()
+				continue
+			}
+			pollResultC = nil
+			done, delay, _ := flow.applyPoll(ctx, sess, sess, pm.result, pm.err)
+			if done || !flow.active {
+				flow = nil
+				stopPoll()
+			} else {
+				pollTimer.Reset(delay)
+				pollC = pollTimer.C
+			}
 		case <-ctx.Done():
+			cancelActive()
 			return nil
 		case <-sess.Done():
+			cancelActive()
 			return nil
 		}
 	}
 }
 
-func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, m input.KeyMsg, cl *commandLine) bool {
+func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, m input.KeyMsg, cl *commandLine) handleOutcome {
 	action, line, pasteLen := applyKey(cl, m)
 	switch action {
 	case actionQuit:
-		return true
+		return outcomeQuit
 	case actionCancel:
 		_, _ = io.WriteString(sess, "（已取消命令输入）\r\n")
 	case actionHelp:
@@ -158,20 +281,34 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, m input.K
 	case actionSubmit:
 		inv, err := h.reg.Parse(line)
 		out := formatResult(h.reg, inv, err)
+		outcome := outcomeContinue
 		if err == nil {
-			// P0-18：/keys 与 /key 走真实业务动作；其余仍由 P0-24 页面控制器接入。
-			// 解析失败时只输出固定文案，绝不把 inv.Args 原文写回终端。
+			// P0-18：/keys 与 /key 走真实业务动作；P0-19：/login github 起
+			// 最小交互层；其余仍由 P0-24 页面控制器接入。解析失败时只输出
+			// 固定文案，绝不把 inv.Args 原文写回终端。
 			switch inv.Name {
 			case "keys":
 				out = h.runKeys(ctx, sess)
 			case "key":
 				out = h.runKey(ctx, sess, inv)
+			case "login":
+				if isGitHubLogin(inv) {
+					outcome = outcomeStartLogin
+					out = "" // 发起屏由 loginFlow.begin 统一输出
+				} else {
+					out = auth.LoginTextUnsupportedProvider + "\r\n"
+				}
 			}
 		}
-		_, _ = io.WriteString(sess, out)
-		return inv.Name == "quit" && err == nil
+		if out != "" {
+			_, _ = io.WriteString(sess, out)
+		}
+		if inv.Name == "quit" && err == nil {
+			return outcomeQuit
+		}
+		return outcome
 	}
-	return false
+	return outcomeContinue
 }
 
 // runKeys 列出当前账号未吊销的公钥。指纹来自 ssh_keys 表（服务端数据源），
