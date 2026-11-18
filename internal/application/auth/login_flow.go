@@ -58,17 +58,20 @@ var (
 // ---------------------------------------------------------------------------
 
 const (
-	LoginTextStart                 = "正在发起 GitHub 登录（Device Flow）"
-	LoginTextOpenHint              = "请在浏览器打开下面的地址并输入验证码："
-	LoginTextCancelHint            = "按 Esc 取消本次登录。"
-	LoginTextWaiting               = "等待授权中，服务端正在轮询…"
-	LoginTextRetry                 = "连接 GitHub 暂时失败，稍后自动重试…"
-	LoginTextNetworkGiveUp         = "多次连接 GitHub 失败，请稍后重新 /login github"
-	LoginTextCancelled             = "已取消登录。"
-	LoginTextExpired               = "设备码已过期，请重新 /login github"
-	LoginTextDenied                = "登录已取消或被拒绝。"
-	LoginTextAuthorizing           = "授权成功，正在建立账号…"
-	LoginTextLoginFailed           = "登录失败，请稍后重试。"
+	LoginTextStart         = "正在发起 GitHub 登录（Device Flow）"
+	LoginTextOpenHint      = "请在浏览器打开下面的地址并输入验证码："
+	LoginTextCancelHint    = "按 Esc 取消本次登录。"
+	LoginTextWaiting       = "等待授权中，服务端正在轮询…"
+	LoginTextRetry         = "连接 GitHub 暂时失败，稍后自动重试…"
+	LoginTextNetworkGiveUp = "多次连接 GitHub 失败，请稍后重新 /login github"
+	LoginTextCancelled     = "已取消登录。"
+	LoginTextExpired       = "设备码已过期，请重新 /login github"
+	LoginTextDenied        = "登录已取消或被拒绝。"
+	LoginTextAuthorizing   = "授权成功，正在建立账号…"
+	LoginTextLoginFailed   = "登录失败，请稍后重试。"
+	// 本机没有 client_id 时给可操作提示，而不是笼统的「登录失败」。
+	// 依据 OPS §3「缺值时给明确提示，不 panic、不静默失败」。
+	LoginTextClientIDMissing       = "未配置 MOTD_GITHUB_CLIENT_ID，无法发起 GitHub 登录；请在服务端注入该环境变量后重试（见 docs/OPS.md §3）。"
 	LoginTextBindFailed            = "账号已建立，但当前连接的公钥未能绑定；请换一把公钥或先解绑后重试。"
 	LoginTextUpgradeFailed         = "登录已完成，但本会话未能升级为登录态，请重新连接。"
 	LoginTextSuccessLogin          = "登录成功。"

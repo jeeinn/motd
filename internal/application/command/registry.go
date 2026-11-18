@@ -51,7 +51,9 @@ var defaultCommands = []Command{
 	{Name: "open", Usage: "/open <id>", Summary: "打开指定主题", MinArgs: 1, MaxArgs: 1},
 	{Name: "new", Usage: "/new", Summary: "新建主题", MaxArgs: 0},
 	{Name: "reply", Usage: "/reply", Summary: "回复当前主题", MaxArgs: 0},
-	{Name: "login", Usage: "/login github", Summary: "GitHub Device Flow 登录", MinArgs: 1, MaxArgs: 1, Aliases: []string{"signin"}},
+	// MinArgs=0 是刻意的：/login 不带参数时不落到通用「参数个数不符」，
+	// 而是进入 handle 的 provider 白名单分支，给出「仅支持 /login github」。
+	{Name: "login", Usage: "/login github", Summary: "GitHub Device Flow 登录", MinArgs: 0, MaxArgs: 1, Aliases: []string{"signin"}},
 	{Name: "keys", Usage: "/keys", Summary: "管理已绑定公钥", MaxArgs: 0},
 	// P0-18：/key add 绑定「当前连接」的公钥，不接受任何公钥文本参数；
 	// /key rm <fingerprint> 只接指纹标识符（由 auth.ParseKeyCommand 严格收口）。
@@ -63,14 +65,14 @@ var defaultCommands = []Command{
 var defaultBindings = []Binding{
 	{Key: "j / ↓", Desc: "下移"},
 	{Key: "k / ↑", Desc: "上移"},
-	{Key: "h / ←", Desc: "返回上一层"},
+	{Key: "q / h / ←", Desc: "返回上一层"},
 	{Key: "l / → / Enter", Desc: "打开当前项"},
 	{Key: "?", Desc: "显示本帮助（等价 /help）"},
-	{Key: "q", Desc: "退出（等价 /quit）"},
 	{Key: "r", Desc: "回复（等价 /reply）"},
+	{Key: "n / p", Desc: "主题列表下一页 / 回第一页"},
 	{Key: "Esc", Desc: "取消 / 关闭浮层"},
 	{Key: "/", Desc: "进入斜杠命令输入"},
-	{Key: "Ctrl-C / Ctrl-D", Desc: "取消输入 / 退出"},
+	{Key: "Ctrl-C / Ctrl-D", Desc: "退出会话（等价 /quit）"},
 }
 
 var defaultRegistry = mustNew(defaultCommands)

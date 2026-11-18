@@ -4,8 +4,9 @@ package main
 //
 // 这是**最小交互层**：不改 transport/ssh 协议层、不改命令注册表、不改
 // application/auth 的四个用例，只在 cmd 装配层把 P0-15/16/17/18 串成
-// `/login github` 的完整链路。P0-24 落地时由页面控制器替换本文件与
-// login_view.go 的呈现职责（与 P0-22 既定的「替换 handle 分发」模式一致）。
+// `/login github` 的完整链路。论坛页面控制器已落地（page_controller.go），
+// 但 /login 的呈现职责仍留在本文件与 login_view.go，作为独立替换点保留
+// （DEVIATIONS.md R18/R20）；命令表与协议层零改动。
 //
 // 三条硬边界：
 //  1. device_code 只保存在本结构体的进程内字段，绝不写终端 / 日志 / 库；
@@ -15,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -69,7 +71,7 @@ func (f *loginFlow) begin(ctx context.Context, conn loginConn, out io.Writer) (t
 
 	st, err := f.device.Start(ctx, conn.ID())
 	if err != nil {
-		_ = f.view.line(out, auth.LoginTextLoginFailed, safe.StylePlain)
+		_ = f.view.line(out, loginStartFailureText(err), safe.StylePlain)
 		return 0, false, err
 	}
 	v, err := auth.ProjectLoginView(st, f.now().UTC())
@@ -89,6 +91,15 @@ func (f *loginFlow) begin(ctx context.Context, conn loginConn, out io.Writer) (t
 	f.expiresAt = st.ExpiresAt
 	f.retries = 0
 	return time.Duration(v.IntervalSeconds) * time.Second, true, nil
+}
+
+// loginStartFailureText 把「无法起流」的原因映射成可操作提示。
+// 刻意不回显 err.Error()：它来自外部依赖，拼进输出就是渲染旁路（P0-22/P0-23）。
+func loginStartFailureText(err error) string {
+	if errors.Is(err, auth.ErrClientIDMissing) {
+		return auth.LoginTextClientIDMissing
+	}
+	return auth.LoginTextLoginFailed
 }
 
 // pollCode 返回本次轮询用的 device_code，供 Serve 的异步 Poll goroutine 使用。

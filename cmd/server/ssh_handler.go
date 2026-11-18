@@ -10,15 +10,17 @@ import (
 
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/command"
+	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/application/input"
 	"github.com/jeeinn/motd/internal/application/presence"
+	appuser "github.com/jeeinn/motd/internal/application/user"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
 
 // inputHandler 把 SSH 字节流归一化后交给命令注册表的唯一入口（§3.2）。
 // P0-19 起在 handle 分发里接入 /login 最小交互层（docs/DEVIATIONS.md R18）。
-// P0-24 的页面控制器只替换 loginPresenter / loginFlow 的呈现职责，
-// 解码器、命令表与 transport/ssh 协议层保持不变。
+// MVP 收尾把 P0-24/P0-25 的终端页面控制器接进同一分发链：解码器、命令表
+// 与 transport/ssh 协议层保持不变，页面状态每会话独立（pageController）。
 //
 // 安全约束：绝不把 KeyMsg.Raw / KeyMsg.Text 写回终端。用户提交的文本
 // 只能经 P0-23 的净化 + 白名单渲染后才能出现；在此之前一律零回显。
@@ -34,6 +36,18 @@ type inputHandler struct {
 	// keys 由 P0-18 装配。构造顺序上它依赖 SSH Server（会话撤销实现），
 	// 而 Server 又持有本 handler，因此用 setter 后填，避免装配循环。
 	keys *auth.KeyBindingService
+
+	// MVP 页面控制器依赖：进程级共享，每会话只复制状态不复制依赖。
+	forum    *forum.Service
+	users    appuser.StatusReader
+	presence *presence.Registry
+}
+
+// withForum 注入终端页面所需的用例与会话上下文。同样保持无参构造，
+// 让既有会话层测试零改动。
+func (h *inputHandler) withForum(svc *forum.Service, users appuser.StatusReader, reg *presence.Registry) *inputHandler {
+	h.forum, h.users, h.presence = svc, users, reg
+	return h
 }
 
 func newInputHandler() *inputHandler {
@@ -99,6 +113,10 @@ type commandLine struct {
 	runes  []rune
 }
 
+// 进入命令态时 cl.runes 已预置 '/'；且 P0-22 的零回显让用户看不到自己
+// 输入的字符，两件事都必须在提示里说清楚，否则会被误判为「输入没反应」。
+const commandEntryHint = "已进入命令输入（/ 已自动填入，无需再打一次）：直接输入命令名与参数；输入过程不回显（安全约束），Enter 提交，Esc 取消。\r\n"
+
 type cmdAction uint8
 
 const (
@@ -110,12 +128,24 @@ const (
 	actionCommandStart
 	actionPasteNotice
 	actionEscNotice
+	// MVP 页面导航（P0-25）：键盘与斜杠命令最终都落到同一个 pageController，
+	// 不产生第二条业务路径（§3.2）。
+	actionMoveDown
+	actionMoveUp
+	actionOpen
+	actionBack
+	actionReply
+	actionNextPage
+	actionPrevPage
 )
 
 func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
+	// 页面状态每会话独立：inputHandler 是进程级单例，绝不能把光标 / 当前节点
+	// 之类的 UI 状态放在 handler 上（原则二：内存状态只是运行时状态）。
+	pc := h.newPageController()
 	_, _ = fmt.Fprintf(sess, "motd %s\r\n", version)
-	_, _ = io.WriteString(sess, "访客只读。按 ? 查看命令；页面将在 P0-24 接入。\r\n")
 	_ = sess.SetState(presence.StateBrowsing)
+	_ = pc.showNodes(ctx, sess)
 
 	dec := sshd.NewKeyDecoder()
 	msgs := make(chan input.KeyMsg, 64)
@@ -179,10 +209,16 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 				flow.cancel(ctx, sess)
 				flow = nil
 				stopPoll()
+				_ = pc.refresh(ctx, sess)
 			}
 			return false
 		}
-		switch h.handle(ctx, sess, m, &cl) {
+		if pc.editor != nil {
+			// 编辑态优先于命令表：按键只进输入缓冲，零回显（P0-22）。
+			_ = pc.editorKey(ctx, sess, m)
+			return false
+		}
+		switch h.handle(ctx, sess, pc, m, &cl) {
 		case outcomeQuit:
 			return true
 		case outcomeStartLogin:
@@ -249,6 +285,8 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			if done || !flow.active {
 				flow = nil
 				stopPoll()
+				// 登录成功后状态栏要立刻从「访客」变成「已登录」。
+				_ = pc.refresh(ctx, sess)
 			} else {
 				pollTimer.Reset(delay)
 				pollC = pollTimer.C
@@ -263,7 +301,7 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	}
 }
 
-func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, m input.KeyMsg, cl *commandLine) handleOutcome {
+func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageController, m input.KeyMsg, cl *commandLine) handleOutcome {
 	action, line, pasteLen := applyKey(cl, m)
 	switch action {
 	case actionQuit:
@@ -273,40 +311,43 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, m input.K
 	case actionHelp:
 		_, _ = io.WriteString(sess, h.reg.Help())
 	case actionCommandStart:
-		_, _ = io.WriteString(sess, "命令输入：以 / 开头，Enter 提交，Esc 取消。\r\n")
+		// 提示语若说「以 / 开头」，用户补打一个 / 会得到 //login → 未知命令
+		// （本机实测反馈）。具体措辞见 commandEntryHint 的回归测试。
+		_, _ = io.WriteString(sess, commandEntryHint)
 	case actionPasteNotice:
-		_, _ = fmt.Fprintf(sess, "（已收到粘贴块 %d 字节，P0-24 接入编辑器）\r\n", pasteLen)
+		_, _ = fmt.Fprintf(sess, "（已收到粘贴块 %d 字节；请先在编辑态内粘贴）\r\n", pasteLen)
 	case actionEscNotice:
 		_, _ = io.WriteString(sess, "（取消）\r\n")
+	case actionMoveDown, actionMoveUp, actionOpen, actionBack, actionReply,
+		actionNextPage, actionPrevPage:
+		// 键盘与斜杠命令汇聚到同一个页面控制器，不产生第二条业务路径。
+		_ = pc.key(ctx, sess, action)
 	case actionSubmit:
 		inv, err := h.reg.Parse(line)
-		out := formatResult(h.reg, inv, err)
-		outcome := outcomeContinue
-		if err == nil {
-			// P0-18：/keys 与 /key 走真实业务动作；P0-19：/login github 起
-			// 最小交互层；其余仍由 P0-24 页面控制器接入。解析失败时只输出
-			// 固定文案，绝不把 inv.Args 原文写回终端。
-			switch inv.Name {
-			case "keys":
-				out = h.runKeys(ctx, sess)
-			case "key":
-				out = h.runKey(ctx, sess, inv)
-			case "login":
-				if isGitHubLogin(inv) {
-					outcome = outcomeStartLogin
-					out = "" // 发起屏由 loginFlow.begin 统一输出
-				} else {
-					out = auth.LoginTextUnsupportedProvider + "\r\n"
-				}
-			}
+		if err != nil {
+			// 解析失败只输出固定文案，绝不把用户提交的原文写回终端。
+			_, _ = io.WriteString(sess, formatResult(h.reg, inv, err))
+			return outcomeContinue
 		}
-		if out != "" {
-			_, _ = io.WriteString(sess, out)
-		}
-		if inv.Name == "quit" && err == nil {
+		switch inv.Name {
+		case "quit":
+			_, _ = io.WriteString(sess, "再见\r\n")
 			return outcomeQuit
+		case "help":
+			_, _ = io.WriteString(sess, h.reg.Help())
+		case "keys":
+			_, _ = io.WriteString(sess, h.runKeys(ctx, sess))
+		case "key":
+			_, _ = io.WriteString(sess, h.runKey(ctx, sess, inv))
+		case "login":
+			if isGitHubLogin(inv) {
+				return outcomeStartLogin // 发起屏由 loginFlow.begin 统一输出
+			}
+			_, _ = io.WriteString(sess, auth.LoginTextUnsupportedProvider+"\r\n")
+		default:
+			// top / open / new / reply 由页面控制器接管；命令表仍是唯一入口。
+			_ = pc.command(ctx, sess, inv)
 		}
-		return outcome
 	}
 	return outcomeContinue
 }
@@ -454,6 +495,14 @@ func applyKey(cl *commandLine, m input.KeyMsg) (cmdAction, string, int) {
 	switch m.Kind {
 	case input.KeyCtrlC, input.KeyCtrlD:
 		return actionQuit, "", 0
+	case input.KeyArrowDown:
+		return actionMoveDown, "", 0
+	case input.KeyArrowUp:
+		return actionMoveUp, "", 0
+	case input.KeyArrowRight, input.KeyEnter:
+		return actionOpen, "", 0
+	case input.KeyArrowLeft:
+		return actionBack, "", 0
 	case input.KeyRune:
 		switch m.Rune {
 		case '?':
@@ -462,6 +511,22 @@ func applyKey(cl *commandLine, m input.KeyMsg) (cmdAction, string, int) {
 			cl.active = true
 			cl.runes = []rune{'/'}
 			return actionCommandStart, "", 0
+		case 'j':
+			return actionMoveDown, "", 0
+		case 'k':
+			return actionMoveUp, "", 0
+		case 'l':
+			return actionOpen, "", 0
+		case 'h', 'q':
+			// §3.1 / P0-25：q 是「返回上一层」，不是退出；
+			// 退出统一走 /quit 或 Ctrl-C / Ctrl-D。
+			return actionBack, "", 0
+		case 'r':
+			return actionReply, "", 0
+		case 'n':
+			return actionNextPage, "", 0
+		case 'p':
+			return actionPrevPage, "", 0
 		}
 	case input.KeyEsc:
 		return actionEscNotice, "", 0
@@ -491,6 +556,6 @@ func formatResult(reg *command.Registry, inv command.Invocation, err error) stri
 	case "quit":
 		return "再见\r\n"
 	default:
-		return fmt.Sprintf("已收到 /%s（P0-24 接入业务动作）\r\n", inv.Name)
+		return fmt.Sprintf("已收到 /%s\r\n", inv.Name)
 	}
 }

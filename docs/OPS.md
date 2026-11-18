@@ -84,7 +84,7 @@ motdctl restore <backup-file> --target <path>
 
   unit 内只写 `EnvironmentFile=/etc/motd/motd.env`（`deploy/motd.service` 由 P0-28 产出）。
 
-- **开发 / 测试不需要设置它**：`httptest` 假端点覆盖 Device Flow 全部分支，不依赖真实凭据与外网。未设置时 `/login` 返回明确提示，不 panic、不静默失败；`/healthz` 不回显该值。
+- **开发 / 测试不需要设置它**：`httptest` 假端点覆盖 Device Flow 全部分支，不依赖真实凭据与外网。未设置时 `/login github` 会返回专门的固定提示「未配置 MOTD_GITHUB_CLIENT_ID，无法发起 GitHub 登录…」（`auth.LoginTextClientIDMissing`），不 panic、不静默失败、不回显上游错误原文；`/healthz` 不回显该值。
 - **P0-15 落地事实**（ADR-021）：`config.Load` 读取该变量并注入 `infrastructure/github.Client`；两个需要 `client_id` 的 POST 在缺值时返回 `auth.ErrClientIDMissing`，不发出任何请求。启动日志只输出 `client_id_configured=true|false` 与 `scope`，**不打印凭据值**，也不会因缺值 panic。
 - 出站要求：VPS 需允许访问 `github.com:443`（Device Flow 两端点）与 `api.github.com:443`（`/user`、`/user/emails`）。本机 `httptest` 测试不需要外网。
 - 真实联调（D2 手工验收）与 P0-28 部署自检前必须就位。
@@ -180,6 +180,7 @@ find data/backups -name 'motd-*.db' -mtime +14 -print
 ## 8. 监控与告警（P3 落地）
 
 - `/healthz` 返回 `ok <version> queue=<depth>/<cap> online=<n> active=<n> commits=<n>`：`queue` 观察写入背压，`online/active` 是内存在线注册表（重启归零，非业务数据），`commits` 是进程启动以来成功提交的事务数。全部为运维可观测字段，不承载业务流量（ADR-006 / ADR-016）。
+- **连接级心跳**：每条活 SSH 连接每 10s 在内存 `Touch` 一次，不写库；20s `Reap` 因此只清理真正断开的僵尸条目。等待 Device Flow 授权期间即使几十秒无按键，`online` 也不应归零；若观察到归零或「登录成功但仍为访客」，排查 `sshd.Session.heartbeatLoop` 是否被关闭，详见 `docs/MVP-DELIVERY.md §9`。
 - 待接入告警：最近备份时间超过 26 h、`verify` 失败、队列深度持续接近容量。
 
 ## 9. 部署与上线清单（P0 收尾交付）

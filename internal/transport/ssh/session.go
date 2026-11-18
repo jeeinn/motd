@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -39,8 +40,28 @@ type Session struct {
 	height uint32
 
 	timer *time.Timer
+	hb    *time.Ticker
 	done  chan struct{}
 	once  sync.Once
+}
+
+// sessionHeartbeatInterval 是连接级心跳周期，取 presence 默认超时的一半。
+//
+// Registry 的 20s 超时本意是清理「连接已断但没走 Disconnect」的僵尸条目，
+// 但 SSH 是长连接：用户等待 GitHub Device Flow 授权时可能几十秒没有任何输入，
+// 单靠 Session.Read 刷新心跳会把仍活着的连接误删，进而导致
+// 「授权成功、账号已建、公钥已绑，但 UpgradeToUser 失败仍是访客」。
+// 心跳只在内存 Touch，不写 SQLite（§2.6 / ADR-016）。
+const sessionHeartbeatInterval = 10 * time.Second
+
+// reRegisterSession 把被 Reap 清掉、但连接仍然活着的会话放回注册表。
+// 注册表只保存内存状态，无法知道 TCP/SSH 连接是否还在；只有 Session 能判断，
+// 因此补登记放在这一层，而不是放宽 Reap 的超时口径（ADR-016 保持不变）。
+func reRegisterSession(reg *presence.Registry, id string, userID int64) error {
+	if err := reg.Connect(id, presence.KindSSH, userID); err != nil {
+		return err
+	}
+	return reg.SetState(id, presence.StateBrowsing)
 }
 
 func newSessionID() string {
@@ -59,8 +80,25 @@ func newSession(id string, ch gossh.Channel, fp, pk string, p auth.Principal, re
 		done: make(chan struct{}),
 	}
 	s.timer = time.AfterFunc(idle, func() { _ = s.Close() })
+	s.hb = time.NewTicker(sessionHeartbeatInterval)
+	go s.heartbeatLoop()
 	return s
 }
+
+// heartbeatLoop 让活着的连接持续刷新注册表心跳；Close 关闭 done 后即退出。
+func (s *Session) heartbeatLoop() {
+	for {
+		select {
+		case <-s.hb.C:
+			s.heartbeat()
+		case <-s.done:
+			return
+		}
+	}
+}
+
+// heartbeat 只刷新内存状态，抽成方法便于用注入时钟回归「长等待不误删」。
+func (s *Session) heartbeat() { _ = s.reg.Touch(s.id) }
 
 // Read 把每次输入视为一次心跳：刷新空闲计时器与 presence.LastSeenAt，
 // 但不产生任何持久化写入（§2.6 / ADR-016）。
@@ -71,7 +109,12 @@ func (s *Session) Read(p []byte) (int, error) {
 	n, err := s.ch.Read(p)
 	if n > 0 {
 		s.resetIdle()
-		_ = s.reg.Touch(s.id)
+		if terr := s.reg.Touch(s.id); terr != nil && errors.Is(terr, presence.ErrUnknownSession) {
+			// Reap 会按 20s 心跳超时把「长时间只读不输入」的连接移出注册表，
+			// 但连接本身没断、Read 仍会继续收到按键。若不重新登记，在线数会
+			// 永久归零，后续 SetState / AttachUser 也全部失败（本机实测发现）。
+			_ = reRegisterSession(s.reg, s.id, s.Principal().UserID)
+		}
 	}
 	return n, err
 }
@@ -100,6 +143,9 @@ func (s *Session) Close() error {
 		s.mu.Lock()
 		if s.timer != nil {
 			s.timer.Stop()
+		}
+		if s.hb != nil {
+			s.hb.Stop()
 		}
 		s.mu.Unlock()
 		err = s.ch.Close()
@@ -138,6 +184,9 @@ func (s *Session) UpgradeToUser(userID int64) error {
 	if s.principal.IsUser() {
 		return auth.ErrSessionUpgradeRejected
 	}
+	// 失败关闭保持不变（ADR-024 第 6 条）：会话不在注册表里就拒绝升级。
+	// 活连接由下面的连接级心跳保证不会被 Reap 清掉，因此这里不需要、
+	// 也不允许放宽成「自动补登记后升级」。
 	if err := s.reg.AttachUser(s.id, userID); err != nil {
 		return err
 	}

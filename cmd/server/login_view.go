@@ -10,8 +10,9 @@ package main
 //   - user_code / verification_uri / username → safe.RenderUser（外部数据净化路径）；
 //   - 两类文本**绝不拼进同一次渲染调用**，否则外部数据会绕过净化。
 //
-// P0-24 落地时整体替换本文件为 ViewModel + 双 Renderer 页面控制器；
-// application/auth 与 transport/ssh 协议层零改动。
+// MVP 收尾状态：论坛四页（版块/主题/详情/编辑）已由 page_controller.go 接通
+// ViewModel + 终端 Renderer；本文件仅剩 /login 的呈现尚未替换，仍保留为
+// 独立替换点（DEVIATIONS.md R18/R20）。application/auth 与 transport/ssh 协议层零改动。
 
 import (
 	"fmt"
