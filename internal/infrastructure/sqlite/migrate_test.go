@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	domainuser "github.com/jeeinn/motd/internal/domain/user"
 )
 
 // 迁移基线的回归测试：结构可建、可重复执行、关键约束真的生效。
@@ -91,6 +93,9 @@ func TestPragmaBaseline(t *testing.T) {
 	}
 }
 
+// TestUsernameConstraint 只验证 DDL 承担的两层兜底：长度、空白。
+// 字符类别白名单（中文 / ASCII 字母数字 / _ / -）不由 DDL 表达，
+// 事实来源是 domain/user.ValidateUsername，见 TestDDLMatchesDomainPolicy。
 func TestUsernameConstraint(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
@@ -104,20 +109,60 @@ func TestUsernameConstraint(t *testing.T) {
 		return err
 	}
 
-	if err := insert("v_x"); err != nil {
-		t.Fatalf("合法用户名应可插入: %v", err)
+	// 长度按字符数计，中文一字算一个字符（SQLite length(TEXT) 的语义）。
+	for _, name := range []string{"v_x", "A_B", "中文a", "中文测试", strings.Repeat("中", 20)} {
+		if err := insert(name); err != nil {
+			t.Fatalf("合法用户名 %q 应可插入: %v", name, err)
+		}
 	}
 
-	bad := []string{"ab", "A_B", "has space", "中文", "x!y"}
+	// DDL 必须挡住的：长度越界 + 各类空白。
+	bad := []string{
+		"ab", "中", strings.Repeat("中", 21),
+		"has space", "中 文", "中文 ", " 中文",
+		"中\t文", "中\n文", "中\r文",
+		"中\u3000文", // 全角空格 U+3000
+	}
 	for _, name := range bad {
 		if err := insert(name); err == nil {
 			t.Fatalf("非法用户名 %q 不应通过 CHECK 约束", name)
 		}
 	}
 
-	// NOCASE 唯一性：大小写不同视为同一个名字。
+	// 其余 Unicode 空白（如 NBSP）DDL 兜底不到，必须由 domain 层拦截——这是明确的分层边界。
+	if err := domainuser.ValidateUsername("中\u00a0文"); err == nil {
+		t.Fatal("NBSP 等 Unicode 空白必须由 domain/user.ValidateUsername 拦截")
+	}
+
+	// NOCASE 唯一性：大小写不同视为同一个名字；中文无大小写，不受影响。
 	if err := insert("V_X"); err == nil {
 		t.Fatal("用户名唯一性应大小写不敏感")
+	}
+}
+
+// TestDDLMatchesDomainPolicy 防止两层规则漂移：
+// domain 层接受的合法用户名，DDL 一律不能拒绝。
+func TestDDLMatchesDomainPolicy(t *testing.T) {
+	ctx := context.Background()
+	pools := openTestPools(t)
+	if _, err := Migrate(ctx, pools.Writer); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+
+	valid := []string{
+		"v_x", "A_B", "abc", "123", "a-b_c",
+		"中文a", "中文测试", "中文abc", "中文_测试-1",
+		strings.Repeat("中", 3), strings.Repeat("中", 20),
+	}
+	for _, name := range valid {
+		if err := domainuser.ValidateUsername(name); err != nil {
+			t.Fatalf("样本 %q 在 domain 层应合法: %v", name, err)
+		}
+		_, err := pools.Writer.ExecContext(ctx,
+			`INSERT INTO users (username, status, created_at, updated_at) VALUES (?, 'active', 0, 0)`, name)
+		if err != nil {
+			t.Fatalf("domain 层接受但 DDL 拒绝 %q，两层规则已漂移: %v", name, err)
+		}
 	}
 }
 

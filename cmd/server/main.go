@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"motd/internal/config"
-	"motd/internal/infrastructure/sqlite"
+	"github.com/jeeinn/motd/internal/config"
+	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
 )
 
 // version 由构建时注入（-ldflags "-X main.version=..."）。

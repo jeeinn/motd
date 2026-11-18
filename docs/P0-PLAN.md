@@ -1,8 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：待 V 先生确认 §6 的三项拍板 + §7 的两处调整
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**，M0 已部分完成，可继续推进
 > 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
-> 更新：2026-11-18
+> 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
+> 更新：2026-11-18 11:05
 
 ---
 
@@ -26,6 +27,7 @@
 | --- | --- | --- |
 | 邮箱注册 / 验证码 / 账号恢复 / 密码登录 | P1 | 表结构已建，`local_credentials`、`email_tokens` 在 P1 才写入 |
 | 浏览器 TUI、Frame 增量协议、WebSocket | P1 | P0 不做任何前端，`/healthz` 之外的 HTTP 端点一律不接 |
+| Device Flow 的 HTTP 端点（`/auth/device/start`、`/poll`） | P1 | **Q3 已拍板**：P0 进程内直接调用 application 用例，不引入 Web 会话与 CSRF 面 |
 | 点赞 / 搜索 / 声望计算 / 成就系统 | P1 | `votes`、`achievements` 表建好但不写；插件只留接口骨架 |
 | FTS5 全文索引 | P1 | 迁移里不含 FTS 表，避免 P0 背同步负担 |
 | RSS / 只读 API / AI 摘要 / 原生 CLI token | P2 | — |
@@ -113,7 +115,7 @@
 
 **P0-10 论坛核心用例**
 - 产出：`ListNodes` / `ListThreads(nodeID, sort, cursor)` / `GetThread` / `CreateThread` / `CreatePost`
-- 规则：标题 1–120 字符且非空白；正文非空、上限 8 KiB（防止一条内容打满带宽）；仅 `users.status=active` 可写；访客只读；`last_reply_at` 与 `threads.score` 在同一事务内更新
+- 规则：标题 1–120 字符且非空白；正文非空、上限 8 KiB（防止一条内容打满带宽）；仅 `users.status=active` 可写；访客只读；`last_reply_at` 与 `threads.score` 在同一事务内更新；发帖限流**每人 60 秒 1 帖、每小时 10 帖**，命中时返回剩余冷却时间（Q6 已拍板）
 - 验收：用例测试覆盖上述每条规则；创建 Post 后 `last_reply_at` 必须变化
 - 依赖：P0-08 ｜ 量级：3
 
@@ -153,7 +155,8 @@
   - `scope` 最小集 `read:user user:email`；响应按 JSON 解析（`Accept: application/json`）
 - 验收：用 `httptest` 假端点覆盖全部错误分支；轮询间隔不得小于 `interval`
 - 依赖：P0-03 ｜ 量级：1.5
-- 前置：GitHub OAuth App 注册并启用 Device Flow（需 V 先生提供 client_id）
+- 前置（Q7 已拍板）：**第二波（M1 结束）前**注册 GitHub OAuth App 并启用 Device Flow，`client_id` 只放服务端环境变量；本任务开发期一律用 `httptest` 假端点，不等真实凭据
+- Q3 约束：P0 由 SSH 会话在**进程内**调用本客户端，不开 HTTP 端点；`infrastructure/github` 只暴露 Go 接口，不绑定 transport
 
 **P0-16 Device Flow 状态机**
 - 产出：`device_auth_states` 的读写与状态迁移用例（`pending → authorized|denied|expired`）
@@ -164,6 +167,7 @@
 **P0-17 账号创建与登录事务**
 - 产出：`application/auth.Login` —— 按 §4.3 顺序判定：`(provider, provider_uid)` 命中即登录；邮箱命中但身份未命中**不自动合并**，提示先登录原账号再 `/link`；都不命中则原子创建 `users` + `identities`
 - 规则：`provider_uid` 取 GitHub 数字 `id`；只接受 primary 且 `email_verified` 的邮箱；用户名冲突由 `NOCASE UNIQUE` 兜底并追加数字后缀重试
+- 用户名必须先过 `domain/user.ValidateUsername`（Q1–Q7 后规则：中文 / 英文字母 / 数字 / `_` / `-`，3–20 字符，无空白；事实来源见 ADR-005），不能只依赖 DDL
 - 验收：并发同 UID 首登只产生一个用户（唯一约束 + 重试）；邮箱相同但 UID 不同必须建成两个账号
 - 依赖：P0-15、P0-06 ｜ 量级：1.5
 
@@ -176,7 +180,7 @@
 
 **P0-19 登录交互与会话升级**
 - 产出：终端内的 Device Flow 呈现（`user_code` + `verification_uri` + 剩余时间 + 取消键）、轮询期间的界面状态、成功后会话从 `guest` 升级为 `user`
-- 约束：轮询在服务端进行，终端只展示状态，不持有任何 token
+- 约束：轮询在服务端进行，终端只展示状态，不持有任何 token；**Q3 已拍板**：整条链路是进程内 `SSH session → application/auth → infrastructure/github`，不经过 HTTP，因此 P0 无 Web 会话与 CSRF 面
 - 验收：D2 手工跑通；中途 `Esc` 取消后 `device_auth_states` 进入 `denied` 且不留下未绑定半成品
 - 依赖：P0-16、P0-23、P0-24 ｜ 量级：1
 
@@ -189,7 +193,7 @@
 ### M3 终端
 
 **P0-21 SSH 服务入口**
-- 产出：`transport/ssh` —— `gliderlabs/ssh` Server、host key（ed25519，首次生成落 `data/`，权限 0600）、`PublicKeyHandler`、PTY、`WindowSize` 处理、空闲超时、最大连接数
+- 产出：`transport/ssh` —— `gliderlabs/ssh` Server（**默认监听 `2222`**，Q4 已拍板）、host key（ed25519，首次生成落 `data/`，权限 0600）、`PublicKeyHandler`、PTY、`WindowSize` 处理、空闲超时、最大连接数
 - 规则：仅公钥认证，禁密码、禁 root；超限拒绝新连接（§1.2 容量口径）；单连接一个 goroutine 树，退出必须回收
 - 验收：`ssh -p 2222 localhost` 能进；错误 key 被拒；连接数打满时新连接收到明确拒绝
 - 依赖：P0-13、P0-14 ｜ 量级：2
@@ -215,7 +219,7 @@
 
 **P0-24 终端页面**
 - 产出：版块列表 / 主题列表 / 主题详情 / 发帖编辑器 / 回复编辑器 / 登录引导 / 帮助浮层
-- 规则：列表行 `序号 + 赞数 + 标题 + 元信息`；状态栏 `online / karma / 等级`；分页加载；编辑态支持多行与取消
+- 规则：列表行 `序号 + 赞数 + 标题 + 元信息`；状态栏 `online / karma / 等级`；分页加载；编辑态支持多行与取消；**等级按 Q5 已拍板口径**：karma 分档常量 `0 / 10 / 50 / 200 → L1–L4`，放在 `domain/user`，P0 不做动态计分
 - 验收：D1 手工跑通全流程；窄终端（40 列）不破版；宽字符（中文、emoji）对齐正确
 - 依赖：P0-22、P0-23、P0-10 ｜ 量级：3
 
@@ -239,7 +243,7 @@
 - 依赖：P0-21、P0-26 ｜ 量级：0.5
 
 **P0-28 部署与自检**
-- 产出：`deploy/motd.service`（systemd，`GOMEMLIMIT=800MiB`、`GOGC=50`、`Restart=on-failure`）、启动自检（数据目录权限、迁移版本、host key 存在）、备份 cron 示例
+- 产出：`deploy/motd.service`（systemd，`GOMEMLIMIT=800MiB`、`GOGC=50`、`Restart=on-failure`）、启动自检（数据目录权限、迁移版本、host key 存在）、备份 cron 示例、对外 22 → 本机 `2222` 的转发配置（Q4）
 - 验收：一台干净机器按 `docs/OPS.md` 从零部署到可用；重启后自动恢复服务
 - 依赖：P0-07、P0-21 ｜ 量级：1
 
@@ -314,40 +318,45 @@ flowchart TD
 
 ---
 
-## 6. 需拍板事项（阻塞或影响设计）
+## 6. 已拍板结论（Q1–Q7）
 
-| # | 事项 | 我的建议 | 影响 |
-| --- | --- | --- | --- |
-| Q1 | 评审稿 §8.2 四项架构决策（模块化单体解耦 / 统一 ViewModel 双渲染 / 写入必经 Application / 在线状态与业务数据分离） | 全部同意，本计划已按此执行 | 若否决任一项，M0 的 P0-03、M1 的 P0-11/P0-13 需要重做 |
-| Q2 | Go module path 暂定 `motd`，非域名形式 | 若确定托管仓库（git.weixin.qq.com / GitHub），立刻改成正式路径；越晚改代价越大 | 影响所有 import 路径 |
-| Q3 | P0 的 Device Flow 是否走 HTTP 端点 | **建议进程内直接调用 application 用例**，HTTP 端点（§4.8 的 `/auth/device/start`、`/poll`）留到 P1 浏览器接入时再开 | 走 HTTP 就要在 P0 引入 Web 会话与 CSRF 面，与本阶段"只做 SSH 闭环"冲突 |
-| Q4 | SSH 监听端口与 host key | 建议默认 `2222`（避免 root/CAP_NET_BIND_SERVICE），对外用 `iptables` 或 `setcap` 转到 22 | 影响部署脚本与 OPS 文档 |
-| Q5 | 状态栏「等级」的算法 | 设计稿未定义。建议 P0 用 `karma` 分档常量（如 0/10/50/200 → L1–L4）放在 `domain/user`，先满足显示 | 未定义就无法验收 P0-24 的状态栏 |
-| Q6 | 发帖频率限制参数 | 建议每人 60 秒 1 帖、每小时 10 帖；命中时给出剩余冷却时间 | 影响 P0-10/P0-20 的实现与验收 |
-| Q7 | GitHub OAuth App 何时注册 | 建议在第二波开始前注册并启用 Device Flow，把 `client_id` 放进部署环境变量 | P0-15 无法联调真实 GitHub（用假端点可先推进） |
+> **2026-11-18：V 先生明确答复「Q1–Q7 七项待拍板，我全部同意」。** 本节不再是待决策清单，以下为执行口径；完整决策记录见 `DECISIONS.md ADR-009`。
+
+| # | 已生效结论 | 已落到哪里 |
+| --- | --- | --- |
+| Q1 | §8.2 四项架构决策**全部采纳**：模块化单体与 Domain 解耦、统一 ViewModel + 双 Renderer、所有持久化写入必经 Application 且插件禁直连数据库、在线状态与业务数据分离且心跳不逐次持久化 | ADR-001/002/003；P0-03 依赖守卫、P0-11 ViewModel、P0-12 插件骨架、P0-13 内存注册表 |
+| Q2 | 托管仓库 `git@github.com:jeeinn/motd.git`；module path `github.com/jeeinn/motd` | ADR-008；`go.mod` 与全部 import 已全量替换 |
+| Q3 | P0 的 Device Flow **进程内直接调用 application 用例**；HTTP 端点（`/auth/device/start`、`/auth/device/poll`）留到 P1 浏览器接入时再开 | §1.1 不做清单、P0-15/16/19；P0 不引入 Web 会话与 CSRF 面 |
+| Q4 | SSH 默认监听 **`2222`**，避免 root / `CAP_NET_BIND_SERVICE`；对外 22 端口由 `iptables` 或 `setcap` 转发 | P0-21、P0-28、D1 验收命令 |
+| Q5 | 状态栏「等级」按 karma 分档常量 **`0 / 10 / 50 / 200 → L1–L4`**，放在 `domain/user` | P0-24 / P0-25 |
+| Q6 | 发帖限流 **每人 60 秒 1 帖、每小时 10 帖**，命中时返回剩余冷却时间 | P0-10、P0-20 |
+| Q7 | GitHub OAuth App 在**第二波（M1 结束）前**注册并启用 Device Flow；`client_id` 只放服务端环境变量 | P0-15 前置；联调用 `httptest` 假端点，不依赖真实凭据 |
+
+Q1 与 Q3 是结构性决策。若后续要改，M0 的依赖守卫与 M2 的认证链路都要重做，改动前应先出 diff 评审。
 
 ---
 
 ## 7. 复核发现（对设计稿的偏差与补漏）
 
-已按官方文档复核 §4.4，结论与改动如下：
+设计稿 `docs/design/…v0.2.md` 是**评审稿快照，不回改**；本节记录实际执行时的偏差，以 `DECISIONS.md` 为最终口径。
 
-| # | 项 | 设计稿 | 复核结果 | 处理 |
+| # | 项 | 设计稿 | 复核 / 决策结果 | 处理 |
 | --- | --- | --- | --- | --- |
 | R1 | Device Flow 是否需要 client_secret | 不需要 | 确认不需要，仅 `client_id` + `grant_type` | 保持 |
 | R2 | `slow_down` 的退避语义 | 「增加间隔」 | 官方明确：**在上次 interval 基础上加 5 秒**，且响应返回新 `interval` | 收紧为「取响应新值」，写进 P0-15 |
 | R3 | Device Flow 错误码清单 | 只列 4 个 | 缺 `device_flow_disabled`、`incorrect_client_credentials`、`incorrect_device_code` | 补进 P0-15 验收 |
-| R4 | GitHub 是否支持 PKCE | 「开发前须独立复核」 | 支持，**仅 `S256`，不支持 `plain`**；`code_challenge` 与 `code_challenge_method` 互为必填 | 结论写入本文件，P1 的 Web 流程据此实现 |
-| R5 | `users.username` 的 CHECK | `username GLOB '[a-z0-9_-]*'` | 该写法只约束首字符，`A_B`、`has space`、`中文` 都能通过 | **已偏离设计稿**：改为 `NOT GLOB '*[^a-z0-9_-]*'`，并加回归测试（`TestUsernameConstraint`）。请确认接受 |
-| R6 | `users.primary_email` | 无唯一约束 | 与「禁止按邮箱自动合并」一致，属有意设计 | 保留；但 P1 的 `/link email` 必须显式定义「同一邮箱已被占用」时的处理 |
-| R7 | `posts.parent_post_id` | 外键指向 `posts(id)` | 未约束「父子同 thread」 | 当前不启用，启用前必须补约束（记录为 P1 前置） |
+| R4 | GitHub 是否支持 PKCE | 「开发前须独立复核」 | 支持，**仅 `S256`，不支持 `plain`**；`code_challenge` 与 `code_challenge_method` 互为必填 | 已复核，P1 的 Web 流程据此实现 |
+| R5 | `users.username` 规则 | `[a-z0-9_-]`，DDL 用 `GLOB '[a-z0-9_-]*'` | ① 原 GLOB 只约束**首字符**，`A_B` / `has space` / `x!y` 都能通过，等于没校验；② V 先生 11-18 决策：放宽为**中文 / 英文字母 / 数字 / `_` / `-`，3–20 字符，不允许任何空白** | 废弃原 GLOB；改为「domain 层正则作唯一事实来源 + DDL 只兜底长度与空白」，详见 ADR-005。已落成 `0001_init.sql`、`domain/user`、两层一致性测试 |
+| R6 | 设计稿 §4.5 / §5.1 的用户名口径 | 只允许 ASCII | 已被 R5 决策覆盖 | 归档稿保留原文不改，实际规则以 ADR-005 为准 |
+| R7 | `users.primary_email` | 无唯一约束 | 与「禁止按邮箱自动合并」一致，属有意设计 | 保留；但 P1 的 `/link email` 必须显式定义「同一邮箱已被占用」时的处理 |
+| R8 | `posts.parent_post_id` | 外键指向 `posts(id)` | 未约束「父子同 thread」 | 当前不启用，启用前必须补约束（记录为 P1 前置） |
 
-R5 是唯一已经落地到代码的偏离，其余为计划内调整。
+R5 是唯一同时改动了 DDL 与领域代码的条目，其余为计划内调整。
 
 ---
 
 ## 8. 下一步
 
-1. 确认 §6 的 Q1–Q7（其中 Q1、Q3 影响代码结构，建议先定这两项）
-2. 确认 §7 R5 的用户名约束强化
-3. 按 §5 第一波收尾：P0-03 依赖守卫 + P0-06 写入队列 + P0-07 备份恢复，把 M0 关死
+1. **Q1–Q7 已全部拍板**，用户名规则与 module path 已落地并验证，无需再确认。
+2. 按 §5 第一波收尾 M0，把地基关死：P0-03 依赖守卫（会失败的测试才叫约束）→ P0-06 写入队列（队列满必须快速失败）→ P0-07 备份恢复（验收标准是能恢复，不是生成了文件）。
+3. 本地 `main` 已与 `origin/main` 对齐、推送是 fast-forward；是否执行首次 `git push -u origin main` 由 V 先生决定。

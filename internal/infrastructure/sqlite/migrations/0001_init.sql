@@ -10,11 +10,25 @@
 -- 认证域
 -- ---------------------------------------------------------------------------
 
+-- 用户名规则（V 先生 2026-11-18 决策）：中文 / 英文字母 / 数字 / _ / -，3–20 字符，
+-- 不允许任何空白字符。
+-- SQLite 内置无正则，GLOB 又是字节级匹配（会误伤 UTF-8 中文），因此这里只做两层兜底：
+--   1) 长度：SQLite length(TEXT) 返回字符数而非字节数，中文一字算一字符，与 Go 按 rune 计数一致；
+--   2) 空白：用 instr + char() 排除常见空白（含全角空格 U+3000）。
+-- 字符类别白名单（禁止标点 / Emoji / 其他语言字母 / 其余 Unicode 空白）由
+-- domain/user.ValidateUsername 作为唯一事实来源保证；任何写库路径都必须先过它。
+-- 详见 docs/DECISIONS.md ADR-005。
 CREATE TABLE users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   username      TEXT NOT NULL COLLATE NOCASE UNIQUE
                   CHECK (length(username) BETWEEN 3 AND 20
-                         AND username NOT GLOB '*[^a-z0-9_-]*'),
+                         AND instr(username, char(9)) = 0
+                         AND instr(username, char(10)) = 0
+                         AND instr(username, char(11)) = 0
+                         AND instr(username, char(12)) = 0
+                         AND instr(username, char(13)) = 0
+                         AND instr(username, char(32)) = 0
+                         AND instr(username, char(12288)) = 0),
   display_name  TEXT NOT NULL DEFAULT '',
   primary_email TEXT,
   karma         INTEGER NOT NULL DEFAULT 0,

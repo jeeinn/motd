@@ -35,13 +35,16 @@
 - 理由：SQLite 没有可靠的自动回滚；「启动时悄悄改表」在出问题时无法定位。回退路径统一走备份恢复（ADR-007）。
 - 代价：升级必须严格按二进制版本推进；回滚 = 恢复备份，会丢备份点之后的数据（需在 OPS 文档里写清 RPO）。
 
-## ADR-005 加强 `users.username` 的 CHECK 约束（偏离设计稿）
+## ADR-005 用户名规则：放宽为 Unicode 白名单，校验分两层
 
-- 状态：已实现，**待 V 先生确认**
-- 设计稿：`CHECK (length(username) BETWEEN 3 AND 20 AND username GLOB '[a-z0-9_-]*')`
-- 实际实现：`CHECK (length(username) BETWEEN 3 AND 20 AND username NOT GLOB '*[^a-z0-9_-]*')`
-- 理由：原写法里的 `*` 会吞掉任意后续字符，`GLOB '[a-z0-9_-]*'` 只校验**首字符**。`A_B`、`has space`、`中文`、`x!y` 都能通过，白名单形同虚设。改写后语义与设计意图（§4.5「用户名白名单」）一致。
-- 代价：约束是建表时写入的，晚改要一次迁移；现在改几乎没有成本。回归测试 `TestUsernameConstraint` 锁定该行为。
+- 状态：**已确认**（V 先生 2026-11-18 决策）+ 已实现
+- 结论：允许**中文（`\p{Han}`）、ASCII 字母、ASCII 数字、`_`、`-`**；长度 3–20 字符；**不允许任何空白字符**。大小写不敏感唯一保留（`COLLATE NOCASE`；中文无大小写概念，不受影响）。保留名规则不变。
+- 与设计稿的差异：评审稿 §4.5 / §5.1 限定 `[a-z0-9_-]`，且 DDL 用 `GLOB '[a-z0-9_-]*'`。按本次决策放宽字符集、长度口径不变，原 GLOB 约束整条废弃。设计稿文件保留为评审稿快照，不回改。
+- 为什么分两层：SQLite 内置无正则，`GLOB` 是字节级匹配、会误伤 UTF-8 中文；若注册自定义 SQL 函数来做 Unicode 校验，DDL 就依赖「每个连接必须先注册该函数」，外部工具（`sqlite3` CLI、恢复脚本）打开库写入会报 `no such function`——单机项目不该背这个耦合。因此：
+  - `domain/user.ValidateUsername`（`^[\p{Han}a-zA-Z0-9_-]{3,20}$`，按 rune 计数）是**唯一事实来源**，任何写 `users.username` 的路径都必须先过它；
+  - DDL `CHECK` 只兜底两件能用内置函数表达的事：长度 3–20（`length(TEXT)` 返回字符数，中文一字算一个，与 Go 按 rune 计数一致）、常见空白字符（`instr` + `char()`，含全角空格 U+3000）。
+- 已知边界：NBSP、U+2000 系列等 Unicode 空白 DDL 拦不住，由 domain 层拦。`TestDDLMatchesDomainPolicy` 断言「domain 层接受的名字 DDL 一定不拒绝」，用来防止两层规则日后漂移。
+- 代价：绕过 Application 层直接写库即可绕过字符类别校验。P0-06 的写入门面（不向 application 暴露裸 `*sql.DB`）是这条约束的执行保障。
 
 ## ADR-006 `/healthz` 是运维探针，不是业务端点
 
@@ -57,9 +60,26 @@
 - 理由：`VACUUM INTO` 在 WAL 下产出一致性快照且不阻塞读，实现成本最低。
 - 代价：大库时会有明显的 IO 峰值；当库体积或锁等待超过阈值时改评估 Online Backup API。阈值待 P0-27 压测后填入 OPS 文档。
 
-## ADR-008 Go module path 暂用 `motd`
+## ADR-008 Go module path 定为 `github.com/jeeinn/motd`
 
-- 状态：临时决定，可低成本更改
-- 结论：`go.mod` 中 `module motd`，内部 import 为 `motd/internal/...`。
-- 理由：尚未确定代码托管地址；域名形式的 module path 一旦铺开，改名会动到每个文件。
-- 代价：托管到 git.weixin.qq.com 或 GitHub 时必须全量替换 import；建议在 P0 结束前定下来（`P0-PLAN.md §6 Q2`）。
+- 状态：**已确定**（V 先生 2026-11-18）
+- 结论：`go.mod` 中 `module github.com/jeeinn/motd`，内部 import 为 `github.com/jeeinn/motd/internal/...`；远端 `git@github.com:jeeinn/motd.git`。
+- 理由：托管仓库已确定，域名形式便于后续被外部引用。趁初始骨架只有 2 处内部 import 时替换，成本最低。
+- 代价：无。已全量替换并通过 `go build ./...` / `go vet ./...` / `go test ./...` 验证。
+
+## ADR-009 P0 七项拍板结论（Q1–Q7）
+
+- 状态：**全部同意**（V 先生 2026-11-18 明确答复「Q1–Q7 七项待拍板，我全部同意」）
+- 结论：`P0-PLAN.md §6` 不再是待决策清单，以下是已生效的执行口径。
+
+| # | 已拍板结论 | 落到哪里 |
+| --- | --- | --- |
+| Q1 | §8.2 四项架构决策全部采纳：模块化单体与 Domain 解耦、统一 ViewModel + 双 Renderer、所有持久化写入必经 Application 且插件禁直连数据库、在线状态与业务数据分离且心跳不逐次持久化 | ADR-001 / 002 / 003；P0-03 依赖守卫、P0-11 ViewModel、P0-12 插件骨架、P0-13 内存注册表 |
+| Q2 | 托管仓库 `git@github.com:jeeinn/motd.git`，module path `github.com/jeeinn/motd` | ADR-008；`go.mod` 与全部 import |
+| Q3 | P0 的 Device Flow **进程内直接调用 application 用例**；HTTP 端点（`/auth/device/start`、`/auth/device/poll`）留到 P1 浏览器接入时再开 | P0-15 / P0-16 / P0-19；P0 不引入 Web 会话与 CSRF 面 |
+| Q4 | SSH 默认监听 `2222`，避免 root / `CAP_NET_BIND_SERVICE`；对外 22 端口由 `iptables` 或 `setcap` 转发 | P0-21、P0-28 部署脚本、D1 验收命令 |
+| Q5 | 状态栏「等级」按 karma 分档常量：`0 / 10 / 50 / 200 → L1–L4`，放在 `domain/user` | P0-24 / P0-25 |
+| Q6 | 发帖限流：每人 60 秒 1 帖、每小时 10 帖；命中时返回剩余冷却时间 | P0-10、P0-20 |
+| Q7 | GitHub OAuth App 在**第二波（M1 结束）前**注册并启用 Device Flow，`client_id` 只放服务端环境变量 | P0-15 前置条件；联调用 `httptest` 假端点，不依赖真实凭据 |
+
+- 影响：Q1 与 Q3 是结构性决策，若后续要改，M0 的依赖守卫与 M2 的认证链路需要重做，改动前应先出 diff 评审。
