@@ -13,8 +13,8 @@ func TestValidateUsername_Accept(t *testing.T) {
 	valid := []string{
 		"v_x", "A_B", "abc", "123", "a-b_c",
 		"中文a", "中文测试", "中文abc", "中文_测试-1",
-		strings.Repeat("中", 3),   // 下界：3 个汉字
-		strings.Repeat("中", 20),  // 上界：20 个汉字
+		strings.Repeat("中", 3),  // 下界：3 个汉字
+		strings.Repeat("中", 20), // 上界：20 个汉字
 		strings.Repeat("a", 20),
 	}
 	for _, name := range valid {
@@ -29,8 +29,8 @@ func TestValidateUsername_Reject(t *testing.T) {
 		"", "ab", "a", "中文", // 2 个汉字，长度不足
 		strings.Repeat("中", 21), strings.Repeat("a", 21),
 		"has space", "中文 空格", " 前后", "中\t文", "中\n文", "中\r文",
-		"中\u00a0文",   // NBSP
-		"中\u3000文",   // 全角空格
+		"中\u00a0文", // NBSP
+		"中\u3000文", // 全角空格
 		"x!y", "a.b", "a/b", "a@b", "a+b", "a=b",
 		"😀", "abc😀",
 		"Привет", // 非中文非 ASCII 字母

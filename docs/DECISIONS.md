@@ -83,3 +83,17 @@
 | Q7 | GitHub OAuth App 在**第二波（M1 结束）前**注册并启用 Device Flow，`client_id` 只放服务端环境变量 | P0-15 前置条件；联调用 `httptest` 假端点，不依赖真实凭据 |
 
 - 影响：Q1 与 Q3 是结构性决策，若后续要改，M0 的依赖守卫与 M2 的认证链路需要重做，改动前应先出 diff 评审。
+
+## ADR-010 写入队列：单 worker + 私有写门面
+
+- 状态：已实现（P0-06，2026-11-18）
+- 结论：
+  - `chan WriteTask`（容量 256）由唯一 worker 串行消费；队列满立即返回 `ErrQueueFull`，不阻塞；
+  - `Submit(ctx, TxFunc)` 是 application 层唯一写入入口。`Pools` 的 `*sql.DB` 字段改为私有，对外只暴露 `QueryRowContext` / `QueryContext` 只读门面与 `Ping`；
+  - 每次写入受 `context.WithTimeout(task.ctx, 3s)` 约束；一个业务用例一个事务，**`Commit` 成功后才返回 nil**；
+  - 可重试错误限 `SQLITE_BUSY` / `SQLITE_LOCKED`（优先用驱动 `Error.Code()`，包装错误退回字符串匹配），最多重试 3 次、指数退避；其余错误立即返回；
+  - 停机时 `stopCh` 优先于队列，未开始的任务由 `drain()` 逐一回写 `ErrShuttingDown`，`Submit` 不会永久等待。
+- 理由：§2.6 要求「队列保留但必须补边界」；ADR-005 的「用户名校验不可绕过」也需要一个执行点——只要 application 还能拿到裸 `*sql.DB`，任何约束都能被绕过。私有化写门面把约束从约定变成结构性保证。
+- 代价：写入必须写成 `TxFunc` 闭包，比直接 `db.Exec` 略啰嗦；迁移、备份、测试因同包可直接访问私有字段，不受影响。
+- 验证：12 条测试覆盖提交后才确认、失败回滚、队列满、超时回滚、重试分类与上限、200 并发、未启动 / 停机拒绝、停机排空；`/healthz` 输出 `queue=<depth>/<cap>` 便于观察背压。
+- 已知限制：本机无 C 编译器（gcc），`go test -race` 未能执行（报 `cgo: C compiler "gcc" not found`）。并发正确性目前由 200 并发测试与代码审查保证；P3 压测阶段需在带 gcc 的环境补跑竞态检测。

@@ -18,6 +18,8 @@ P0 地基（M0）已落地，服务可编译、可启动、可建库：
 - ✅ 版本化迁移：`schema_migrations` + 单事务执行 + 版本高于二进制时拒绝启动
 - ✅ `0001_init` 建表（认证域 + 论坛核心域），含约束与外键回归测试
 - ✅ 用户名规则按 2026-11-18 决策放宽为**中文 / 英文字母 / 数字 / `_` / `-`，3–20 字符，不允许空白**；domain 层校验为事实来源，DDL 只兜底长度与空白（ADR-005）
+- ✅ 依赖方向守卫（`internal/archtest`）：注入反向 import 时测试必然失败（P0-03）
+- ✅ 写入队列：单 worker、容量 256 快速失败、3s 超时、`SQLITE_BUSY` 有限重试、事务提交后才确认；写门面不暴露裸 `*sql.DB`（ADR-010）
 - ⬜ SSH 入口、Device Flow、论坛用例、终端安全渲染 —— 见 P0-PLAN 的 M1–M4
 
 ## 快速开始
@@ -30,7 +32,7 @@ go build -o motd.exe ./cmd/server
 ./motd.exe
 
 # 探活
-curl -s http://127.0.0.1:8080/healthz   # => ok dev
+curl -s http://127.0.0.1:8080/healthz   # => ok dev queue=0/256
 ```
 
 首次启动会在 `./data` 下创建 `motd.db` 并自动执行迁移。

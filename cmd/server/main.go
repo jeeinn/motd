@@ -1,12 +1,11 @@
 // Command server 是 motd 的单进程入口：Go 单体 + SQLite + SSH TUI。
 //
-// 当前阶段：骨架。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行，
-// 并提供运维探针 /healthz。SSH 入口、认证与论坛用例按 docs/P0-PLAN.md 逐项接入。
+// 当前阶段：骨架。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
+// 写入队列启动，并提供运维探针 /healthz。SSH 入口、认证与论坛用例按 docs/P0-PLAN.md 逐项接入。
 package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -56,15 +55,20 @@ func run() error {
 		}
 	}()
 
-	applied, err := sqlite.Migrate(ctx, pools.Writer)
+	applied, err := sqlite.Migrate(ctx, pools)
 	if err != nil {
 		return err
 	}
 	logger.Info("数据库就绪", "path", cfg.DBPath, "migrations_applied", len(applied), "applied_versions", applied)
 
+	writer := pools.NewWriter()
+	writer.Start()
+	defer writer.Stop()
+	logger.Info("写入队列就绪", "capacity", writer.Cap(), "timeout", "3s")
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           probeMux(pools.Reader),
+		Handler:           probeMux(pools, writer),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -99,18 +103,18 @@ func run() error {
 
 // probeMux 只提供运维探针，不承担业务流量。
 // 业务端点（OAuth 回调、Device Flow）在 P0 认证阶段按 §4.8 接入。
-func probeMux(reader *sql.DB) http.Handler {
+func probeMux(pools *sqlite.Pools, writer *sqlite.Writer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
-		if err := reader.QueryRowContext(ctx, `SELECT 1`).Scan(new(int)); err != nil {
+		if err := pools.Ping(ctx); err != nil {
 			http.Error(w, "database unhealthy", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "ok %s\n", version)
+		_, _ = fmt.Fprintf(w, "ok %s queue=%d/%d\n", version, writer.Depth(), writer.Cap())
 	})
 	return mux
 }

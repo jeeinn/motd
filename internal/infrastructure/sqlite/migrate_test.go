@@ -27,7 +27,7 @@ func TestMigrateAppliesAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
 
-	applied, err := Migrate(ctx, pools.Writer)
+	applied, err := Migrate(ctx, pools)
 	if err != nil {
 		t.Fatalf("首次迁移失败: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestMigrateAppliesAndIsIdempotent(t *testing.T) {
 		t.Fatal("首次迁移应至少应用一个版本")
 	}
 
-	again, err := Migrate(ctx, pools.Writer)
+	again, err := Migrate(ctx, pools)
 	if err != nil {
 		t.Fatalf("重复迁移失败: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestMigrateAppliesAndIsIdempotent(t *testing.T) {
 func TestMigrateCreatesExpectedTables(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
-	if _, err := Migrate(ctx, pools.Writer); err != nil {
+	if _, err := Migrate(ctx, pools); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestMigrateCreatesExpectedTables(t *testing.T) {
 	}
 	for _, table := range want {
 		var name string
-		err := pools.Reader.QueryRowContext(ctx,
+		err := pools.reader.QueryRowContext(ctx,
 			`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
 		if err != nil {
 			t.Fatalf("缺少表 %q: %v", table, err)
@@ -72,12 +72,12 @@ func TestPragmaBaseline(t *testing.T) {
 	pools := openTestPools(t)
 
 	var fk int
-	if err := pools.Reader.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err == nil {
+	if err := pools.reader.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err == nil {
 		t.Logf("读连接 foreign_keys = %d（读连接不做写，取值不影响正确性）", fk)
 	}
 
 	// 写连接必须是 foreign_keys=ON，否则约束形同虚设。
-	if err := pools.Writer.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil {
+	if err := pools.writer.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil {
 		t.Fatalf("读取 foreign_keys: %v", err)
 	}
 	if fk != 1 {
@@ -85,7 +85,7 @@ func TestPragmaBaseline(t *testing.T) {
 	}
 
 	var mode string
-	if err := pools.Writer.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&mode); err != nil {
+	if err := pools.writer.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&mode); err != nil {
 		t.Fatalf("读取 journal_mode: %v", err)
 	}
 	if mode != "wal" {
@@ -99,12 +99,12 @@ func TestPragmaBaseline(t *testing.T) {
 func TestUsernameConstraint(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
-	if _, err := Migrate(ctx, pools.Writer); err != nil {
+	if _, err := Migrate(ctx, pools); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
 
 	insert := func(name string) error {
-		_, err := pools.Writer.ExecContext(ctx,
+		_, err := pools.writer.ExecContext(ctx,
 			`INSERT INTO users (username, status, created_at, updated_at) VALUES (?, 'active', 0, 0)`, name)
 		return err
 	}
@@ -145,7 +145,7 @@ func TestUsernameConstraint(t *testing.T) {
 func TestDDLMatchesDomainPolicy(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
-	if _, err := Migrate(ctx, pools.Writer); err != nil {
+	if _, err := Migrate(ctx, pools); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestDDLMatchesDomainPolicy(t *testing.T) {
 		if err := domainuser.ValidateUsername(name); err != nil {
 			t.Fatalf("样本 %q 在 domain 层应合法: %v", name, err)
 		}
-		_, err := pools.Writer.ExecContext(ctx,
+		_, err := pools.writer.ExecContext(ctx,
 			`INSERT INTO users (username, status, created_at, updated_at) VALUES (?, 'active', 0, 0)`, name)
 		if err != nil {
 			t.Fatalf("domain 层接受但 DDL 拒绝 %q，两层规则已漂移: %v", name, err)
@@ -169,11 +169,11 @@ func TestDDLMatchesDomainPolicy(t *testing.T) {
 func TestForeignKeysEnforced(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
-	if _, err := Migrate(ctx, pools.Writer); err != nil {
+	if _, err := Migrate(ctx, pools); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
 
-	_, err := pools.Writer.ExecContext(ctx,
+	_, err := pools.writer.ExecContext(ctx,
 		`INSERT INTO threads (node_id, user_id, title, last_reply_at, created_at) VALUES (999, 999, 'x', 0, 0)`)
 	if err == nil {
 		t.Fatal("外键约束未生效：应拒绝引用不存在的 node/user")

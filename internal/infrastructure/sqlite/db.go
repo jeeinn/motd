@@ -21,10 +21,13 @@ import (
 )
 
 // Pools 把同一数据库文件拆成两个用途明确的句柄。
-// 调用方不需要知道底层是同一文件，但必须知道「写一律走 Writer，读一律走 Reader」。
+//
+// 字段刻意不导出：application 层拿不到裸 *sql.DB，写一律经 NewWriter().Submit()，
+// 读一律经下面的 Query* 转发。这是 ADR-005 里「用户名校验不能被绕过」的执行保障，
+// 也是 §2.2 单向依赖在存储层的落点。同包内的迁移、备份与测试仍可直接访问私有字段。
 type Pools struct {
-	Writer *sql.DB
-	Reader *sql.DB
+	writer *sql.DB
+	reader *sql.DB
 }
 
 // pragmas 是需要逐连接生效的会话级设置。
@@ -54,7 +57,7 @@ func Open(ctx context.Context, path string) (*Pools, error) {
 		return nil, err
 	}
 
-	pools := &Pools{Writer: writer, Reader: reader}
+	pools := &Pools{writer: writer, reader: reader}
 	if err := pools.verify(ctx); err != nil {
 		_ = pools.Close()
 		return nil, err
@@ -110,7 +113,7 @@ func buildDSN(path string, extra string) string {
 // 只信任查询结果，不信任 DSN 语法正确性——错拼的 PRAGMA 不会报错，只会静默失效。
 func (p *Pools) verify(ctx context.Context) error {
 	var foreignKeys int
-	if err := p.Writer.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+	if err := p.writer.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
 		return fmt.Errorf("读取 PRAGMA foreign_keys: %w", err)
 	}
 	if foreignKeys != 1 {
@@ -118,7 +121,7 @@ func (p *Pools) verify(ctx context.Context) error {
 	}
 
 	var journalMode string
-	if err := p.Writer.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+	if err := p.writer.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
 		return fmt.Errorf("读取 PRAGMA journal_mode: %w", err)
 	}
 	if !strings.EqualFold(journalMode, "wal") {
@@ -127,16 +130,31 @@ func (p *Pools) verify(ctx context.Context) error {
 	return nil
 }
 
+// Ping 走读池，不占用唯一的写连接，供运维探针使用。
+func (p *Pools) Ping(ctx context.Context) error {
+	return p.reader.QueryRowContext(ctx, `SELECT 1`).Scan(new(int))
+}
+
+// QueryRowContext / QueryContext 是 application 层的只读门面。
+// 命名与 database/sql 对齐，便于后续仓储实现直接迁移过来。
+func (p *Pools) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return p.reader.QueryRowContext(ctx, query, args...)
+}
+
+func (p *Pools) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return p.reader.QueryContext(ctx, query, args...)
+}
+
 // Close 关闭两个池。
 func (p *Pools) Close() error {
 	var firstErr error
-	if p.Reader != nil {
-		if err := p.Reader.Close(); err != nil {
+	if p.reader != nil {
+		if err := p.reader.Close(); err != nil {
 			firstErr = err
 		}
 	}
-	if p.Writer != nil {
-		if err := p.Writer.Close(); err != nil && firstErr == nil {
+	if p.writer != nil {
+		if err := p.writer.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

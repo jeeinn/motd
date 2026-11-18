@@ -48,7 +48,7 @@
 | **M3** 终端 | SSH 入口 + 安全渲染 + 页面 | P0-21 ~ P0-25 | D1、D5 达成 |
 | **M4** 闭环 | 端到端与运维 | P0-26 ~ P0-28 | D4、D6、D7 达成 |
 
-已完成：**P0-01 / 02 / 04 / 05**（本地已可编译、启动、建库、跑测试）。
+已完成：**P0-01 / 02 / 03 / 04 / 05 / 06**；仅剩 **P0-07**（备份恢复）即可关死 M0。
 
 ---
 
@@ -68,7 +68,7 @@
 - 验收：非法日志级别拒绝启动；SIGTERM 后 10s 内退出
 - 依赖：P0-01 ｜ 量级：0.8
 
-**P0-03 依赖方向守卫（archtest）**
+**P0-03 依赖方向守卫（archtest）** ✅
 - 目标：把 §2.2 的依赖方向从文档变成会失败的测试，防止三个月后 domain 里悄悄 import 了 sqlite
 - 产出：`internal/archtest/deps_test.go`，用 `go/build` 或 `golang.org/x/tools/go/packages` 解析 import 图
 - 规则：`domain` 不得 import `transport|presentation|infrastructure|plugin`；`transport` 不得 import `infrastructure`；`presentation` 不得 import `transport|infrastructure`；`plugin` 不得 import `infrastructure`
@@ -85,7 +85,7 @@
 - 验收：重复执行不重复应用；迁移失败整体回滚；库版本高于二进制时拒绝启动
 - 依赖：P0-04 ｜ 量级：1
 
-**P0-06 写入队列与事务边界**
+**P0-06 写入队列与事务边界** ✅
 - 目标：把 §2.6 的规则做成代码，而不是散文
 - 产出：`infrastructure/sqlite/write.go` —— `chan WriteTask`（容量 256）、`WithWriteTx(ctx, fn)` 封装、错误分类（`ErrQueueFull` / `ErrBusy` / `ErrTimeout`）、`SQLITE_BUSY` 有限次退避重试
 - 规则：队列满**快速失败**不阻塞；每次写入带 `context` 超时（默认 3s）；一个业务用例一个事务；事务提交后才向用户回执成功
@@ -357,6 +357,6 @@ R5 是唯一同时改动了 DDL 与领域代码的条目，其余为计划内调
 
 ## 8. 下一步
 
-1. **Q1–Q7 已全部拍板**，用户名规则与 module path 已落地并验证，无需再确认。
-2. 按 §5 第一波收尾 M0，把地基关死：P0-03 依赖守卫（会失败的测试才叫约束）→ P0-06 写入队列（队列满必须快速失败）→ P0-07 备份恢复（验收标准是能恢复，不是生成了文件）。
-3. 本地 `main` 已与 `origin/main` 对齐、推送是 fast-forward；是否执行首次 `git push -u origin main` 由 V 先生决定。
+1. Q1–Q7 已拍板；首次 `git push -u origin main` 已完成，远端 `main` 已建立跟踪。
+2. M0 已完成 P0-01/02/03/04/05/06（每项均「测试通过 → 单独提交」）；**仅剩 P0-07 备份恢复**。
+3. P0-07 完成后 M0 关死，进入第二波 M1（领域与用例）。

@@ -29,7 +29,9 @@ type migration struct {
 //   - 数据库版本高于二进制已知版本时拒绝启动（不跨大版本自动降级）。
 //
 // 这里不需要「向后兼容旧版本」的逻辑：迁移只向前，回退靠备份恢复。
-func Migrate(ctx context.Context, db *sql.DB) (applied []int64, err error) {
+func Migrate(ctx context.Context, p *Pools) (applied []int64, err error) {
+	db := p.writer // 迁移属于写操作，必须走唯一的写连接
+
 	migrations, err := loadMigrations()
 	if err != nil {
 		return nil, err
