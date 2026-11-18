@@ -228,11 +228,17 @@
   6. `greetingHandler` 只输出服务端固定文本，**不回显用户字节**——回显会绕过 P0-23 的安全渲染。P0-22 / P0-24 逐层替换。
   7. 新增环境变量 `MOTD_SSH_ADDR`（默认 `:2222`）、`MOTD_SSH_MAX_CONNS`（100）、`MOTD_SSH_IDLE_TIMEOUT`（10m）；host key 落 `<DataDir>/ssh_host_ed25519_key`。
 
-**P0-22 输入归一化与命令注册表**
+**P0-22 输入归一化与命令注册表** ✅
 - 产出：SSH 字节流 → `KeyMsg`（`j/k/h/l`、`Enter`、`Esc`、`Ctrl-*`、可打印字符、粘贴）；`/` 斜杠命令表（`/top`、`/open`、`/new`、`/reply`、`/login`、`/keys`、`/help`、`/quit`）
 - 约束：命令表是**唯一**入口，鼠标/快捷键在 P1 也映射到命令，不产生第二条业务路径（§3.2）
 - 验收：`?` 显示全部命令且与实际注册表一致（由注册表生成，不手写两份）
 - 依赖：P0-11 ｜ 量级：1
+- 执行补充：
+  1. **类型分层**：`application/input.KeyMsg` 定义语义按键（类型在使用方），`transport/ssh.KeyDecoder` 只做字节解码；`application/command.Registry` 是命令与键位的唯一事实来源，`Help()` 由 `All()` / `Bindings()` 生成，页面不得手写第二份清单。
+  2. 解码器保留 `pending` 处理跨 Read 分块的 UTF-8 与转义序列；孤立 ESC 用 25ms 决策窗口（`Poll()`）+ 下次 `Feed` 开头合并消歧，避免 `\x1b[A` 被拆成 Esc + `[` + `A`。
+  3. CSI / OSC / SS3 一律降级为 `KeyUnknown`，**不产生任何控制动作**（清屏、改色、OSC 52 剪贴板、窗口标题）；只有四个方向键被提升为语义按键。粘贴块按 bracketed paste 还原为纯文本并限长 8 KiB（与 P0-10 正文上限一致）。
+  4. `?` → `/help`，`/` 进入行编辑，Enter 提交到 `Registry.Parse`；P0-22 **用户文本零回显**，`KeyMsg.Raw` / `Text` / `Invocation.Args` 都不写回终端，`Parse` 的错误信息也不携带用户提交的原文（避免 ESC 旁路）。
+  5. `formatResult` 只输出服务端生成的固定文本或注册表白名单里的命令名；`applyKey` 抽成纯状态机，无 SSH 会话也能回归。详见 ADR-018。
 
 **P0-23 终端安全渲染（P0 重点，不可压缩）**
 - 目标：把 §3.5 从「过滤」升级为「分层安全渲染」
@@ -401,4 +407,5 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 8. **第三波落地口径**（同次拍板）：Q7 的 `client_id` 环境变量名定为 `MOTD_GITHUB_CLIENT_ID`（沿用 `config` 的 `MOTD_` 前缀），OAuth App 由用户稍后注册；部署目标为 Linux/systemd，`2222` 端口及对外 22→2222 转发由用户放行；第三方依赖按**最小集**引入（第三波仅 `golang.org/x/crypto/ssh`）。M2 开发期一律用 `httptest` 假端点，不等真实凭据。
 9. P0 结束前需补做一次**带真实数据的恢复演练**（当前演练用的是空库），才能把 D7 正式结案。
 10. **Q7 仍待办**：GitHub OAuth App 注册并启用 Device Flow 后，把 `client_id` 通过环境变量注入；若暂不注册，M2 仍可推进但无法做真实联调（D2 手工验收会被卡住）。
-11. **P0-21 SSH 服务入口已完成**（本轮提交，ADR-017）：仅公钥认证 / 禁 root / 禁密码、ed25519 host key 0600 且可重载、PTY 与 window-change、空闲超时、100 连接门禁、presence 上下线且写库增量为 0；`ssh -p 2222` 可进。第三波继续 **P0-22 → P0-23**。
+11. **P0-21 SSH 服务入口已完成**（ADR-017）：仅公钥认证 / 禁 root / 禁密码、ed25519 host key 0600 且可重载、PTY 与 window-change、空闲超时、100 连接门禁、presence 上下线且写库增量为 0；`ssh -p 2222` 可进。
+12. **P0-22 输入归一化与命令注册表已完成**（本轮提交，ADR-018）：`?` 帮助由注册表生成且不手写第二份、控制序列一律降级、用户文本零回显。第三波收尾 **P0-23 终端安全渲染**。

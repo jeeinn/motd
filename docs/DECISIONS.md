@@ -205,3 +205,20 @@
   3. `greetingHandler` 只输出服务端固定文本，不回显任何用户字节——回显会绕过 P0-23 的安全渲染。P0-22 / P0-24 替换该 handler。
   4. host key 权限 0600 只在非 Windows 显式 `chmod`；部署目标为 Linux/systemd，本机 Windows 开发不受影响。
 - 验证：11 条测试（host key 稳定 / 权限 / 损坏拒绝、配置校验、仅公钥认证、匿名拒绝、root / 吊销 / 普通解析失败分类、Permissions 还原、端到端 presence 上下线 + PTY + window-change、空闲超时、满员拒绝）；全量 `go build` / `go vet` / `go test ./...` 通过。
+
+## ADR-018 输入归一化：命令表唯一入口，用户文本零回显
+
+- 状态：已实现（P0-22，2026-11-18）
+- 结论：
+  - **类型分层**：`application/input.KeyMsg`（语义按键）定义在 application（使用方），`transport/ssh.KeyDecoder` 只负责字节解码；`application/command.Registry` 是命令与键位的唯一事实来源。原因：application 不得 import transport（§2.2 禁止表），把事件类型放 application 才能让命令表与解码器共用一套类型。
+  - `Help()` 由 `All()` + `Bindings()` 生成，页面不得手写第二份命令清单（§3.2 验收项）。默认 8 条 P0 命令 + 10 条键位说明，`?` 明确映射到 `/help`；`New()` 对重名 / 空名 / 非法字符 / 别名冲突 / 参数区间矛盾一律拒绝。
+  - 解码器处理跨 Read 分块：`pending` 保留未决的 UTF-8 多字节与 CSI/OSC/SS3 序列。孤立 ESC 用 **25ms 决策窗口**（`Poll()`）+ 下次 `Feed` 开头合并消歧，既不会把 `\x1b[A` 拆成 Esc + `[` + `A`，也不会让用户单按 Esc 迟迟无响应。
+  - 所有控制序列（清屏 `\x1b[2J`、颜色 `\x1b[31m`、OSC 标题 / OSC 52 剪贴板）一律降级为 `KeyUnknown`，**不产生任何语义动作**；方向键是唯一被提升为语义按键的 CSI。粘贴块按 bracketed paste 还原为纯文本（含其中的 ESC 字符），限长 8 KiB。
+  - **用户文本零回显**：`KeyMsg.Raw` / `Text` / `Invocation.Args` 都不写回终端；`Registry.Parse` 的错误信息也不携带用户提交的原文。`formatResult` 只输出服务端生成的固定文本或注册表白名单里的命令名。这是 P0-23 安全渲染落地前不留旁路的关键。
+  - `applyKey` 抽成纯状态机（不碰 IO），命令行的收集 / 退格 / 取消 / 提交无需 SSH 会话即可回归。
+- 理由：§3.2 要求命令表唯一入口；§3.5 要求用户内容不得驱动终端控制序列。P0-22 先做到「用户文本不进入输出流」，P0-23 再引入「净化后才允许进入」——顺序反了就会先开一个渲染旁路再补。
+- 已知边界：
+  1. 行编辑器只做收集与提交，不回显输入缓冲；P0-24 接入编辑器时必须经过 P0-23 的白名单渲染，不能直接 `Write(m.Raw)`。
+  2. ESC 决策窗口 25ms 是经验值；极端网络抖动下跨包箭头序列若间隔超过 25ms 会被判成独立 Esc。P1 可用终端能力协商（如 kitty keyboard protocol）消除该歧义。
+  3. `application/command` 只描述元数据，业务动作由 P0-24 页面控制器调用 application 用例；M2 的 `/login`、P0-18 的 `/keys` 子命令届时补齐。
+- 验证：新增 18 条测试（解码器 9：单键 / 方向键 / ESC 三种歧义 / 跨 chunk UTF-8 / 控制序列 / 粘贴完整与分片与限长；注册表 6：命令集 / 帮助由注册表生成 / 解析与别名 / 错误信息不回显 / 非法定义 / 防御性副本；会话层 3：行编辑状态机 / 取消与退出 / `formatResult` 恶意输入）；全量 `go build` / `go vet` / `go test ./...` 通过。

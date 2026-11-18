@@ -113,7 +113,7 @@ func run() error {
 		IdleTimeout: cfg.SSHIdleTimeout,
 		Resolver:    guestResolver{},
 		Presence:    rt.Presence,
-		Handler:     greetingHandler{},
+		Handler:     newInputHandler(),
 		Logger:      logger,
 	})
 	if err != nil {
