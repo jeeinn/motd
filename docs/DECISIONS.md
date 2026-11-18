@@ -222,3 +222,22 @@
   2. ESC 决策窗口 25ms 是经验值；极端网络抖动下跨包箭头序列若间隔超过 25ms 会被判成独立 Esc。P1 可用终端能力协商（如 kitty keyboard protocol）消除该歧义。
   3. `application/command` 只描述元数据，业务动作由 P0-24 页面控制器调用 application 用例；M2 的 `/login`、P0-18 的 `/keys` 子命令届时补齐。
 - 验证：新增 18 条测试（解码器 9：单键 / 方向键 / ESC 三种歧义 / 跨 chunk UTF-8 / 控制序列 / 粘贴完整与分片与限长；注册表 6：命令集 / 帮助由注册表生成 / 解析与别名 / 错误信息不回显 / 非法定义 / 防御性副本；会话层 3：行编辑状态机 / 取消与退出 / `formatResult` 恶意输入）；全量 `go build` / `go vet` / `go test ./...` 通过。
+
+## ADR-019 终端安全渲染：三段分离、唯一 ANSI 常量表、两条路径
+
+- 状态：已实现（P0-23，2026-11-18），M3 第三波收尾
+- 结论：
+  - **三段严格分离**：`SanitizeText`（净化）→ `ParseInline`（白名单 Markdown）→ `renderInline`（受控 ANSI），任何一段都不能被跳过。
+  - 净化规则：ESC / C0 / DEL 转成 U+2400 系列可见控制图示（其后 CSI/OSC 参数字节退化为普通文本）；C1（含 `\u009b` 这种无需 ESC 的 CSI 起始）与双向文本 / 不可见格式字符一律剥离；CR / CRLF 统一成 LF（杜绝 `\r` 覆盖同行内容）；Tab 按 8 列展开。
+  - 白名单 Markdown 只识别 `**粗体**` / `*斜体*` / `` `代码` `` / `[文字](链接)`；链接协议白名单 `http` / `https` / `ssh`（大小写不敏感），`file:` / `javascript:` / `data:` / 协议相对一律降级为纯文本，URL 不进 `Href`、不生成 OSC 8 超链接。
+  - **受控 ANSI**：`ansi.go` 是输出中唯一允许的 ESC 常量表，且只允许纯 SGR（`\x1b[...m`）。archtest 静态扫描本包其余非测试文件，出现任何 `\x1b` 字面量即失败；常量本身也必须通过纯 SGR 校验；负向注入实测。输出侧 `assertOnlySGR` 逐段扫描，非 SGR 的 CSI（清屏 `2J`、光标 `H/K`、备用屏 `?1049h`、改尺寸 `t`）与全部 OSC 一律拦下。
+  - **两条路径不共用 sanitize**：`RenderUser` 净化用户内容；`RenderSystem` 对服务端可信文本做更严格校验，含控制字符直接返回 `ErrUnsafeSystemText` 而不是替调用方擦除。archtest 用 AST 证明 `RenderSystem` 函数体内没有 `SanitizeText` 调用。
+  - 折行而非截断：`WrapText` 按显示宽度折行（`DisplayWidth` 覆盖常见 CJK / emoji / 组合字符），内容一个 rune 不丢。
+- 理由：§3.5 要求从「过滤」升级为「分层安全渲染」，并明确「服务端生成的 ANSI 与用户提交的 ANSI 走不同函数」。把唯一 ANSI 常量表做成会失败的静态守卫，比靠 code review 可靠；恶意样本集固化成测试，避免只靠人工看终端。
+- 实测发现并修复的真实缺陷：`[2J␛]0;pwned **粗体** [x](...)` 这类以 `[` 开头但并非链接的文本，原实现会把第一个 `[` 到后面某个 `](` 之间的整段吞成纯文本，连带吞掉加粗。已加「链接标签不得含 `[]` / 换行 / 超长」约束并固化 `TestLinkParserDoesNotSwallowUnrelatedBrackets`。
+- 已知边界：
+  1. `RenderUser` 输出 LF（用户 `\r` 已归一），P0-24 页面写入 PTY 前统一做 LF→CRLF；该转换属于页面层，不放进净化层，避免把用户 CR 与控制序列混为一谈。
+  2. 宽字符宽度表覆盖常见 CJK / emoji 区间，未覆盖字符按 1 列；P0 不引 `x/text/width`（依赖最小集），P1 可换标准实现。
+  3. `Width > 0` 时先折行再解析，跨折行边界的 Markdown 标记按纯文本处理，不产生错误渲染。
+  4. P0-23 是渲染库，P0-24 页面才接入链路；接入时用户内容必须走 `RenderUser`、状态栏走 `RenderSystem`，禁止直接 `Write(m.Raw)`。
+- 验证：22 条恶意样本 + 净化 / 折行 / 宽度 / Markdown / 渲染 / 静态守卫共 20 余条测试；全量 `go build` / `go vet` / `go test ./...` 通过。
