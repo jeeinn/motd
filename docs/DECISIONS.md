@@ -137,3 +137,20 @@
 - 已知边界：DDL 时间存 Unix 秒，**同一秒内的回复不会推进 `last_reply_at`**；排序用 `id` 作 tie-breaker，不影响正确性。测试用可控时钟跨秒验证「回复后 last_reply_at 必须变化」，真实运行同秒回复属预期行为。
 - 另一处 schema 事实：`threads` 表**没有 `status` 列**（设计稿 §5.2 亦如此），因此 P0 不做主题删除；P1 启用主题软删除前必须补字段与迁移（记为 `P0-PLAN §7 R9`）。
 - 验证：15 组用例层测试（校验 / 权限 / 事务 / 限流 / 游标）+ 真实链路集成测试 + `TestRateLimitIndexes` 执行计划断言。
+
+## ADR-014 统一 ViewModel 独立成包，并用三层守护栏住「不含渲染概念」
+
+- 状态：已实现（P0-11，2026-11-18）
+- 结论：
+  - **路径偏离计划**：类型定义放在 `internal/application/viewmodel`，`application/forum/viewmodel.go` 只负责「领域结果 → 语义状态」映射。计划原写 `application/forum/viewmodel.go`，但登录屏、帮助屏不属于论坛用例；若类型定义在 `forum` 包，M2 的 `auth` 与 M3 的页面要反向 import `forum` 才能构造屏幕，语义倒置。application 组内互引方向合法，不破坏 §2.2。
+  - `Screen` 按设计稿 §2.3 的图（当前用户 / 列表 / 焦点 / 选中项 / 弹窗）补全 `Selection`、`Pagination`、`Detail`；`Row` 补 `Body`。计划只列 4 + 5 个字段，但详情屏既要主题正文又要回复列表，原字段集无法表达。
+  - 所有字段都是值类型（整数 / 字符串 / 布尔 / 枚举 / 结构体 / 切片），**不含函数、指针、接口、通道与 `time.Time`**；时间统一存 Unix 秒，`RowMeta` 用结构而非拼好的字符串，格式由 Renderer 决定。`Notice.Code` 给机器读，`Notice.RetryAfterSec` 承接 Q6 限流冷却。
+  - Q5 等级 `user.Level(karma)` 放在 `domain/user`（0/10/50/200 → L1–L4），**只用于显示，不参与权限判定**；冻结账号高 karma 仍由 `Status.CanPost()` 拒绝。
+  - 映射入口：`ScreenNodes` / `ScreenThreads` / `ScreenThreadDetail` + `NoticeFromError` + `WithNotice`。`ViewContext` 由 transport 从 presence 与 Principal 组装传入，application 不 import presence / auth。
+- 三重守卫（P0-11 验收项「出现任何样式/终端概念即不合格」）：
+  1. `archtest` 静态扫描 `application/viewmodel` 的 AST：禁渲染库 import、渲染相关标识符、终端控制序列字面量；另扫整个 application 目录禁渲染库 import；
+  2. 反射断言 `Screen` 递归字段只由允许类型组成，并用注入 `func` / 指针 / `any` / `chan` / `map` / 外部 `time.Time` 证明守卫会失败；
+  3. 实测注入 `Color` / `Width` / `\x1b[31m` 后守卫退出码 1，移除后通过。
+- 工程取舍：禁用词按**驼峰词段精确相等**匹配，而不是整名子串。子串匹配会把 `EmptyRows` 里的 `pty`、`Description` 里的 `esc` 误判成渲染概念；`NextCursor` 是分页游标（数据语义），不因含 `cursor` 被拦。长组合词（如 `CursorPos`）另用整名子串匹配。
+- 已知边界：`RowMeta.AuthorID` 目前只保留语义 ID，仓储查询未 join `users`，`Author` 为空。P0-23 终端页面需要展示作者名时补仓储投影，字段已预留。
+- 验证：16 条测试（状态模型 5 / 映射 5 / 等级 2 / 守卫 4），全量 `go build` / `go vet` / `go test ./...` 通过。

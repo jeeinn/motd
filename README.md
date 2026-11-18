@@ -10,7 +10,7 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 
 ## 当前状态
 
-M0 地基 + M1 业务内核（P0-01 ~ P0-10）已落地，服务可编译、可启动、可建库，**无需 SSH 与 UI 即可跑通发帖业务规则**：
+M0 地基 + M1 业务内核（P0-01 ~ P0-11）已落地，服务可编译、可启动、可建库，**无需 SSH 与 UI 即可跑通发帖业务规则并产出统一 ViewModel**：
 
 - ✅ 模块化单体目录骨架，依赖方向写在每个包的 `doc.go` 里
 - ✅ 配置（环境变量）、结构化日志、优雅停机、运维探针 `GET /healthz`
@@ -25,8 +25,9 @@ M0 地基 + M1 业务内核（P0-01 ~ P0-10）已落地，服务可编译、可�
 - ✅ 仓储端口定义在使用方 `application/forum`，`infrastructure/sqlite` 实现；写入只暴露受限 `WriteTx`，application 层禁 import SQL（守卫实测会失败）
 - ✅ 论坛核心用例：`ListNodes` / `ListThreads` / `GetThread` / `CreateThread` / `CreatePost`；keyset 分页、软删除过滤、标题正文校验、访客只读、仅 active 可写、首帖同事务、发帖限流（Q6）
 - ✅ 真实链路集成测试：`forum.Service` 直驱 SQLite 仓储，验证 fake 与实现不漂移（P0-08 ~ P0-10）
-- **M0 已完成；M1 已完成 P0-08 / 09 / 10**（每项均「测试通过 → 单独提交」）
-- ⬜ M1 剩余：P0-11 ViewModel、P0-12 插件骨架、P0-13 在线注册表；之后是 M2 认证、M3 终端、M4 闭环 —— 见 P0-PLAN
+- ✅ 统一 ViewModel：`application/viewmodel` 只含语义字段（枚举 / Unix 秒 / 值类型），`forum` 负责领域结果映射；Q5 等级分档 `karma → L1–L4`；三层守卫实测注入渲染概念后必然失败（ADR-014）
+- **M0 已完成；M1 已完成 P0-08 / 09 / 10 / 11**（每项均「测试通过 → 单独提交」）
+- ⬜ M1 剩余：P0-12 插件骨架、P0-13 在线注册表；之后是 M2 认证、M3 终端、M4 闭环 —— 见 P0-PLAN
 
 ## 快速开始
 
@@ -62,7 +63,7 @@ curl -s http://127.0.0.1:8080/healthz   # => ok dev queue=0/256
 ```bash
 go build ./...       # 构建
 go vet ./...         # 静态检查
-go test ./...        # 测试（约束/PRAGMA/写入队列/备份恢复/依赖守卫/仓储/用例/集成）
+go test ./...        # 测试（约束/PRAGMA/写入队列/备份恢复/依赖守卫/仓储/用例/ViewModel/集成）
 ```
 
 ## 备份与恢复
@@ -82,7 +83,7 @@ scripts/restore.sh <backup-file> <target-path>      # 恢复（目标必须不�
 cmd/server/              进程入口
 internal/
   transport/             ssh / http / websocket —— 只做协议适配
-  application/           auth / forum / user —— 用例编排、事务边界、权限判断
+  application/           auth / forum / user / viewmodel —— 用例编排、事务边界、权限判断、统一语义状态
   domain/                user / node / thread / post / vote —— 纯业务模型，不依赖上层
   infrastructure/        sqlite / github / email —— 外部实现
   presentation/          terminal / browser —— 两个独立 Renderer
