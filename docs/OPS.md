@@ -63,6 +63,13 @@ motdctl restore <backup-file> --target <path>
 
 环境变量：`MOTD_DB_PATH`（默认 `./data/motd.db`）、`MOTD_BACKUP_DIR`（默认 `./data/backups`）、`MOTDCTL_BIN`（脚本用的工具路径）。
 
+### SSH 入口（P0-21）
+
+- `MOTD_SSH_ADDR`（默认 `:2222`，Q4 已拍板）、`MOTD_SSH_MAX_CONNS`（默认 100）、`MOTD_SSH_IDLE_TIMEOUT`（默认 `10m`）。
+- host key 落 `<MOTD_DATA_DIR>/ssh_host_ed25519_key`，首次启动生成、权限 0600；**重启必须复用同一把**，否则客户端报 host key changed。备份时应一并纳入该文件的保护范围。
+- 仅公钥认证，禁密码、禁 root。对外 22 → 本机 2222 的转发与防火墙放行由部署方完成（目标为 Linux/systemd，用户已确认放行）。
+- 满员时新连接在握手前收到明文拒绝提示；`/healthz` 的 `online` / `active` 反映内存注册表（ADR-016），重启归零。
+
 ## 4. 恢复流程
 
 1. **停服**：`systemctl stop motd`。

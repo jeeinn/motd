@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config 是进程启动所需的全部外部输入。
@@ -18,6 +19,12 @@ type Config struct {
 	DBPath string
 	// HTTPAddr 运维探针监听地址（/healthz），不承担业务流量。
 	HTTPAddr string
+	// SSHAddr SSH 入口监听地址（Q4 已拍板：默认 :2222）。
+	SSHAddr string
+	// SSHMaxConns SSH 最大并发连接数（§1.2 P0 容量基线 100）。
+	SSHMaxConns int
+	// SSHIdleTimeout SSH 会话空闲超时。
+	SSHIdleTimeout time.Duration
 	// LogLevel debug / info / warn / error。
 	LogLevel string
 	// LogFormat text / json。
@@ -29,11 +36,14 @@ type Config struct {
 func Load() (Config, error) {
 	dataDir := env("MOTD_DATA_DIR", "./data")
 	cfg := Config{
-		DataDir:   dataDir,
-		DBPath:    env("MOTD_DB_PATH", filepath.Join(dataDir, "motd.db")),
-		HTTPAddr:  env("MOTD_HTTP_ADDR", "127.0.0.1:8080"),
-		LogLevel:  strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
-		LogFormat: strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
+		DataDir:        dataDir,
+		DBPath:         env("MOTD_DB_PATH", filepath.Join(dataDir, "motd.db")),
+		HTTPAddr:       env("MOTD_HTTP_ADDR", "127.0.0.1:8080"),
+		SSHAddr:        env("MOTD_SSH_ADDR", ":2222"),
+		SSHMaxConns:    IntEnv("MOTD_SSH_MAX_CONNS", 100),
+		SSHIdleTimeout: DurationEnv("MOTD_SSH_IDLE_TIMEOUT", 10*time.Minute),
+		LogLevel:       strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
+		LogFormat:      strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
 	}
 
 	switch cfg.LogLevel {
@@ -80,6 +90,20 @@ func IntEnv(key string, fallback int) int {
 	}
 	v, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+// DurationEnv 解析 Go duration 字符串；非法或 <=0 一律回落默认值，
+// 避免一个拼写错误把空闲超时设成 0 导致所有会话立刻断开。
+func DurationEnv(key string, fallback time.Duration) time.Duration {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	v, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || v <= 0 {
 		return fallback
 	}
 	return v

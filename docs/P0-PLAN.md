@@ -214,11 +214,19 @@
 
 ### M3 终端
 
-**P0-21 SSH 服务入口**
-- 产出：`transport/ssh` —— `gliderlabs/ssh` Server（**默认监听 `2222`**，Q4 已拍板）、host key（ed25519，首次生成落 `data/`，权限 0600）、`PublicKeyHandler`、PTY、`WindowSize` 处理、空闲超时、最大连接数
+**P0-21 SSH 服务入口** ✅
+- 产出：`transport/ssh` —— `golang.org/x/crypto/ssh` Server（**默认监听 `2222`**，Q4 已拍板）、host key（ed25519，首次生成落 `data/`，权限 0600）、`PublicKeyCallback`、PTY、`window-change` 处理、空闲超时、最大连接数
 - 规则：仅公钥认证，禁密码、禁 root；超限拒绝新连接（§1.2 容量口径）；单连接一个 goroutine 树，退出必须回收
 - 验收：`ssh -p 2222 localhost` 能进；错误 key 被拒；连接数打满时新连接收到明确拒绝
 - 依赖：P0-13、P0-14 ｜ 量级：2
+- 执行补充：
+  1. **依赖最小集**（V 先生 2026-11-18 拍板）：只用 `golang.org/x/crypto/ssh`（v0.59.0），不引 `gliderlabs/ssh` 封装层；host key 用标准库 `ed25519` + PKCS#8 PEM 落盘，无第二个第三方依赖。
+  2. **波次冲突解法**：§5 把第三波排在 M2 之前，但依赖图里 `P0-14 → P0-21`。把 `Principal` / `Resolver` 端口**前置定义**在 `application/auth`（P0-14 的接口部分），实现仍归 P0-14；`transport/ssh` 只依赖该端口，`cmd` 注入 `guestResolver` 占位（通过公钥挑战即访客）。M2 换实现不改协议层，详见 ADR-017。
+  3. 指纹由 `PublicKeyCallback` 从服务端持有的 `ssh.PublicKey` 算出并放进 `ssh.Permissions.Extensions`，**不接受客户端提交的公钥文本**（P0-18 约束提前落地）。
+  4. 会话收口用**连接级** `connDone`（`chans` 关闭即连接断开），不用「channel 读到 EOF」：客户端可只 `CloseWrite` 输入方向，此时服务端仍应继续输出，EOF ≠ 断线。空闲超时 / ctx 取消 / 连接关闭三条路径汇到幂等 `Session.Close()`。
+  5. 满员在握手前写明文提示并关闭（快速失败），另有 `BannerCallback` 与 `PublicKeyCallback` 两层兜底；OpenSSH 客户端能看到提示文本，但表现为协议版本错误而非标准 SSH 错误码（记为边界）。
+  6. `greetingHandler` 只输出服务端固定文本，**不回显用户字节**——回显会绕过 P0-23 的安全渲染。P0-22 / P0-24 逐层替换。
+  7. 新增环境变量 `MOTD_SSH_ADDR`（默认 `:2222`）、`MOTD_SSH_MAX_CONNS`（100）、`MOTD_SSH_IDLE_TIMEOUT`（10m）；host key 落 `<DataDir>/ssh_host_ed25519_key`。
 
 **P0-22 输入归一化与命令注册表**
 - 产出：SSH 字节流 → `KeyMsg`（`j/k/h/l`、`Enter`、`Esc`、`Ctrl-*`、可打印字符、粘贴）；`/` 斜杠命令表（`/top`、`/open`、`/new`、`/reply`、`/login`、`/keys`、`/help`、`/quit`）
@@ -393,3 +401,4 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 8. **第三波落地口径**（同次拍板）：Q7 的 `client_id` 环境变量名定为 `MOTD_GITHUB_CLIENT_ID`（沿用 `config` 的 `MOTD_` 前缀），OAuth App 由用户稍后注册；部署目标为 Linux/systemd，`2222` 端口及对外 22→2222 转发由用户放行；第三方依赖按**最小集**引入（第三波仅 `golang.org/x/crypto/ssh`）。M2 开发期一律用 `httptest` 假端点，不等真实凭据。
 9. P0 结束前需补做一次**带真实数据的恢复演练**（当前演练用的是空库），才能把 D7 正式结案。
 10. **Q7 仍待办**：GitHub OAuth App 注册并启用 Device Flow 后，把 `client_id` 通过环境变量注入；若暂不注册，M2 仍可推进但无法做真实联调（D2 手工验收会被卡住）。
+11. **P0-21 SSH 服务入口已完成**（本轮提交，ADR-017）：仅公钥认证 / 禁 root / 禁密码、ed25519 host key 0600 且可重载、PTY 与 window-change、空闲超时、100 连接门禁、presence 上下线且写库增量为 0；`ssh -p 2222` 可进。第三波继续 **P0-22 → P0-23**。

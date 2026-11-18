@@ -1,8 +1,8 @@
 // Command server 是 motd 的单进程入口：Go 单体 + SQLite + SSH TUI。
 //
-// 当前阶段：M1。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
-// 写入队列、论坛用例与插件事件链装配，并提供运维探针 /healthz。
-// SSH 入口、认证与终端页面按 docs/P0-PLAN.md 逐项接入。
+// 当前阶段：M3。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
+// 写入队列、论坛用例与插件事件链装配、SSH 入口，并提供运维探针 /healthz。
+// 认证与终端页面按 docs/P0-PLAN.md 逐项接入。
 package main
 
 import (
@@ -20,6 +20,7 @@ import (
 	"github.com/jeeinn/motd/internal/config"
 	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
+	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
 
 // version 由构建时注入（-ldflags "-X main.version=..."）。
@@ -86,7 +87,7 @@ func run() error {
 		"plugins", len(rt.Plugins),
 		"post_created_subscribers", rt.Bus.SubscriberCount(event.EventPostCreated))
 
-	// 心跳超时清理只在内存里跑：每 10s  reap 一次超过 20s 未心跳的会话。
+	// 心跳超时清理只在内存里跑：每 10s reap 一次超过 20s 未心跳的会话。
 	// 不写库、不占用写队列（§2.6）；ctx 取消后随进程一起退出。
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
@@ -101,6 +102,31 @@ func run() error {
 				}
 			}
 		}
+	}()
+
+	// SSH 入口（Q4：默认 2222）。账号体系在 M2 才落地，此刻用 guestResolver 占位；
+	// transport/ssh 只依赖 application/auth.Resolver 端口，M2 换实现不改协议层（ADR-017）。
+	sshSrv, err := sshd.New(sshd.Config{
+		Addr:        cfg.SSHAddr,
+		DataDir:     cfg.DataDir,
+		MaxConns:    cfg.SSHMaxConns,
+		IdleTimeout: cfg.SSHIdleTimeout,
+		Resolver:    guestResolver{},
+		Presence:    rt.Presence,
+		Handler:     greetingHandler{},
+		Logger:      logger,
+	})
+	if err != nil {
+		return fmt.Errorf("初始化 SSH 服务失败: %w", err)
+	}
+	logger.Info("SSH host key 就绪", "fingerprint", sshSrv.HostKeyFingerprint())
+
+	sshErr := make(chan error, 1)
+	go func() {
+		// 不能在 Serve 之前调 Addr()：Addr 阻塞等 ready，而 ready 由 Serve 关闭，
+		// 同 goroutine 里先 Addr 后 Serve 会自锁（从零启动实测发现）。
+		logger.Info("SSH 监听", "addr", cfg.SSHAddr, "max_conns", cfg.SSHMaxConns)
+		sshErr <- sshSrv.Serve(ctx)
 	}()
 
 	srv := &http.Server{
@@ -125,6 +151,11 @@ func run() error {
 			return fmt.Errorf("探针服务: %w", err)
 		}
 		return nil
+	case err := <-sshErr:
+		if err != nil {
+			return fmt.Errorf("SSH 服务: %w", err)
+		}
+		return nil
 	case <-ctx.Done():
 		logger.Info("收到退出信号，开始停服")
 	}
@@ -134,12 +165,22 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("停服: %w", err)
 	}
+	// SSH Serve 在 ctx 取消后自行退出；等它返回，确保连接 goroutine 全部回收。
+	select {
+	case err := <-sshErr:
+		if err != nil {
+			return fmt.Errorf("SSH 服务退出: %w", err)
+		}
+	case <-shutdownCtx.Done():
+		return fmt.Errorf("等待 SSH 服务退出超时")
+	}
 	logger.Info("已退出")
 	return nil
 }
 
 // probeMux 只提供运维探针，不承担业务流量。
-// 业务端点（OAuth 回调、Device Flow）在 P0 认证阶段按 §4.8 接入。
+// Q3 已拍板：P0 的 Device Flow 由 SSH 会话在进程内调用 application 用例，
+// 不开任何业务 HTTP 端点；HTTP 端点留到 P1 浏览器接入时再评估。
 func probeMux(pools *sqlite.Pools, writer *sqlite.Writer, reg *presence.Registry) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

@@ -186,3 +186,22 @@
 - `/healthz` 输出扩展为 `ok <version> queue=<depth>/<cap> online=<n> active=<n> commits=<n>`。ADR-006 的「纯运维探针、不承载业务」语义不变，只是增加可观测字段。
 - 已知边界：在线状态是内存态，进程重启归零——这正是设计稿 §2.6 的意图（在线状态不是业务数据）。M3 的 SSH 入口才会真正往注册表登记连接；当前阶段为空表。
 - 验证：新增 11 条测试（注册表 7 / 守卫 2 / 写库计数集成 2）；全量 `go build` / `go vet` / `go test ./...` 通过；从零启动实测 `/healthz → ok dev queue=0/256 online=0 active=0 commits=0`。
+
+## ADR-017 SSH 入口前置于 M2：身份解析用 application 端口解耦
+
+- 状态：已实现（P0-21，2026-11-18），第三波 M3 起始
+- 结论：
+  - **依赖最小集**：只用 `golang.org/x/crypto/ssh`（v0.59.0），不引 `gliderlabs/ssh` 等封装层；host key 用标准库 `ed25519` + PKCS#8 PEM 落盘，不增加第二个依赖。
+  - **波次冲突的解法**：§5 把第三波定为 M3 的 21→23，但依赖图里 `P0-14 Principal → P0-21 SSH`。为使 SSH 入口不等 M2，把 `Principal` 与 `Resolver` 端口**前置定义**在 `application/auth/principal.go`（P0-14 的接口部分），实现仍归 P0-14。`transport/ssh` 只依赖 `auth.Resolver`，M2 换实现不改协议层。
+  - `cmd/server` 注入 `guestResolver` 占位：账号体系未落地前，凡通过公钥挑战（服务端已验证对方持有私钥）的连接一律按访客放行。这与 D1「以访客身份浏览」一致，也不违反 P0-18——指纹由 `PublicKeyCallback` 从服务端持有的 `ssh.PublicKey` 算出并放进 `ssh.Permissions.Extensions`，不接受客户端提交文本。
+  - 仅公钥认证：`PasswordCallback` / `KeyboardInteractiveCallback` 为 nil，`NoClientAuth=false`，`root` 用户名在回调中显式拒绝；`MaxAuthTries=3`。
+  - 容量门禁：`chan struct{}` 作连接槽（默认 100），accept 前先判满，满员在握手前写明文提示并关闭；`BannerCallback` 与 `PublicKeyCallback` 再做两层兜底，覆盖 accept 与占槽之间的竞态窗口。
+  - 会话收口用**连接级** `connDone`（`chans` 关闭即连接断开），不用「channel 读到 EOF」：客户端可以只 `CloseWrite` 输入方向，此时服务端仍应继续输出，EOF 不等于断线。空闲超时（默认 10m）与 ctx 取消是另外两条收口路径，三条都汇到幂等的 `Session.Close()`。
+  - 每次输入经 `Session.Read` 刷新空闲计时器与 `presence.Touch`，**不写 SQLite**（ADR-016）。PTY `pty-req` / `window-change` 解析后存进 `Session`，供 P0-24 页面排版使用。
+- 理由：Q4 定 2222 端口、Q3 定 P0 不开 HTTP 端点；SSH 是唯一业务入口，必须尽早用真实终端验证渲染边界（§5 第三波原意）。把身份解析做成端口而非具体实现，是让两条波次互不阻塞的唯一干净做法。
+- 已知边界：
+  1. 满员拒绝在握手前写明文，OpenSSH 客户端会报 `Bad remote protocol version identification`，提示文本可见但不属标准 SSH 错误码；这是「不进握手、快速失败」的代价，客户端可读性由服务端日志 + banner 两层兜底。
+  2. `guestResolver` 不查 `ssh_keys` 表，认证三状态中的「已吊销拒绝」要等 P0-14；当前通过公钥挑战即放行。
+  3. `greetingHandler` 只输出服务端固定文本，不回显任何用户字节——回显会绕过 P0-23 的安全渲染。P0-22 / P0-24 替换该 handler。
+  4. host key 权限 0600 只在非 Windows 显式 `chmod`；部署目标为 Linux/systemd，本机 Windows 开发不受影响。
+- 验证：11 条测试（host key 稳定 / 权限 / 损坏拒绝、配置校验、仅公钥认证、匿名拒绝、root / 吊销 / 普通解析失败分类、Permissions 还原、端到端 presence 上下线 + PTY + window-change、空闲超时、满员拒绝）；全量 `go build` / `go vet` / `go test ./...` 通过。
