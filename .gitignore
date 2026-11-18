@@ -1,0 +1,24 @@
+# 构建产物
+/motd
+/motd.exe
+/bin/
+/dist/
+
+# 运行时数据（SQLite 库、WAL、SSH host key、日志）
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# 本地环境与凭证
+.env
+.env.*
+*.pem
+!data/.gitkeep
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
