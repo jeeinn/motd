@@ -10,7 +10,7 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 
 ## 当前状态
 
-P0 地基（M0）已落地，服务可编译、可启动、可建库：
+M0 地基 + M1 业务内核（P0-01 ~ P0-10）已落地，服务可编译、可启动、可建库，**无需 SSH 与 UI 即可跑通发帖业务规则**：
 
 - ✅ 模块化单体目录骨架，依赖方向写在每个包的 `doc.go` 里
 - ✅ 配置（环境变量）、结构化日志、优雅停机、运维探针 `GET /healthz`
@@ -21,8 +21,12 @@ P0 地基（M0）已落地，服务可编译、可启动、可建库：
 - ✅ 依赖方向守卫（`internal/archtest`）：注入反向 import 时测试必然失败（P0-03）
 - ✅ 写入队列：单 worker、容量 256 快速失败、3s 超时、`SQLITE_BUSY` 有限重试、事务提交后才确认；写门面不暴露裸 `*sql.DB`（ADR-010）
 - ✅ 备份恢复：`motdctl` + `scripts/*.sh` + `docs/OPS.md`，含首次实际恢复演练记录（ADR-011）
-- **M0 地基已完成（P0-01 ~ P0-07 全部测试通过并逐项提交）**
-- ⬜ SSH 入口、Device Flow、论坛用例、终端安全渲染 —— 见 P0-PLAN 的 M1–M4
+- ✅ 版块种子数据 `0002_seed_nodes`（5 个版块）、限流覆盖索引 `0003_rate_limit_indexes`；`INSERT OR IGNORE` 与 `IF NOT EXISTS` 保证重放幂等
+- ✅ 仓储端口定义在使用方 `application/forum`，`infrastructure/sqlite` 实现；写入只暴露受限 `WriteTx`，application 层禁 import SQL（守卫实测会失败）
+- ✅ 论坛核心用例：`ListNodes` / `ListThreads` / `GetThread` / `CreateThread` / `CreatePost`；keyset 分页、软删除过滤、标题正文校验、访客只读、仅 active 可写、首帖同事务、发帖限流（Q6）
+- ✅ 真实链路集成测试：`forum.Service` 直驱 SQLite 仓储，验证 fake 与实现不漂移（P0-08 ~ P0-10）
+- **M0 已完成；M1 已完成 P0-08 / 09 / 10**（每项均「测试通过 → 单独提交」）
+- ⬜ M1 剩余：P0-11 ViewModel、P0-12 插件骨架、P0-13 在线注册表；之后是 M2 认证、M3 终端、M4 闭环 —— 见 P0-PLAN
 
 ## 快速开始
 
@@ -58,7 +62,7 @@ curl -s http://127.0.0.1:8080/healthz   # => ok dev queue=0/256
 ```bash
 go build ./...       # 构建
 go vet ./...         # 静态检查
-go test ./...        # 测试（约束/PRAGMA/写入队列/备份恢复/依赖守卫）
+go test ./...        # 测试（约束/PRAGMA/写入队列/备份恢复/依赖守卫/仓储/用例/集成）
 ```
 
 ## 备份与恢复
@@ -79,7 +83,7 @@ cmd/server/              进程入口
 internal/
   transport/             ssh / http / websocket —— 只做协议适配
   application/           auth / forum / user —— 用例编排、事务边界、权限判断
-  domain/                user / thread / post / vote —— 纯业务模型，不依赖上层
+  domain/                user / node / thread / post / vote —— 纯业务模型，不依赖上层
   infrastructure/        sqlite / github / email —— 外部实现
   presentation/          terminal / browser —— 两个独立 Renderer
   plugin/                registry / events —— 编译期注册、事件分化

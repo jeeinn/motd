@@ -1,9 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：**Q1–Q7 已全部拍板（2026-11-18）**，M0 已部分完成，可继续推进
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；M0 已完成；M1 已完成 P0-08 / 09 / 10
 > 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
 > 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
-> 更新：2026-11-18 11:05
+> 更新：2026-11-18 11:55
 
 ---
 
@@ -48,7 +48,7 @@
 | **M3** 终端 | SSH 入口 + 安全渲染 + 页面 | P0-21 ~ P0-25 | D1、D5 达成 |
 | **M4** 闭环 | 端到端与运维 | P0-26 ~ P0-28 | D4、D6、D7 达成 |
 
-已完成：**P0-01 ~ P0-07 全部完成**，M0 地基已关死。每项均「测试通过 → 单独提交」。
+已完成：**P0-01 ~ P0-10**（M0 全部 + M1 的仓储 / 种子 / 核心用例）。每项均「测试通过 → 单独提交」。M1 剩余 P0-11 / 12 / 13。
 
 ---
 
@@ -102,22 +102,30 @@
 
 ### M1 领域与用例
 
-**P0-08 仓储接口与 SQLite 实现**
-- 产出：`application/forum` 侧的端口接口（`NodeRepo` / `ThreadRepo` / `PostRepo`）+ `infrastructure/sqlite` 实现
+**P0-08 仓储接口与 SQLite 实现** ✅
+- 产出：`application/forum` 侧的端口接口（`NodeReader` / `ThreadReader` / `PostReader` / `UnitOfWork` + `WriteTx`）+ `infrastructure/sqlite` 实现；新增 `domain/node`
 - 约束：接口定义在使用方（application），实现在 infrastructure；不返回 `*sql.Rows`，只返回领域结构
 - 验收：仓储测试覆盖分页、排序（最新 / 最高分）、软删除过滤
 - 依赖：P0-06 ｜ 量级：2
+- 执行补充：`Repos` 聚合三个端口时 Go 不允许同名不同签名的方法，故统一命名为 `ListNodes` / `ListThreads` / `ListPosts` / `GetThread`；`infrastructure → application` 是合法方向（禁止表只拦反向）；新增 archtest 守卫禁止 application 出现 `database/sql` / `modernc.org/sqlite` import，实测注入后退出码 1。分页用 keyset（排序键 + id）而非 OFFSET。
 
-**P0-09 版块种子数据**
+**P0-09 版块种子数据** ✅
 - 产出：`migrations/0002_seed_nodes.sql`（`/dev/ai`、`/dev/rust`、`/dev/jobs`、`/etc/rant`、`/bin/help`）
 - 验收：空库迁移后 `nodes` 有 5 行；重复迁移不重复插入
 - 依赖：P0-05 ｜ 量级：0.3
+- 执行补充：`INSERT OR IGNORE` 保证手工重放也不覆盖已有名称。**连带修复一个真实回归**：M0 的写入队列/备份测试把 `nodes` 当空表并硬编码绝对行数，种子落地后 7 条测试全挂；已改为「迁移后 baseline + 相对增量」断言，今后增删版块不再破坏测试。
 
-**P0-10 论坛核心用例**
+**P0-10 论坛核心用例** ✅
 - 产出：`ListNodes` / `ListThreads(nodeID, sort, cursor)` / `GetThread` / `CreateThread` / `CreatePost`
 - 规则：标题 1–120 字符且非空白；正文非空、上限 8 KiB（防止一条内容打满带宽）；仅 `users.status=active` 可写；访客只读；`last_reply_at` 与 `threads.score` 在同一事务内更新；发帖限流**每人 60 秒 1 帖、每小时 10 帖**，命中时返回剩余冷却时间（Q6 已拍板）
 - 验收：用例测试覆盖上述每条规则；创建 Post 后 `last_reply_at` 必须变化
 - 依赖：P0-08 ｜ 量级：3
+- 执行补充：
+  1. `Actor` 由 M2 的 `Principal` 映射，P0-10 不依赖认证实现；权限在事务内**再查一次** DB 状态，避免会话快照过期。
+  2. `CreateThread` 同事务写入主题 + 首帖（§5.2 定义 Post 含首帖）；限流按 `COUNT(DISTINCT created_at)` 去重，否则一次发帖会消耗两份配额。
+  3. `TouchThread` 用一条 UPDATE 同时维护 `last_reply_at` 与 `score`；P0 无投票来源故 `scoreDelta=0`，P1 投票可直接复用这条事务路径（不臆造 P0 计分语义）。
+  4. 新增 `0003_rate_limit_indexes.sql`：`(user_id, created_at)` 覆盖索引，执行计划实测 `SEARCH ... USING COVERING INDEX`，避免每次写入全表扫描。
+  5. 时间存 Unix 秒，**同一秒内的回复不会推进 `last_reply_at`**；排序有 `id` 作 tie-breaker，不影响正确性，测试用可控时钟跨秒验证。
 
 **P0-11 ViewModel 定义**
 - 目标：把 §2.3 的「共享应用状态、不共享渲染结果」落到具体结构
@@ -350,14 +358,18 @@ Q1 与 Q3 是结构性决策。若后续要改，M0 的依赖守卫与 M2 的认
 | R6 | 设计稿 §4.5 / §5.1 的用户名口径 | 只允许 ASCII | 已被 R5 决策覆盖 | 归档稿保留原文不改，实际规则以 ADR-005 为准 |
 | R7 | `users.primary_email` | 无唯一约束 | 与「禁止按邮箱自动合并」一致，属有意设计 | 保留；但 P1 的 `/link email` 必须显式定义「同一邮箱已被占用」时的处理 |
 | R8 | `posts.parent_post_id` | 外键指向 `posts(id)` | 未约束「父子同 thread」 | 当前不启用，启用前必须补约束（记录为 P1 前置） |
+| R9 | `threads` 的软删除 | 设计稿 §5.2 未给 `threads` 建 `status` 列 | 现有 schema 只有 `posts.status` 支持软删除 | P0 不做主题删除；P1 启用前必须补字段 + 迁移，否则「删除主题」无处落地 |
+| R10 | 发帖限流的计数单位 | 设计稿未定义 | `CreateThread` 同事务产生主题 + 首帖两行；若按行计数，一次发帖消耗两份配额 | 按**发帖动作**计数，用 `COUNT(DISTINCT created_at)` 去重（60 秒冷却保证同用户不会同秒产生两次独立发帖）。用例层与真实 SQL 均有回归测试 |
 
-R5 是唯一同时改动了 DDL 与领域代码的条目，其余为计划内调整。
+R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差。其余为计划内调整。
 
 ---
 
 ## 8. 下一步
 
-1. Q1–Q7 已拍板；首次 `git push -u origin main` 已完成，远端 `main` 已建立跟踪。
+1. Q1–Q7 已拍板；`git push -u origin main` 与 M0 三项提交均已推送，远端 `main` 已建立跟踪。
 2. **M0 已全部完成**（P0-01 ~ P0-07），每项均「测试通过 → 单独提交」；备份恢复已完成首次实际演练，记录见 `docs/OPS.md §5`。
-3. 下一步进入第二波 **M1（领域与用例）**：P0-08 仓储接口 → P0-09 种子数据 → P0-10 核心用例 → P0-11 ViewModel → P0-12 插件骨架 → P0-13 在线注册表。
-4. P0 结束前需补做一次**带真实数据的恢复演练**（当前演练用的是空库），才能把 D7 正式结案。
+3. **第二波 M1 已完成前半段**：P0-08 仓储接口（`172333e`）→ P0-09 种子数据（`00abe57`）→ P0-10 核心用例（本轮提交）。三项各自独立提交、全量测试通过，并从零启动实测 `migrations_applied=[1 2 3]`、`nodes=5`、探针正常。
+4. 下一步是 **M1 剩余三项**：P0-11 ViewModel → P0-12 领域事件与插件骨架 → P0-13 内存连接注册表。完成后 M1 关死（验收：无 UI 也能发帖，用例层测试覆盖权限与校验）。
+5. P0 结束前需补做一次**带真实数据的恢复演练**（当前演练用的是空库），才能把 D7 正式结案。
+6. Q7 前置未变：GitHub OAuth App 需在 **M1 结束前**注册并启用 Device Flow，`client_id` 只放服务端环境变量；M2 开发期一律用 `httptest` 假端点。

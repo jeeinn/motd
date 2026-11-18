@@ -29,6 +29,8 @@
 
 关键表行数核对清单：`users`、`nodes`、`threads`、`posts`、`schema_migrations`。前三张证明业务数据到位，最后一张证明迁移版本随备份一起恢复，恢复后不会重复执行迁移。
 
+> 行数基线会随迁移变化，核对时以「备份前主库的实测值」为准，不要硬编码：目前（2026-11-18）共 3 个迁移（`0001_init` / `0002_seed_nodes` / `0003_rate_limit_indexes`），空库阶段 `nodes=5`（版块种子）、`schema_migrations=3`。
+
 ## 3. 命令
 
 ```bash
@@ -84,11 +86,13 @@ motdctl restore <backup-file> --target <path>
 | 步骤 | 命令 | 实测结果 |
 | --- | --- | --- |
 | 备份 | `motdctl backup --db ./data/motd.db --dir ./data/backups` | `data/backups/motd-20261118-112724.db`，sha256 `3ad13345ad1435fc439840d50111e1202a4a6c957e2da1d2d4ef64e920206b0f`，size 151552 |
-| 校验 | `motdctl verify <file>` | `integrity=ok`；`schema_migrations=1`，`users/nodes/threads/posts=0`（当前为空库阶段） |
+| 校验 | `motdctl verify <file>` | `integrity=ok`；`schema_migrations=1`，`users/nodes/threads/posts=0`（当时只有 `0001_init`，且为空库阶段） |
 | 恢复 | `motdctl restore <file> --target ./data/restore-drill/motd.db` | `restored=./data/restore-drill/motd.db`，产物 151552 字节 |
 | 启动验证 | 以恢复库启动 `motd.exe` | `数据库就绪 migrations_applied=0`、`写入队列就绪 capacity=256`、`探针监听` —— 自检全部通过 |
 
 **结论**：D7（从备份恢复到空目录且可运行）达成。恢复后 `Migrate` 应用 0 个版本，说明迁移版本随备份保存。
+
+> 该演练发生在 `0002` / `0003` 迁移落地之前。现在空库基线为 `nodes=5`、`schema_migrations=3`；恢复流程不变，但**校验时的行数必须与备份前主库实测值比对**，不能沿用上面的旧数字。`VerifyBackup` 只报数不做跨版本硬编码判断，备份测试也已改为相对基线断言。
 
 **待办**：当前库无业务数据。P0 闭环跑出真实帖子/账号后，必须再做一次**带数据的恢复演练**，核对 `users` / `posts` 行数与最新内容，不能只靠空库演练结案。
 

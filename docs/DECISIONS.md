@@ -111,3 +111,29 @@
 - 已知限制：`VACUUM INTO` 会整库重写，大库 IO 峰值明显，备份期间写队列可能触发 `ErrQueueFull`。切换到 Online Backup API 的三个量化条件写在 `docs/OPS.md §7`，待 P0-27 压测给出基线后评估。
 - 演练结论：2026-11-18 11:27 备份 → 校验 → 恢复到空目录 → 以恢复库启动服务，`migrations_applied=0`、探针正常，D7 达成。当前是空库，P0 产生真实数据后需重做带数据的演练。
 - 附带修复：`flag` 包遇到首个位置参数即停止解析，`motdctl restore <file> --target <path>` 原会吞掉 `--target`；已做参数归一化并加回归测试。
+
+## ADR-012 仓储端口定义在使用方，写入只暴露受限 `WriteTx`
+
+- 状态：已实现（P0-08，2026-11-18）
+- 结论：
+  - `application/forum/ports.go` 声明 `NodeReader` / `ThreadReader` / `PostReader` / `UnitOfWork` / `WriteTx`，`infrastructure/sqlite/repo_forum.go` 实现；`infrastructure → application` 是合法方向，反向被禁止表拦住。
+  - 端口只返回领域结构，不返回 `*sql.Rows`；`sql.ErrNoRows` 由仓储映射成 `forum.ErrNotFound`，领域层无需 import `database/sql`。
+  - `UnitOfWork.Write(ctx, fn)` 是唯一写路径，`fn` 只拿到 `WriteTx`（受限方法集），拿不到 `*sql.Tx` / `*sql.DB`。一个用例对应一次 `Writer.Submit`。
+  - 权限与限流查询也放进 `WriteTx`，保证「检查 + 写入」在同一事务快照内，不留 TOCTOU 窗口。
+  - `archtest` 增加守卫：application 分组出现 `database/sql` 或 `modernc.org/sqlite` import 即测试失败（实测注入后退出码 1）。
+- 理由：ADR-005 的「用户名校验不可绕过」和 ADR-010 的私有写门面，需要延伸到论坛域——只要 application 还能拿到裸连接，任何约束都能被绕过。把「不碰 SQL」变成会失败的测试，比写在 `doc.go` 里可靠。
+- 代价：`Repos` 聚合三个端口时，Go 不允许同名不同签名的方法共存，故统一命名为 `ListNodes` / `ListThreads` / `ListPosts` / `GetThread`（比 `List` 更明确，也避免调用点靠参数猜语义）。
+- 验证：9 条仓储回归（分页 / 双排序 / 软删除 / 事务原子性 / 首帖同事务 / 限流统计）+ 1 条真实链路集成测试（`forum.Service` 直驱 SQLite 仓储）。
+
+## ADR-013 发帖限流按「动作」计数，`score` 与 `last_reply_at` 同条 UPDATE 维护
+
+- 状态：已实现（P0-10，2026-11-18）
+- 结论：
+  - 发帖限流（Q6：60 秒 1 帖、1 小时 10 帖）**在写事务内查 DB 判定**，不走内存计数。P0-20 的内存计数只用于 Device Flow 发起频率、绑定尝试等认证类限流；发帖配额涉及「已提交内容」的正确性，进程重启不该丢失。
+  - `CreateThread` 同事务写入 `threads` + 首帖 `posts`（§5.2 定义 Post 含首帖），两者共享同一个 `created_at`。`RecentWriteStats` 用 `COUNT(DISTINCT created_at)` 按**发帖动作**计数，否则一次发帖会消耗两份配额。60 秒冷却保证同一用户不可能在同一秒产生两次独立发帖，去重等价于按动作计数。
+  - `0003_rate_limit_indexes.sql` 建 `(user_id, created_at)` 覆盖索引；`EXPLAIN QUERY PLAN` 实测 `SEARCH ... USING COVERING INDEX`，避免每次写入全表扫描。
+  - `TouchThread` 用一条 UPDATE 同时维护 `last_reply_at` 与 `score = score + ?`。P0 没有投票来源，`scoreDelta` 传 0；P1 的投票可直接复用这条事务路径，**不臆造 P0 的计分语义**。
+  - 列表分页用 keyset（排序键 + id）而非 OFFSET：深翻页代价恒定，且不会因翻页期间有新帖而重复或跳行；游标经 base64 编码为不透明字符串，解码时严格校验版本、排序一致性与锚点 ID。
+- 已知边界：DDL 时间存 Unix 秒，**同一秒内的回复不会推进 `last_reply_at`**；排序用 `id` 作 tie-breaker，不影响正确性。测试用可控时钟跨秒验证「回复后 last_reply_at 必须变化」，真实运行同秒回复属预期行为。
+- 另一处 schema 事实：`threads` 表**没有 `status` 列**（设计稿 §5.2 亦如此），因此 P0 不做主题删除；P1 启用主题软删除前必须补字段与迁移（记为 `P0-PLAN §7 R9`）。
+- 验证：15 组用例层测试（校验 / 权限 / 事务 / 限流 / 游标）+ 真实链路集成测试 + `TestRateLimitIndexes` 执行计划断言。

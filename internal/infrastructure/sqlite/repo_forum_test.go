@@ -340,6 +340,8 @@ func TestTouchThreadUpdatesLastReplyAndScore(t *testing.T) {
 func TestRecentWriteStatsInTransaction(t *testing.T) {
 	e := newForumEnv(t)
 	threadID := e.insertThread(t, "t", 0, e.clock)
+	// 首帖与主题共享 created_at，按「发帖动作」去重后不应额外占一份配额。
+	e.insertPost(t, threadID, "首帖", post.StatusNormal, e.clock)
 	e.insertPost(t, threadID, "p1", post.StatusNormal, e.clock+10)
 	e.insertPost(t, threadID, "p2", post.StatusNormal, e.clock+20)
 	// 窗口外的旧记录不应计入。
@@ -355,7 +357,7 @@ func TestRecentWriteStatsInTransaction(t *testing.T) {
 		t.Fatalf("统计近期写入: %v", err)
 	}
 	if stats.Count != 3 {
-		t.Fatalf("窗口内应有 3 条写入（1 主题 + 2 内容），实际 %d", stats.Count)
+		t.Fatalf("窗口内应有 3 次发帖动作（主题+首帖算 1 次，另 2 次回复），实际 %d", stats.Count)
 	}
 	if !stats.LastWriteAt.Equal(testBaseTime.Add(20 * time.Second)) {
 		t.Fatalf("LastWriteAt 应为最近一次，实际 %v", stats.LastWriteAt)

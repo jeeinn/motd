@@ -286,13 +286,17 @@ func (w *sqlWriteTx) ThreadExists(ctx context.Context, threadID int64) (bool, er
 	return true, nil
 }
 
-// RecentWriteStats 统计窗口内该用户创建的主题 + 内容。
-// 索引见 0003_rate_limit_indexes.sql；COUNT/MAX/MIN 走覆盖扫描，避免全表。
+// RecentWriteStats 统计窗口内该用户的**发帖动作次数**。
+//
+// CreateThread 会在同一事务里写入 threads + 首帖 posts，两者共用同一个 created_at；
+// 若直接 COUNT(*) 会把一次发帖算成两次，配额被双倍消耗。因此按 created_at 去重：
+// 60 秒冷却保证同一用户不可能在同一秒内产生两次独立发帖，去重等价于按动作计数。
+// 索引见 0003_rate_limit_indexes.sql；过滤走覆盖索引，避免全表。
 func (w *sqlWriteTx) RecentWriteStats(ctx context.Context, userID int64, since time.Time) (forum.WriteStats, error) {
 	sinceSec := toUnix(since)
 	var count, maxSec, minSec int64
 	err := w.tx.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(MAX(created_at), 0), COALESCE(MIN(created_at), 0)
+		SELECT COUNT(DISTINCT created_at), COALESCE(MAX(created_at), 0), COALESCE(MIN(created_at), 0)
 		FROM (
 			SELECT created_at FROM threads WHERE user_id = ? AND created_at >= ?
 			UNION ALL

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/config"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
 )
@@ -65,6 +66,16 @@ func run() error {
 	writer.Start()
 	defer writer.Stop()
 	logger.Info("写入队列就绪", "capacity", writer.Cap(), "timeout", "3s")
+
+	// 装配论坛用例并读一次 DB：这是「迁移 → 种子 → application 端口 → 读池」的启动自检。
+	// /healthz 仍是纯运维探针，不承载业务（ADR-006）。
+	repos := sqlite.NewForumRepos(pools, writer)
+	forumService := forum.NewService(repos)
+	nodes, err := forumService.ListNodes(ctx)
+	if err != nil {
+		return fmt.Errorf("启动自检：读取版块失败: %w", err)
+	}
+	logger.Info("论坛用例就绪", "nodes", len(nodes))
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
