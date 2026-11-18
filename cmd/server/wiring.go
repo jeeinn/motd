@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/forum"
+	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
@@ -16,10 +17,11 @@ import (
 
 // forumRuntime 是一次装配的产物，抽出来便于端到端集成测试直接复用真实链路。
 type forumRuntime struct {
-	Service *forum.Service
-	Bus     *events.DomainBus
-	Store   *appuser.MemoryAchievementStore
-	Plugins []registry.Plugin
+	Service  *forum.Service
+	Bus      *events.DomainBus
+	Store    *appuser.MemoryAchievementStore
+	Presence *presence.Registry
+	Plugins  []registry.Plugin
 }
 
 // newForumRuntime 把「Service → 事件总线 → 插件 → 成就校验」接起来。
@@ -58,5 +60,11 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer, onPublishError 
 		forum.WithEventSink(bus),
 		forum.WithPublishObserver(obs),
 	)
-	return &forumRuntime{Service: svc, Bus: bus, Store: store, Plugins: plugins}, nil
+	return &forumRuntime{
+		Service:  svc,
+		Bus:      bus,
+		Store:    store,
+		Presence: presence.New(), // 纯内存；SSH 入口在 M3 才往里登记连接
+		Plugins:  plugins,
+	}, nil
 }

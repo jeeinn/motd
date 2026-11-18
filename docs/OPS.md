@@ -73,7 +73,7 @@ motdctl restore <backup-file> --target <path>
    mv data/motd.db-shm    data/motd.db-shm.broken-YYYYMMDD    2>/dev/null || true
    ```
 3. **恢复**：`scripts/restore.sh <backup-file> data/motd.db`。脚本会先做校验和 + 完整性验收，任一失败即中止。
-4. **启动**：`systemctl start motd`，`curl -s http://127.0.0.1:8080/healthz`（应返回 `ok <version> queue=0/256`）。
+4. **启动**：`systemctl start motd`，`curl -s http://127.0.0.1:8080/healthz`（应返回 `ok <version> queue=0/256 online=0 active=0 commits=0`）。
 5. **抽查**：用户数、最新主题、迁移版本是否与备份点一致。
 6. **记录**：把命令、结果、耗时写回本文件 §4 的演练记录。
 
@@ -124,5 +124,5 @@ find data/backups -name 'motd-*.db' -mtime +14 -print
 
 ## 8. 监控与告警（P3 落地）
 
-- `/healthz` 返回 `ok <version> queue=<depth>/<cap>`，可直接观察写入背压。
+- `/healthz` 返回 `ok <version> queue=<depth>/<cap> online=<n> active=<n> commits=<n>`：`queue` 观察写入背压，`online/active` 是内存在线注册表（重启归零，非业务数据），`commits` 是进程启动以来成功提交的事务数。全部为运维可观测字段，不承载业务流量（ADR-006 / ADR-016）。
 - 待接入告警：最近备份时间超过 26 h、`verify` 失败、队列深度持续接近容量。

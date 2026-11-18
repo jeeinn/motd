@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jeeinn/motd/internal/application/presence"
 	"github.com/jeeinn/motd/internal/config"
 	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
@@ -85,9 +86,26 @@ func run() error {
 		"plugins", len(rt.Plugins),
 		"post_created_subscribers", rt.Bus.SubscriberCount(event.EventPostCreated))
 
+	// 心跳超时清理只在内存里跑：每 10s  reap 一次超过 20s 未心跳的会话。
+	// 不写库、不占用写队列（§2.6）；ctx 取消后随进程一起退出。
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if reaped := rt.Presence.Reap(); len(reaped) > 0 {
+					logger.Info("清理超时会话", "count", len(reaped))
+				}
+			}
+		}
+	}()
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           probeMux(pools, writer),
+		Handler:           probeMux(pools, writer, rt.Presence),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -122,7 +140,7 @@ func run() error {
 
 // probeMux 只提供运维探针，不承担业务流量。
 // 业务端点（OAuth 回调、Device Flow）在 P0 认证阶段按 §4.8 接入。
-func probeMux(pools *sqlite.Pools, writer *sqlite.Writer) http.Handler {
+func probeMux(pools *sqlite.Pools, writer *sqlite.Writer, reg *presence.Registry) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -133,7 +151,8 @@ func probeMux(pools *sqlite.Pools, writer *sqlite.Writer) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "ok %s queue=%d/%d\n", version, writer.Depth(), writer.Cap())
+		_, _ = fmt.Fprintf(w, "ok %s queue=%d/%d online=%d active=%d commits=%d\n",
+			version, writer.Depth(), writer.Cap(), reg.Online(), reg.Active(), writer.Commits())
 	})
 	return mux
 }

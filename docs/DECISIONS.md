@@ -173,3 +173,16 @@
   1. 领域事件的「可靠」在 P0 仅限**单进程内同步投递**；进程崩溃会丢未处理事件。P1 需补 `domain_event_outbox` 表，与业务写入同事务落库后再投递（记为 P0-PLAN §7 R12）。
   2. 成就状态在内存，重启即失；这是 P0 未启用成就系统的预期行为，不影响 D1–D7。
 - 验证：新增 34 条测试（事件模型 2 / 两条通道 8 / 注册表 4 / demo 4 / 成就校验 5 / 用例发布 6 / 守卫 3 / 端到端装配 2）；全量 `go build` / `go vet` / `go test ./...` 通过；从零启动实测 `nodes=5 plugins=1 post_created_subscribers=1`、`/healthz → ok dev queue=0/256`；端到端测试用真实 SQLite + 真实队列 + 真实插件链路验证发帖后成就解锁且只解锁一次。
+
+## ADR-016 在线状态纯内存：静态守卫 + 真实写库计数双重验收
+
+- 状态：已实现（P0-13，2026-11-18），M1 关死
+- 结论：
+  - `application/presence.Registry` 维护在线连接数、每会话状态（认证中 / 浏览 / 编辑 / 空闲）、20 秒心跳超时、历史峰值与快照副本；时钟与超时可注入，测试不靠真等 20 秒。`Reap()` 返回排序后的超时 ID，由 `cmd/server` 每 10 秒调用一次（随 `ctx` 取消退出）。
+  - `Active` 与 `Online` **独立统计**：Active 只认「心跳窗口内且处于 Browsing / Composing」的会话；认证中与 Idle 不计入。否则两者恒等，§2.7 要求的「同时活跃独立统计」就失去意义。
+  - **不写 SQLite 用两层证明**：
+    1. 静态守卫 `archtest` 扫描 `internal/application/presence`，禁 `database/sql` / `modernc.org/sqlite` / `internal/infrastructure` import（实测注入后退出码 1）——编译期就不可能拿到写句柄；
+    2. 运行时集成测试给 `sqlite.Writer` 加 `Commits()`（只统计 `Commit` 成功的事务），先做一次真实写入让计数变为 1，再驱动 100 个连接上下线 + 心跳 + 状态切换 + `Reap`，断言提交数**增量严格为 0**。计数器本身另有回归：失败事务与唯一约束冲突都不计数，避免「恒为 0」造成假绿。
+- `/healthz` 输出扩展为 `ok <version> queue=<depth>/<cap> online=<n> active=<n> commits=<n>`。ADR-006 的「纯运维探针、不承载业务」语义不变，只是增加可观测字段。
+- 已知边界：在线状态是内存态，进程重启归零——这正是设计稿 §2.6 的意图（在线状态不是业务数据）。M3 的 SSH 入口才会真正往注册表登记连接；当前阶段为空表。
+- 验证：新增 11 条测试（注册表 7 / 守卫 2 / 写库计数集成 2）；全量 `go build` / `go vet` / `go test ./...` 通过；从零启动实测 `/healthz → ok dev queue=0/256 online=0 active=0 commits=0`。

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/forum"
+	"github.com/jeeinn/motd/internal/application/presence"
 	"github.com/jeeinn/motd/internal/domain/event"
 	domainuser "github.com/jeeinn/motd/internal/domain/user"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
@@ -57,6 +58,9 @@ func TestEndToEndPostCreatedTriggersPluginAchievement(t *testing.T) {
 
 	if len(rt.Plugins) == 0 || rt.Bus.SubscriberCount(event.EventPostCreated) == 0 {
 		t.Fatal("装配后应有插件订阅 PostCreated")
+	}
+	if rt.Presence == nil || rt.Presence.Online() != 0 || rt.Presence.Timeout() != presence.DefaultHeartbeatTimeout {
+		t.Fatal("在线注册表应装配为纯内存、空表、20s 心跳超时")
 	}
 
 	threadID, err := rt.Service.CreateThread(ctx, actor, forum.CreateThreadInput{

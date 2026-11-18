@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"modernc.org/sqlite"
@@ -93,6 +94,10 @@ type Writer struct {
 	closed  bool
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
+
+	// commits 只统计成功提交的事务，用于运维观测与 P0-13 的「在线状态零写库」验收。
+	// 放在 Writer 内部而不是外部计数器，是因为所有写入都必经这里。
+	commits atomic.Int64
 }
 
 // NewWriter 基于写池构造队列。创建后必须显式 Start 才会消费任务。
@@ -155,6 +160,9 @@ func (w *Writer) Stop() {
 // Depth / Cap 供运维探针与压测观察背压，不参与写入决策。
 func (w *Writer) Depth() int { return len(w.tasks) }
 func (w *Writer) Cap() int   { return cap(w.tasks) }
+
+// Commits 返回成功提交的事务数（只读，不影响写入路径）。
+func (w *Writer) Commits() int64 { return w.commits.Load() }
 
 func (w *Writer) loop() {
 	defer w.wg.Done()
@@ -239,7 +247,8 @@ func (w *Writer) execute(task writeTask) error {
 		}
 		lastErr = runOnce(ctx, w.db, task.fn)
 		if lastErr == nil {
-			return nil // 只有 Commit 成功才走到这里
+			w.commits.Add(1) // 只有 Commit 成功才计数
+			return nil
 		}
 		if !isRetryable(lastErr) {
 			return fmt.Errorf("写入事务失败（不可重试）: %w", lastErr)
