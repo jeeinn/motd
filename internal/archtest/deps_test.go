@@ -281,6 +281,42 @@ func TestGuardCoversAllInternalGroups(t *testing.T) {
 	}
 }
 
+// TestApplicationHasNoSQLImports 把 P0-08 的约束「端口定义在使用方、不返回 *sql.Rows」
+// 固化成守卫：application 层一旦出现 SQL 驱动 import，说明有人绕过了 UnitOfWork 直连数据库。
+// groupOfImport 只识别模块内部路径，因此这里单独扫全部 import（含标准库与第三方）。
+func TestApplicationHasNoSQLImports(t *testing.T) {
+	root := findModuleRoot(t)
+	appDir := filepath.Join(root, "internal", "application")
+	banned := []string{"database/sql", "modernc.org/sqlite"}
+
+	err := filepath.WalkDir(appDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		for _, imp := range file.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			for _, b := range banned {
+				if p == b {
+					t.Errorf("%s 不得 import %q：application 层只声明端口，SQL 实现必须留在 infrastructure", filepath.ToSlash(rel), p)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("扫描 application 目录失败: %v", err)
+	}
+}
+
 // TestGroupParsing 锁定路径解析逻辑，改目录结构时这条会先失败。
 func TestGroupParsing(t *testing.T) {
 	cases := []struct {
