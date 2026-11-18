@@ -63,6 +63,8 @@ type pageController struct {
 	offset   int
 	notice   viewmodel.Notice
 	editor   *pageEditor
+	// 行编辑回显器：与页面状态一样每会话一份（ADR-026）。
+	echo *lineEcho
 }
 
 type editorStage uint8
@@ -72,8 +74,9 @@ const (
 	stageBody
 )
 
-// pageEditor 是发帖 / 回复的行编辑态。遵循 P0-22「用户文本零回显」：
-// 输入缓冲只留在内存，提交前绝不写回终端；提交时由 forum.Service 校验。
+// pageEditor 是发帖 / 回复的行编辑态（ADR-026）：
+// 输入经 lineEcho 净化后回显，提交时由 forum.Service 校验；
+// 原始字节（KeyMsg.Raw / Text）永不直接进入输出流。
 type pageEditor struct {
 	stage    editorStage
 	creating bool // true=新主题（需标题+正文），false=回复（只需正文）
@@ -83,13 +86,14 @@ type pageEditor struct {
 	threadID int64
 }
 
-func (h *inputHandler) newPageController() *pageController {
+func (h *inputHandler) newPageController(out io.Writer) *pageController {
 	return &pageController{
 		service:  h.forum,
 		users:    h.users,
 		presence: h.presence,
 		reg:      h.reg,
 		screen:   emptyScreen(),
+		echo:     newLineEcho(out),
 	}
 }
 
@@ -378,11 +382,14 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 	p.editor = &pageEditor{
 		stage: stage, creating: creating, nodeID: p.nodeID, threadID: p.threadID,
 	}
+	// 当前所有编辑字段都非敏感；P1 的邮箱登录密码字段改为 setSecret(true)，
+	// 对应 viewmodel.Field.Secret 的语义（回显字符由 Renderer 决定）。
+	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
 	if creating {
-		return p.writeFixed(sess, "新建主题：输入标题后按 Enter（Esc 取消；输入不回显）")
+		return p.writeFixed(sess, "新建主题：输入标题后按 Enter（Esc 取消）")
 	}
-	return p.writeFixed(sess, "回复：输入正文后按 Enter（Esc 取消；输入不回显）")
+	return p.writeFixed(sess, "回复：输入正文后按 Enter（Esc 取消）")
 }
 
 func (p *pageController) editorKey(ctx context.Context, sess pageSession, m input.KeyMsg) error {
@@ -392,22 +399,33 @@ func (p *pageController) editorKey(ctx context.Context, sess pageSession, m inpu
 	}
 	switch m.Kind {
 	case input.KeyEsc, input.KeyCtrlC:
+		p.echo.newline()
 		return p.cancelEditor(sess)
 	case input.KeyBackspace:
-		if len(e.runes) > 0 {
-			e.runes = e.runes[:len(e.runes)-1]
+		before := len(e.runes)
+		if before > 0 {
+			e.runes = e.runes[:before-1]
 		}
+		p.echo.backspace(len(e.runes) < before)
 	case input.KeyRune:
+		before := len(e.runes)
 		e.runes = append(e.runes, m.Rune)
 		p.clampEditor(e)
+		// 只回显真正保留下来的字符（超长截断时被丢弃的字符不回显）。
+		if len(e.runes) > before {
+			p.echo.rune(m.Rune)
+		}
 	case input.KeyPaste:
 		// 粘贴块可含换行，因此多行正文可通过一次粘贴提交。
+		before := len(e.runes)
 		e.runes = append(e.runes, []rune(m.Text)...)
 		p.clampEditor(e)
+		p.echo.paste(string(e.runes[before:]))
 	case input.KeyEnter:
+		p.echo.newline()
 		return p.submitEditor(ctx, sess)
 	default:
-		// 其余按键零回显，不产生任何动作。
+		// 其余按键不产生任何动作，也不回显。
 	}
 	return nil
 }

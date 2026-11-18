@@ -21,9 +21,9 @@ func TestCommandEntryHintDoesNotAskForSecondSlash(t *testing.T) {
 	if !strings.Contains(commandEntryHint, "无需再打一次") {
 		t.Fatal("提示语必须明确说明 / 已自动填入")
 	}
-	// 零回显是 P0-22 安全约束，不打算改；但必须提前告知，否则用户会以为没反应。
-	if !strings.Contains(commandEntryHint, "不回显") {
-		t.Fatal("提示语必须说明输入过程不回显")
+	// ADR-026 起正常输入会回显，提示语不得再宣称「不回显」。
+	if strings.Contains(commandEntryHint, "不回显") {
+		t.Fatal("正常输入已有回显，提示语不应再说不回显")
 	}
 }
 

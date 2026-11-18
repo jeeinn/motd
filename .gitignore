@@ -1,6 +1,8 @@
 # 构建产物
 /motd
 /motd.exe
+/motd.exe~
+*.exe~
 /bin/
 /dist/
 

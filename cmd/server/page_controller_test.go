@@ -78,7 +78,7 @@ func newFakePageSession(userID int64) *fakePageSession {
 
 func (s *fakePageSession) Write(p []byte) (int, error) { return s.buf.Write(p) }
 func (s *fakePageSession) ID() string                  { return "fake-session" }
-func (s *fakePageSession) Principal() auth.Principal    { return s.principal }
+func (s *fakePageSession) Principal() auth.Principal   { return s.principal }
 func (s *fakePageSession) Window() (uint32, uint32, string) {
 	return 80, 24, "xterm"
 }
@@ -87,7 +87,7 @@ func (s *fakePageSession) SetState(st presence.State) error {
 	return nil
 }
 func (s *fakePageSession) output() string { return s.buf.String() }
-func (s *fakePageSession) reset()        { s.buf.Reset() }
+func (s *fakePageSession) reset()         { s.buf.Reset() }
 
 func typeInto(t *testing.T, ctx context.Context, sess *fakePageSession, pc *pageController, text string) {
 	t.Helper()
@@ -133,7 +133,7 @@ func cmdOnlySGR(t *testing.T, s string) {
 func TestPageControllerD1ShowsNodeList(t *testing.T) {
 	ctx, h, _, _, _ := setupMVPRuntime(t)
 	sess := newFakePageSession(0)
-	pc := h.newPageController()
+	pc := h.newPageController(sess)
 
 	if err := pc.showNodes(ctx, sess); err != nil {
 		t.Fatalf("首屏渲染失败: %v", err)
@@ -154,7 +154,7 @@ func TestPageControllerD1ShowsNodeList(t *testing.T) {
 func TestPageControllerNavigation(t *testing.T) {
 	ctx, h, _, _, _ := setupMVPRuntime(t)
 	sess := newFakePageSession(0)
-	pc := h.newPageController()
+	pc := h.newPageController(sess)
 	if err := pc.showNodes(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestPageControllerNavigation(t *testing.T) {
 func TestPageControllerD4TwoUsersSeeEachOthersPosts(t *testing.T) {
 	ctx, h, rt, _, _ := setupMVPRuntime(t)
 	a, b := newFakePageSession(1), newFakePageSession(2)
-	pa, pb := h.newPageController(), h.newPageController()
+	pa, pb := h.newPageController(a), h.newPageController(b)
 
 	if err := pa.showNodes(ctx, a); err != nil {
 		t.Fatal(err)
@@ -254,7 +254,7 @@ func TestPageControllerD4TwoUsersSeeEachOthersPosts(t *testing.T) {
 func TestPageControllerGuestIsReadOnly(t *testing.T) {
 	ctx, h, rt, _, _ := setupMVPRuntime(t)
 	sess := newFakePageSession(0)
-	pc := h.newPageController()
+	pc := h.newPageController(sess)
 	if err := pc.showNodes(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestPageControllerGuestIsReadOnly(t *testing.T) {
 func TestPageControllerOpenNeverEchoesArgument(t *testing.T) {
 	ctx, h, _, _, _ := setupMVPRuntime(t)
 	sess := newFakePageSession(0)
-	pc := h.newPageController()
+	pc := h.newPageController(sess)
 	if err := pc.showNodes(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestPageControllerHostilePostIsSafeForOtherSession(t *testing.T) {
 	}
 
 	b := newFakePageSession(2)
-	pb := h.newPageController()
+	pb := h.newPageController(b)
 	if err := pb.showDetail(ctx, b, threadID); err != nil {
 		t.Fatal(err)
 	}

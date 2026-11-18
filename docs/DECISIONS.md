@@ -387,3 +387,26 @@
   2. `ProjectLoginView` 的 `strings.TrimSpace` 会吃掉尾部换行，测试用例里 `"ABCD-EFGH\n"` 意外通过；改为内部控制字符（`ABCD\nEFGH`）才真正验证「失败关闭」。
   3. `normalizeVerificationURI` 的字符白名单不含 `\t` / `\n` / 尖括号，URI 中间夹控制字符会被拒绝，符合预期。
 - 验证：新增 **49 个测试函数**（`application/auth` 领域 11；`presence` 3；`transport/ssh` 会话升级 6 含 8 goroutine 并发只成功 1 次；`cmd/server` 呈现 5 + 交互 / D2 集成 11；`internal/archtest` 13 含 6 条负向注入与文档一致性守卫）。全量 `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 通过（30 个包；核心 6 包共 336 个测试函数）；从零启动实测日志出现 `登录交互就绪 mode=minimal_in_process presentation=fixed_text provider=github replace_at=P0-24`、`migrations_applied=[1 2 3]`，无 panic。`docs/DEVIATIONS.md` 由 archtest 守卫校验存在性与 R18~R20 关键段落。
+
+---
+
+## ADR-026 回显按字段分级：修订 ADR-018 的「全局零回显」
+
+- 状态：已采纳（2026-11-18，V 先生本机实测后拍板）；**修订 ADR-018 第 2 条与「代价」第 1 条**，ADR-018 原文保留供追溯
+- 结论：
+  1. 正常操作（斜杠命令、发帖标题 / 正文、回复正文）**必须有回显**；
+  2. 只有 Secret 字段（P1 邮箱登录密码、验证码等）隐藏原文，只回显 `*`；
+  3. 回显的用户字符一律先经 `safe.SanitizeText` 净化；`KeyMsg.Raw` / `Text` 原始字节永不直接进输出流；
+  4. 编辑控制（`\b \b` 退格擦除、`\r\n` 换行）是**服务端生成的固定常量**，与用户字节分属不同信任域；
+  5. 不回显清单保持不变：命令参数 `inv.Args`、指纹 / 公钥文本、`err.Error()`、凭据值、Device Flow 的 `device_code` / `access_token`。
+- 理由：
+  - **体验**：全局零回显让用户输入命令 / 标题时完全看不到自己打了什么，本机实测被判为「输入没反应」，属可用性缺陷而非安全必需。
+  - **设计依据**：评审稿 §2.3 与 `viewmodel.Field.Secret` 注释已写明「Secret / Multiline 描述语义约束，**具体回显字符由 Renderer 决定**」——回显与否本就是字段级语义，不是全局开关。
+  - **安全**：§3.5 禁止的是「用户提交的控制序列」影响终端，不是「服务端生成的编辑控制」。逐字符净化后回显 + 服务端常量控制，恰好是 §3.5 要求的两条信任路径；恶意 ESC 变成可见图示 `␛`，不会成为控制序列。
+  - **最小改动**：不引入依赖，不动 `safe/ansi.go` 的 SGR 白名单与既有 archtest 守卫（FF09）。
+- 代价 / 边界：
+  - 逐字符回显 + `\b \b` 擦除依赖终端 VT 兼容；宽字符按 `safe.DisplayWidth` 计算列数。粘贴含换行的多行文本后退格不能跨行回到上一行（已知限制，P1 多行编辑器解决）。
+  - `lineEcho` 每会话一份，与 `pageController` 同生命周期；`applyKey` 仍是纯状态机（不碰 IO），回显在调用侧按前后长度推导是否真删除了字符。
+  - 当前 P0 无密码字段，`startComposer` 显式 `setSecret(false)` 声明所有编辑字段非敏感；P1 邮箱密码字段改 `setSecret(true)`，对应 `viewmodel.Field.Secret`。
+- 验证：`cmd/server/line_echo_test.go`（5 个：普通 / 宽字符退格、恶意字节净化、Secret 掩码、粘贴与换行 reset、预置 `/` 顺序）+ 真实 SSH E2E 断言 `//login` 回显与标题 / 正文回显；全量 `go build` / `go vet` / `go test -count=1 ./...` 通过。
+- 关联：`DEVIATIONS.md` R21、`docs/MVP-DELIVERY.md §10`。

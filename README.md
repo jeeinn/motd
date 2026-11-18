@@ -37,7 +37,7 @@ curl -s http://127.0.0.1:8080/healthz   # => ok dev queue=0/256 online=0 active=
 ssh -p 2222 localhost
 ```
 
-> 进入后按 `/` 会**自动填入前导斜杠**，直接输入命令名即可（例如 `login github`），Enter 提交；**输入过程不回显**是 P0-22 的安全约束，不是没反应。`j/k` 移动、`Enter` 打开、`q` 返回、`/quit` 退出。登录命令是 `/login github`（不是 `/login`）。
+> 进入后按 `/` 会**自动填入前导斜杠**，直接输入命令名即可（例如 `login github`），Enter 提交；输入会正常回显（字符先经净化，见 `docs/DECISIONS.md ADR-026`），只有密码类 Secret 字段才隐藏。`j/k` 移动、`Enter` 打开、`q` 返回、`/quit` 退出。登录命令是 `/login github`（不是 `/login`）。
 
 首次启动会在 `./data` 下创建 `motd.db` 并自动执行迁移。
 

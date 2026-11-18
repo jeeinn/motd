@@ -216,10 +216,13 @@ func TestMVPSSHClosedLoop(t *testing.T) {
 
 	mark = a.out.mark()
 	a.send(t, "MVP 真实 SSH 发帖\r")
+	// ADR-026：标题输入必须回显，且这一步的新增输出里只有回显含该文本。
+	a.out.waitSince(t, mark, "MVP 真实 SSH 发帖")
 	a.out.waitSince(t, mark, "标题已接收")
 
 	mark = a.out.mark()
 	a.send(t, "来自真实客户端的首帖\r")
+	a.out.waitSince(t, mark, "来自真实客户端的首帖")
 	a.out.waitSince(t, mark, "MVP 真实 SSH 发帖")
 
 	mark = a.out.mark()
@@ -321,5 +324,7 @@ func TestMVPLoginCommandHintOnRealSSH(t *testing.T) {
 
 	mark = c.out.mark()
 	c.send(t, "//login\r")
+	// ADR-026：正常输入必须回显（净化后），随后才是命令解析结果。
+	c.out.waitSince(t, mark, "//login")
 	c.out.waitSince(t, mark, "未知命令")
 }

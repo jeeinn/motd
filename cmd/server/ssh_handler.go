@@ -22,8 +22,9 @@ import (
 // MVP 收尾把 P0-24/P0-25 的终端页面控制器接进同一分发链：解码器、命令表
 // 与 transport/ssh 协议层保持不变，页面状态每会话独立（pageController）。
 //
-// 安全约束：绝不把 KeyMsg.Raw / KeyMsg.Text 写回终端。用户提交的文本
-// 只能经 P0-23 的净化 + 白名单渲染后才能出现；在此之前一律零回显。
+// 安全约束（ADR-026）：绝不把 KeyMsg.Raw / KeyMsg.Text 原始字节写回终端。
+// 需要回显的输入一律经 safe.SanitizeText 净化（ESC/CSI/OSC 转可见图示）；
+// 编辑控制（\b、\r\n）由服务端常量生成，与用户字节分属不同信任域（§3.5）。
 type inputHandler struct {
 	reg *command.Registry
 
@@ -107,15 +108,16 @@ const (
 	outcomeStartLogin
 )
 
-// commandLine 是斜杠命令的行编辑缓冲。P0-22 只做收集与提交，不回显原文。
+// commandLine 是斜杠命令的行编辑缓冲，只做收集与提交（纯状态机）。
+// 回显由 lineEcho 在调用侧完成，applyKey 不碰 IO（ADR-026）。
 type commandLine struct {
 	active bool
 	runes  []rune
 }
 
-// 进入命令态时 cl.runes 已预置 '/'；且 P0-22 的零回显让用户看不到自己
-// 输入的字符，两件事都必须在提示里说清楚，否则会被误判为「输入没反应」。
-const commandEntryHint = "已进入命令输入（/ 已自动填入，无需再打一次）：直接输入命令名与参数；输入过程不回显（安全约束），Enter 提交，Esc 取消。\r\n"
+// 进入命令态时 cl.runes 已预置 '/'，必须说清楚「不用再打一次」；
+// ADR-026 起输入会正常回显，不再需要解释「看不到输入」。
+const commandEntryHint = "已进入命令输入（/ 已自动填入，无需再打一次）：直接输入命令名与参数，Enter 提交，Esc 取消。\r\n"
 
 type cmdAction uint8
 
@@ -142,7 +144,7 @@ const (
 func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	// 页面状态每会话独立：inputHandler 是进程级单例，绝不能把光标 / 当前节点
 	// 之类的 UI 状态放在 handler 上（原则二：内存状态只是运行时状态）。
-	pc := h.newPageController()
+	pc := h.newPageController(sess)
 	_, _ = fmt.Fprintf(sess, "motd %s\r\n", version)
 	_ = sess.SetState(presence.StateBrowsing)
 	_ = pc.showNodes(ctx, sess)
@@ -214,7 +216,7 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			return false
 		}
 		if pc.editor != nil {
-			// 编辑态优先于命令表：按键只进输入缓冲，零回显（P0-22）。
+			// 编辑态优先于命令表；输入经 lineEcho 净化后回显（ADR-026）。
 			_ = pc.editorKey(ctx, sess, m)
 			return false
 		}
@@ -302,7 +304,10 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 }
 
 func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageController, m input.KeyMsg, cl *commandLine) handleOutcome {
+	// applyKey 保持纯状态机；回显在调用侧按「前后长度」推导是否真的删除了字符。
+	wasEditing, beforeLen := cl.active, len(cl.runes)
 	action, line, pasteLen := applyKey(cl, m)
+	echoCommandKey(pc.echo, m, wasEditing, beforeLen, len(cl.runes), action)
 	switch action {
 	case actionQuit:
 		return outcomeQuit
@@ -314,6 +319,8 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 		// 提示语若说「以 / 开头」，用户补打一个 / 会得到 //login → 未知命令
 		// （本机实测反馈）。具体措辞见 commandEntryHint 的回归测试。
 		_, _ = io.WriteString(sess, commandEntryHint)
+		// 提示换行后再回显预置的 '/'，保证用户输入行连续（ADR-026）。
+		pc.echo.preloadedSlash()
 	case actionPasteNotice:
 		_, _ = fmt.Fprintf(sess, "（已收到粘贴块 %d 字节；请先在编辑态内粘贴）\r\n", pasteLen)
 	case actionEscNotice:
