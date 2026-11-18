@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/presence"
 	"github.com/jeeinn/motd/internal/config"
 	"github.com/jeeinn/motd/internal/domain/event"
@@ -104,14 +105,17 @@ func run() error {
 		}
 	}()
 
-	// SSH 入口（Q4：默认 2222）。账号体系在 M2 才落地，此刻用 guestResolver 占位；
-	// transport/ssh 只依赖 application/auth.Resolver 端口，M2 换实现不改协议层（ADR-017）。
+	// SSH 入口（Q4：默认 2222）。P0-14 起用查 ssh_keys 的真实身份解析器；
+	// transport/ssh 只依赖 application/auth.Resolver 端口，M2 后续换实现不改协议层（ADR-017/020）。
+	resolver := auth.NewResolver(sqlite.NewSSHKeyLookup(pools))
+	logger.Info("身份解析就绪", "mode", "ssh_keys")
+
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:        cfg.SSHAddr,
 		DataDir:     cfg.DataDir,
 		MaxConns:    cfg.SSHMaxConns,
 		IdleTimeout: cfg.SSHIdleTimeout,
-		Resolver:    guestResolver{},
+		Resolver:    resolver,
 		Presence:    rt.Presence,
 		Handler:     newInputHandler(),
 		Logger:      logger,

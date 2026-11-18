@@ -241,3 +241,20 @@
   3. `Width > 0` 时先折行再解析，跨折行边界的 Markdown 标记按纯文本处理，不产生错误渲染。
   4. P0-23 是渲染库，P0-24 页面才接入链路；接入时用户内容必须走 `RenderUser`、状态栏走 `RenderSystem`，禁止直接 `Write(m.Raw)`。
 - 验证：22 条恶意样本 + 净化 / 折行 / 宽度 / Markdown / 渲染 / 静态守卫共 20 余条测试；全量 `go build` / `go vet` / `go test ./...` 通过。
+
+## ADR-020 身份解析三状态：端口在 application，查库在 infrastructure，失败不降级
+
+- 状态：已实现（P0-14，2026-11-18），第四波 M2 首项
+- 结论：
+  - `application/auth.KeyLookup` 声明「指纹 → `KeyStatus{Found, Revoked, UserID}`」只读端口；`infrastructure/sqlite.SSHKeyLookup` 参数化查 `ssh_keys`、只走读池；`auth.NewResolver` 完成三状态映射。`transport/ssh` 只依赖 P0-21 已有的 `Resolver` 接口，**协议层零改动**（ADR-017 兑现）。
+  - 三状态严格按 §4.6：未命中 → `Guest(fp)` 只读；命中未吊销 → `KindUser + UserID`；命中已吊销 → `ErrKeyRevoked`，由 `publicKeyCallback` 转成拒绝认证。
+  - **失败关闭**：查库错误一律返回错误并拒绝认证，绝不降级成访客放行；空指纹与格式非法在查库前拦下；命中但 `UserID <= 0` 视为脏数据报错。理由：一次 DB 抖动不该让已绑定用户「变成」访客，更不能让实现缺陷把吊销态漏成放行。
+  - **指纹来源约束**：指纹由认证阶段服务端持有的 `ssh.PublicKey` 经 `gossh.FingerprintSHA256` 算出，格式 `SHA256:` + 43 字符 RawStdEncoding。`application/auth` 只用标准库校验格式、不 import SSH 库；archtest 静态守卫禁止该包出现 SSH 库 import 或 `ParseAuthorizedKey` / `MarshalAuthorizedKey` / `FingerprintSHA256` 标识符（负向注入实测）。`transport/ssh/auth_contract_test.go` 用真实 ed25519 key 验证两侧格式一致，防止规则写错把全部连接拒掉。
+  - `forum.ActorFromPrincipal(p, status)` 把认证快照映射成用例层 Actor；账号状态由调用方从 `UserStatusReader` 取得，写用例仍会在事务内二次复核（P0-10），认证层不缓存。验收项「访客调用写用例返回明确权限错误而非 panic」由 `checkWrite()` 的 `ErrReadOnly` 落实。
+- 理由：`ssh_keys` 表在 `0001_init.sql` 已存在，P0-14 不需要新迁移；把「查库」压在一个只读端口上，可以让 P0-18 的绑定 / 解绑写入继续走写入队列，不出现第二条写路径。端口前置还让第三波先做 SSH 入口时不必等 M2。
+- 已知边界：
+  1. 账号 `status` 不参与本项判定，由 P0-10 写用例在事务内二次复核，避免认证快照过期造成越权。
+  2. 本项只提供只读端口；公钥绑定、解绑、一钥一号的唯一约束 enforcement 属于 P0-18。
+  3. 已吊销公钥的**已有连接**按设计稿「按策略处理」留给 P1 会话撤销，本项只拦新认证。
+- 实测发现并修复的真实缺陷：首轮全量回归中 `repo_auth_test.go` 手写 43 字符指纹常量时 `authFPRevoked` 少了一个字符，被 `ValidFingerprint` 正确拦下，`TestResolverWithRealSQLite/已吊销→拒绝` 报「指纹格式非法」而非预期的 `ErrKeyRevoked`。已改为 `strings.Repeat("B", 43)` 程序化生成，不再手数长度；校验逻辑本身无需改动，反而证明它在真实链路上确实生效。
+- 验证：`application/auth` 三状态 / 非法指纹 / 查库失败 / 脏 UserID / nil 端口共 7 组；`application/forum` Actor 映射 2 组；`infrastructure/sqlite` 查库三状态 / 注入串 / Resolver 端到端 3 组；`internal/archtest` 静态守卫 + 负向注入 2 组；`transport/ssh` 指纹格式契约 1 组。全量 `go build` / `go vet` / `go test ./...` 通过。

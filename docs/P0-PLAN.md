@@ -1,9 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0 与 M1 全部完成**（P0-01 ~ P0-13）；**第三波按 §5 推进 M3 的 P0-21 → 23**（V 先生 2026-11-18 12:59 拍板），M2 顺延为第四波
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 已完成
 > 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.4（插件权限）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
 > 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
-> 更新：2026-11-18 13:00
+> 更新：2026-11-18 13:52
 
 ---
 
@@ -162,11 +162,19 @@
 
 ### M2 认证
 
-**P0-14 身份解析：公钥 → 用户**
+**P0-14 身份解析：公钥 → 用户** ✅
 - 产出：`application/auth` 的 `Principal`（`Kind: guest|user`、`UserID`、`KeyFingerprint`）与解析函数
 - 规则：指纹命中未吊销的 `ssh_keys` → 登录态；未命中 → 访客只读；命中已吊销 → 拒绝认证（§4.6 三状态）
 - 验收：三种状态各有测试；访客调用写用例返回明确的权限错误而非 panic
 - 依赖：P0-10 ｜ 量级：0.5
+- 执行补充：
+  1. **端口与实现分离**：`application/auth.KeyLookup` 定义「指纹 → 三状态」只读端口，`infrastructure/sqlite/repo_auth.go` 查 `ssh_keys`（参数化、只走读池）；`auth.NewResolver` 做三状态映射。`transport/ssh` 只依赖已有的 `Resolver` 端口，P0-21 协议层一行未改（ADR-017 兑现）。
+  2. 三状态：未命中 → `Guest(fp)`；命中未吊销 → `KindUser + UserID`；命中已吊销 → `ErrKeyRevoked`（由 `publicKeyCallback` 转成拒绝认证）。**查库失败一律拒绝认证，不降级成访客放行**；空指纹 / 格式非法在查库前拦下。
+  3. 指纹格式：`SHA256:` + 43 字符 RawStdEncoding（与 `gossh.FingerprintSHA256` 一致），只用标准库校验；`transport/ssh/auth_contract_test.go` 用真实 ed25519 key 验证两侧一致，防止格式规则写错把全部连接拒掉。
+  4. **不接受客户端公钥文本**：archtest 静态守卫禁止 `application/auth` import SSH 库或出现 `ParseAuthorizedKey` / `FingerprintSHA256`，负向注入实测；指纹只能来自认证阶段服务端持有的 `ssh.PublicKey`（§4.6 / P0-18 约束提前落地）。
+  5. `forum.ActorFromPrincipal` 把认证快照映射成用例层 Actor，访客走 `checkWrite()` 返回 `ErrReadOnly` 而非 panic；账号状态由写用例在事务内二次复核，认证层不缓存。
+  6. `cmd/server` 移除 `guestResolver` 占位，注入 `auth.NewResolver(sqlite.NewSSHKeyLookup(pools))`；启动日志加「身份解析就绪」。
+  7. 边界：`ssh_keys` 表在 `0001_init.sql` 已存在，本项**不需要新迁移**；绑定 / 解绑写入属于 P0-18，本项只提供只读端口。账号 `status` 不在本项判定（由 P0-10 事务内复核），避免快照过期造成越权。详见 ADR-020。
 
 **P0-15 GitHub Device Flow 客户端**
 - 产出：`infrastructure/github/device.go` —— `POST /login/device/code`、`POST /login/oauth/access_token`、`GET /user`、`GET /user/emails`
@@ -420,3 +428,4 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 13. **P0-23 终端安全渲染已完成**（ADR-019）：三段分离、唯一 SGR 常量表、两条路径不共用净化、22 条恶意样本固化。第三波 M3 全部关死；2026-11-18 已推送 4 个提交，远端 `main` = `88e7dd4`，本地与远端一致。
 14. **部署交付约定**（V 先生 2026-11-18 13:43 确认）：最终产物是**本地交叉编译的单个二进制**，由用户上传测试 VPS、以 Linux/systemd 托管并放行 `2222`。**P0 全部完成后需额外交付一份逐步部署指引**（编译 → 目录权限 → 凭据注入 → unit → host key → 端口转发 → 自检 → 带数据恢复演练 → D1–D7 验收），责任划分与清单骨架见 `docs/OPS.md §9`；unit 与自检脚本由 P0-28 产出。
 15. **下一步：第四波 M2 认证**，按 `P0-14 → 15 → 16 → 17 → 18 → 19 → 20` 推进，每项严格「实现 → 全量回归通过 → 单独提交 → 下一步」。
+16. **P0-14 公钥身份解析已完成**（ADR-020）：`application/auth.KeyLookup` 端口 + `auth.NewResolver` 三状态 + `sqlite.SSHKeyLookup` 只读查 `ssh_keys`；查库失败一律拒绝认证不降级访客、archtest 禁止业务层解析客户端公钥文本、`forum.ActorFromPrincipal` 落实访客只读；`cmd/server` 移除 `guestResolver` 占位。从零启动实测日志出现「身份解析就绪 mode=ssh_keys」，host key 指纹与格式契约一致；`ssh_keys` 表已在 `0001_init.sql`，本项无新迁移。**下一步 P0-15 GitHub Device Flow 客户端**（`httptest` 假端点，不依赖真实凭据）。

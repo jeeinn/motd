@@ -7,26 +7,11 @@ import (
 	"io"
 	"time"
 
-	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/input"
 	"github.com/jeeinn/motd/internal/application/presence"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
-
-// guestResolver 是 P0-21 阶段的占位身份解析器。
-//
-// 账号体系与 ssh_keys 表在 M2（P0-14）才落地；此刻服务端已通过公钥挑战
-// 证明对方持有私钥，一律按访客放行。M2 换成查库实现即可，transport/ssh
-// 不需要改动（端口定义在 application/auth，ADR-017）。
-type guestResolver struct{}
-
-func (guestResolver) Resolve(_ context.Context, fingerprint string) (auth.Principal, error) {
-	if fingerprint == "" {
-		return auth.Principal{}, fmt.Errorf("公钥指纹为空")
-	}
-	return auth.Guest(fingerprint), nil
-}
 
 // inputHandler 把 SSH 字节流归一化后交给命令注册表的唯一入口（§3.2）。
 // P0-24 的页面控制器替换 handle 的业务分发，但解码器与命令表不变。
