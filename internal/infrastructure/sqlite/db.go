@@ -86,19 +86,21 @@ func openPool(path string, maxConns int, extra string, role string) (*sql.DB, er
 
 // buildDSN 生成带 _pragma 的 file DSN。
 // Windows 路径统一转成斜杠形式，并做 URL 编码，避免空格与中文目录串味。
-func buildDSN(path string, extra string) string {
+// escapePath 把本地路径转成可放进 file: DSN 的形式。
+// Windows 盘符中的冒号必须保留，因此只对绝对路径做 PathEscape 再还原冒号。
+func escapePath(path string) string {
 	slash := filepath.ToSlash(path)
 	if !strings.HasPrefix(slash, "/") {
-		// 相对路径与 Windows 盘符路径都按普通路径编码；盘符中的冒号需保留，
-		// url.PathEscape 会破坏它，因此只转义确实危险的字符。
+		// 相对路径与 Windows 盘符路径：只转义确实会破坏 DSN 解析的字符。
 		slash = strings.ReplaceAll(slash, " ", "%20")
 		slash = strings.ReplaceAll(slash, "#", "%23")
-		slash = strings.ReplaceAll(slash, "?", "%3F")
-	} else {
-		slash = url.PathEscape(slash)
-		slash = strings.ReplaceAll(slash, "%3A", ":")
+		return strings.ReplaceAll(slash, "?", "%3F")
 	}
+	escaped := url.PathEscape(slash)
+	return strings.ReplaceAll(escaped, "%3A", ":")
+}
 
+func buildDSN(path string, extra string) string {
 	params := make([]string, 0, len(pragmas)+1)
 	for _, p := range pragmas {
 		params = append(params, "_pragma="+p)
@@ -106,7 +108,12 @@ func buildDSN(path string, extra string) string {
 	if extra != "" {
 		params = append(params, extra)
 	}
-	return "file:" + slash + "?" + strings.Join(params, "&")
+	return "file:" + escapePath(path) + "?" + strings.Join(params, "&")
+}
+
+// readOnlyDSN 用于打开备份快照：不加任何会改写库的 PRAGMA（如 journal_mode=WAL）。
+func readOnlyDSN(path string) string {
+	return "file:" + escapePath(path) + "?mode=ro"
 }
 
 // verify 在启动阶段确认 PRAGMA 真正落地。

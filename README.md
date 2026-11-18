@@ -20,6 +20,8 @@ P0 地基（M0）已落地，服务可编译、可启动、可建库：
 - ✅ 用户名规则按 2026-11-18 决策放宽为**中文 / 英文字母 / 数字 / `_` / `-`，3–20 字符，不允许空白**；domain 层校验为事实来源，DDL 只兜底长度与空白（ADR-005）
 - ✅ 依赖方向守卫（`internal/archtest`）：注入反向 import 时测试必然失败（P0-03）
 - ✅ 写入队列：单 worker、容量 256 快速失败、3s 超时、`SQLITE_BUSY` 有限重试、事务提交后才确认；写门面不暴露裸 `*sql.DB`（ADR-010）
+- ✅ 备份恢复：`motdctl` + `scripts/*.sh` + `docs/OPS.md`，含首次实际恢复演练记录（ADR-011）
+- **M0 地基已完成（P0-01 ~ P0-07 全部测试通过并逐项提交）**
 - ⬜ SSH 入口、Device Flow、论坛用例、终端安全渲染 —— 见 P0-PLAN 的 M1–M4
 
 ## 快速开始
@@ -56,8 +58,19 @@ curl -s http://127.0.0.1:8080/healthz   # => ok dev queue=0/256
 ```bash
 go build ./...       # 构建
 go vet ./...         # 静态检查
-go test ./...        # 测试（迁移/约束/PRAGMA 基线）
+go test ./...        # 测试（约束/PRAGMA/写入队列/备份恢复/依赖守卫）
 ```
+
+## 备份与恢复
+
+```bash
+go build -o bin/motdctl ./cmd/motdctl
+scripts/backup.sh                                   # 生成备份 + sha256
+scripts/restore.sh --verify <backup-file>            # 只校验
+scripts/restore.sh <backup-file> <target-path>      # 恢复（目标必须不存在）
+```
+
+完整策略、cron 配置、恢复流程与演练记录见 [docs/OPS.md](docs/OPS.md)。
 
 ## 目录结构
 

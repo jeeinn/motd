@@ -1,0 +1,124 @@
+# 运维手册（OPS）
+
+> 适用范围：P0 阶段的单机部署。恢复策略的初值会随 P3 压测与真实数据量修订。
+
+## 1. 部署形态与目录
+
+单个 Go 二进制 + 一个 SQLite 文件，systemd 托管（单元文件在 P0-28 落地）。
+
+| 路径 | 用途 | 是否持久化 |
+| --- | --- | --- |
+| `data/motd.db` | 主库（WAL 模式） | 是，必须备份 |
+| `data/motd.db-wal` / `-shm` | WAL 运行时文件 | 否，恢复时会被清理 |
+| `data/backups/motd-YYYYMMDD-HHMMSS.db` | 备份快照 | 是 |
+| `data/backups/*.db.sha256` | 校验和 | 是，与备份同生共死 |
+| `data/ssh_host_ed25519_key` | SSH host key（P0-21） | 是，丢失会导致客户端告警 |
+
+备份目录在 `.gitignore` 的 `data/` 之下，不会进仓库。
+
+## 2. 备份策略（P0 初值）
+
+| 项 | 初值 | 说明 |
+| --- | --- | --- |
+| 周期 | 每日 03:00 | cron / systemd timer |
+| 校验 | sha256 + `PRAGMA integrity_check` + 关键表行数 | 每次备份后立即 `verify`，失败即告警 |
+| 本地保留 | 14 天 | **不自动删除**，见 §5 |
+| 异地 | 待定 | 需同步到另一台机器或对象存储，目标由 V 先生确定 |
+| RPO | ≤ 24 h | 每日备份的最坏丢失窗口 |
+| RTO | ≤ 15 min | 本次演练实测恢复 < 1 min，余量留给排查与人工确认 |
+
+关键表行数核对清单：`users`、`nodes`、`threads`、`posts`、`schema_migrations`。前三张证明业务数据到位，最后一张证明迁移版本随备份一起恢复，恢复后不会重复执行迁移。
+
+## 3. 命令
+
+```bash
+# 构建运维工具
+go build -o bin/motdctl ./cmd/motdctl
+
+# 每日备份（供 cron 调用）
+scripts/backup.sh
+
+# 只校验，不恢复
+scripts/restore.sh --verify data/backups/motd-20261118-112724.db
+
+# 恢复（目标路径必须不存在）
+scripts/restore.sh data/backups/motd-20261118-112724.db data/motd.db
+```
+
+cron 示例：
+
+```cron
+0 3 * * * cd /opt/motd && ./scripts/backup.sh >> /var/log/motd-backup.log 2>&1
+```
+
+`motdctl` 也支持直接调用：
+
+```bash
+motdctl backup  [--db <path>] [--dir <dir>]
+motdctl verify  <backup-file>
+motdctl restore <backup-file> --target <path>
+```
+
+环境变量：`MOTD_DB_PATH`（默认 `./data/motd.db`）、`MOTD_BACKUP_DIR`（默认 `./data/backups`）、`MOTDCTL_BIN`（脚本用的工具路径）。
+
+## 4. 恢复流程
+
+1. **停服**：`systemctl stop motd`。
+2. **保留现场**：把现有库移走，**不要直接删除**：
+   ```bash
+   mv data/motd.db        data/motd.db.broken-YYYYMMDD
+   mv data/motd.db-wal    data/motd.db-wal.broken-YYYYMMDD    2>/dev/null || true
+   mv data/motd.db-shm    data/motd.db-shm.broken-YYYYMMDD    2>/dev/null || true
+   ```
+3. **恢复**：`scripts/restore.sh <backup-file> data/motd.db`。脚本会先做校验和 + 完整性验收，任一失败即中止。
+4. **启动**：`systemctl start motd`，`curl -s http://127.0.0.1:8080/healthz`（应返回 `ok <version> queue=0/256`）。
+5. **抽查**：用户数、最新主题、迁移版本是否与备份点一致。
+6. **记录**：把命令、结果、耗时写回本文件 §4 的演练记录。
+
+> 恢复目标已存在时 `motdctl restore` 会直接拒绝（`ErrTargetExists`）。这是刻意设计：防止误把备份恢复覆盖到正在运行的库上。
+
+## 5. 恢复演练记录
+
+### 2026-11-18 11:27（首次，实际执行）
+
+| 步骤 | 命令 | 实测结果 |
+| --- | --- | --- |
+| 备份 | `motdctl backup --db ./data/motd.db --dir ./data/backups` | `data/backups/motd-20261118-112724.db`，sha256 `3ad13345ad1435fc439840d50111e1202a4a6c957e2da1d2d4ef64e920206b0f`，size 151552 |
+| 校验 | `motdctl verify <file>` | `integrity=ok`；`schema_migrations=1`，`users/nodes/threads/posts=0`（当前为空库阶段） |
+| 恢复 | `motdctl restore <file> --target ./data/restore-drill/motd.db` | `restored=./data/restore-drill/motd.db`，产物 151552 字节 |
+| 启动验证 | 以恢复库启动 `motd.exe` | `数据库就绪 migrations_applied=0`、`写入队列就绪 capacity=256`、`探针监听` —— 自检全部通过 |
+
+**结论**：D7（从备份恢复到空目录且可运行）达成。恢复后 `Migrate` 应用 0 个版本，说明迁移版本随备份保存。
+
+**待办**：当前库无业务数据。P0 闭环跑出真实帖子/账号后，必须再做一次**带数据的恢复演练**，核对 `users` / `posts` 行数与最新内容，不能只靠空库演练结案。
+
+演练中还修掉一个真实缺陷：`flag` 包遇到首个位置参数即停止解析，导致 `restore <file> --target <path>` 把 `--target` 吞掉。已在 `cmd/motdctl` 做参数归一化并加回归测试。
+
+## 6. 保留与清理（不自动删除）
+
+脚本只生成备份，**不做任何自动删除**。列出过期候选：
+
+```bash
+find data/backups -name 'motd-*.db' -mtime +14 -print
+```
+
+人工核对后，删除时同时删除对应的 `.sha256`。把删除逻辑放进定时脚本风险过高：一次路径变量写错就可能清掉全部备份，而备份是唯一回退点。
+
+## 7. `VACUUM INTO` 的代价与切换条件
+
+- 产出一致性快照，WAL 下不需要停服，也不阻塞读。
+- 代价是**整库重写**：库越大，IO 峰值越明显；期间写事务在队列中排队。若队列被打满，写请求会拿到 `ErrQueueFull`，属于预期降级而非故障。
+- 本进程写连接恒为 1，单机部署下不存在跨进程写锁竞争。
+
+满足以下任一条件时，评估切换到 SQLite Online Backup API（增量页拷贝）：
+
+1. 库文件 > 500 MB，或单次备份耗时 > 60 s；
+2. 备份窗口内 `ErrQueueFull` 出现频率已影响业务；
+3. 备份期间 p99 首屏时间相对 P0-27 基线明显劣化。
+
+以上三项目前均未测量，P0 保持 `VACUUM INTO`。
+
+## 8. 监控与告警（P3 落地）
+
+- `/healthz` 返回 `ok <version> queue=<depth>/<cap>`，可直接观察写入背压。
+- 待接入告警：最近备份时间超过 26 h、`verify` 失败、队列深度持续接近容量。
