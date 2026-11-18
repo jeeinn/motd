@@ -10,7 +10,7 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 
 ## 当前状态
 
-M0 地基 + M1 业务内核（P0-01 ~ P0-11）已落地，服务可编译、可启动、可建库，**无需 SSH 与 UI 即可跑通发帖业务规则并产出统一 ViewModel**：
+M0 地基 + M1 业务内核（P0-01 ~ P0-12）已落地，服务可编译、可启动、可建库，**无需 SSH 与 UI 即可跑通发帖业务规则、产出统一 ViewModel 并驱动插件事件链**：
 
 - ✅ 模块化单体目录骨架，依赖方向写在每个包的 `doc.go` 里
 - ✅ 配置（环境变量）、结构化日志、优雅停机、运维探针 `GET /healthz`
@@ -26,8 +26,9 @@ M0 地基 + M1 业务内核（P0-01 ~ P0-11）已落地，服务可编译、可�
 - ✅ 论坛核心用例：`ListNodes` / `ListThreads` / `GetThread` / `CreateThread` / `CreatePost`；keyset 分页、软删除过滤、标题正文校验、访客只读、仅 active 可写、首帖同事务、发帖限流（Q6）
 - ✅ 真实链路集成测试：`forum.Service` 直驱 SQLite 仓储，验证 fake 与实现不漂移（P0-08 ~ P0-10）
 - ✅ 统一 ViewModel：`application/viewmodel` 只含语义字段（枚举 / Unix 秒 / 值类型），`forum` 负责领域结果映射；Q5 等级分档 `karma → L1–L4`；三层守卫实测注入渲染概念后必然失败（ADR-014）
-- **M0 已完成；M1 已完成 P0-08 / 09 / 10 / 11**（每项均「测试通过 → 单独提交」）
-- ⬜ M1 剩余：P0-12 插件骨架、P0-13 在线注册表；之后是 M2 认证、M3 终端、M4 闭环 —— 见 P0-PLAN
+- ✅ 领域事件与插件骨架：领域/交互两条通道分离；`init()` 编译期注册 + demo 彩蛋订阅 `PostCreated` 申请成就；成就经 `application/user` 校验，P0 不写 SQLite；插件禁直连数据库守卫实测会失败（ADR-015）
+- **M0 已完成；M1 已完成 P0-08 / 09 / 10 / 11 / 12**（每项均「测试通过 → 单独提交」）
+- ⬜ M1 仅剩 P0-13 在线注册表；之后是 M2 认证、M3 终端、M4 闭环 —— 见 P0-PLAN
 
 ## 快速开始
 
@@ -63,7 +64,7 @@ curl -s http://127.0.0.1:8080/healthz   # => ok dev queue=0/256
 ```bash
 go build ./...       # 构建
 go vet ./...         # 静态检查
-go test ./...        # 测试（约束/PRAGMA/写入队列/备份恢复/依赖守卫/仓储/用例/ViewModel/集成）
+go test ./...        # 测试（约束/PRAGMA/写入队列/备份恢复/依赖守卫/仓储/用例/ViewModel/插件/端到端集成）
 ```
 
 ## 备份与恢复
@@ -87,7 +88,7 @@ internal/
   domain/                user / node / thread / post / vote —— 纯业务模型，不依赖上层
   infrastructure/        sqlite / github / email —— 外部实现
   presentation/          terminal / browser —— 两个独立 Renderer
-  plugin/                registry / events —— 编译期注册、事件分化
+  plugin/                registry / events / demo —— 编译期注册、事件分化、彩蛋示例
 docs/                    设计与计划
 ```
 

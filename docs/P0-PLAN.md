@@ -1,9 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；M0 已完成；M1 已完成 P0-08 / 09 / 10 / 11
-> 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；M0 已完成；M1 已完成 P0-08 / 09 / 10 / 11 / 12
+> 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.4（插件权限）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
 > 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
-> 更新：2026-11-18 12:03
+> 更新：2026-11-18 12:16
 
 ---
 
@@ -48,7 +48,7 @@
 | **M3** 终端 | SSH 入口 + 安全渲染 + 页面 | P0-21 ~ P0-25 | D1、D5 达成 |
 | **M4** 闭环 | 端到端与运维 | P0-26 ~ P0-28 | D4、D6、D7 达成 |
 
-已完成：**P0-01 ~ P0-11**（M0 全部 + M1 的仓储 / 种子 / 核心用例 / ViewModel）。每项均「测试通过 → 单独提交」。M1 剩余 P0-12 / 13。
+已完成：**P0-01 ~ P0-12**（M0 全部 + M1 的仓储 / 种子 / 核心用例 / ViewModel / 插件骨架）。每项均「测试通过 → 单独提交」。M1 仅剩 P0-13。
 
 ---
 
@@ -139,11 +139,16 @@
   3. 三重守卫：archtest AST 静态扫描（渲染库 import / 渲染标识符 / 控制序列）、反射类型断言（禁函数 / 指针 / 接口 / 通道 / `time.Time`）、真实注入实测退出码 1。禁用词按**驼峰词段精确匹配**，避免 `EmptyRows` 命中 `pty`、`Description` 命中 `esc`；`NextCursor` 是分页游标不拦。
   4. `RowMeta.AuthorID` 暂留语义 ID，仓储未 join `users`；P0-23 页面展示作者名时补投影（已记为 R11）。
 
-**P0-12 领域事件与插件骨架**
-- 产出：`plugin/events`（领域事件 vs 交互事件两条通道，不共用总线）、`plugin/registry`（`init()` 注册）、一个 demo 插件（订阅 `PostCreated` 并申请成就）
+**P0-12 领域事件与插件骨架** ✅
+- 产出：`domain/event`（事件结构）、`plugin/events`（领域事件 vs 交互事件两条通道，不共用总线）、`plugin/registry`（`init()` 注册）、`plugin/demo`（订阅 `PostCreated` 并申请成就）、`application/user`（成就校验门）、`cmd/server/wiring.go`（装配层）
 - 约束：插件只能拿到只读查询接口与「申请解锁成就」这一条写路径；成就仍由 `application/user` 校验后写入
 - 验收：archtest 证明插件包无法 import `infrastructure/sqlite`；demo 插件在发帖后触发且可观测
 - 依赖：P0-10、P0-03 ｜ 量级：1.5
+- 执行补充：
+  1. **依赖方向**：`application` 不能 import `plugin`，故 `forum.DomainEventSink` 用 `domain/event` 类型声明，`events.DomainBus.Publish` 结构化匹配实现；`plugin` 不能 import `infrastructure`，受限 `registry.Context` 由 cmd 装配注入。archtest 两条守卫实测注入后退出码 1（ADR-015）。
+  2. **发布时机**：`repos.Write` 成功返回后（事务已提交）才发 `EventPostCreated`；投递失败不回滚、不改变用例返回值，只计数 + observer 上报，避免误判失败重试出重复帖。
+  3. **P0 不写库**：成就是内存占位（`MemoryAchievementStore`），`achievements` 表已建但不写；P1 换持久化实现即可，校验逻辑不变。范围守门「成就系统属 P1」保持。
+  4. 端到端测试用真实 SQLite + 真实队列 + 真实插件链验证：发帖 → 事件 → demo → 成就解锁且只解锁一次；从零启动实测 `plugins=1 post_created_subscribers=1`。
 
 **P0-13 内存连接注册表**
 - 产出：`application/presence` —— 在线连接数、每会话状态、心跳超时（20s）
@@ -366,8 +371,9 @@ Q1 与 Q3 是结构性决策。若后续要改，M0 的依赖守卫与 M2 的认
 | R9 | `threads` 的软删除 | 设计稿 §5.2 未给 `threads` 建 `status` 列 | 现有 schema 只有 `posts.status` 支持软删除 | P0 不做主题删除；P1 启用前必须补字段 + 迁移，否则「删除主题」无处落地 |
 | R10 | 发帖限流的计数单位 | 设计稿未定义 | `CreateThread` 同事务产生主题 + 首帖两行；若按行计数，一次发帖消耗两份配额 | 按**发帖动作**计数，用 `COUNT(DISTINCT created_at)` 去重（60 秒冷却保证同用户不会同秒产生两次独立发帖）。用例层与真实 SQL 均有回归测试 |
 | R11 | ViewModel 字段集 | 计划只列 `Screen{Kind, Rows, StatusBar, Overlay}`、`Row{Index, Score, Title, Meta, ID}` | §2.3 的状态图还含焦点 / 选中项，详情屏另需主题正文；原字段集无法表达 | 补 `Selection` / `Pagination` / `Detail` / `Row.Body`，并独立成包（ADR-014）。`RowMeta.Author` 暂空：仓储未 join `users`，P0-23 补投影 |
+| R12 | 领域事件「可靠投递」的实现边界 | §2.4 要求领域事件可靠投递、可持久化 | P0 只做单进程内同步派发；进程崩溃会丢未处理事件，且无 outbox 表 | P0 范围内可靠（同步、失败可观测）；**P1 前置**：补 `domain_event_outbox` 表，与业务写入同事务落库后再投递（ADR-015） |
 
-R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全。其余为计划内调整。
+R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界。其余为计划内调整。
 
 ---
 
@@ -376,7 +382,8 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 1. Q1–Q7 已拍板；`git push -u origin main` 与 M0 三项提交均已推送，远端 `main` 已建立跟踪。
 2. **M0 已全部完成**（P0-01 ~ P0-07），每项均「测试通过 → 单独提交」；备份恢复已完成首次实际演练，记录见 `docs/OPS.md §5`。
 3. **第二波 M1 前半段已推送**：P0-08 仓储接口（`172333e`）→ P0-09 种子数据（`00abe57`）→ P0-10 核心用例（`4a9238b`）。三项各自独立提交、全量测试通过，并从零启动实测 `migrations_applied=[1 2 3]`、`nodes=5`、探针正常；2026-11-18 12:00 已 `git push origin main`，远端 `main` = `4a9238b`。
-4. **P0-11 ViewModel 已完成**（本轮提交，详见 ADR-014）：状态模型独立成包、Q5 等级分档、领域结果映射、三层守卫实测注入失败。
-5. 下一步是 **M1 最后两项**：P0-12 领域事件与插件骨架 → P0-13 内存连接注册表。完成后 M1 关死（验收：无 UI 也能发帖，用例层测试覆盖权限与校验）。
-6. P0 结束前需补做一次**带真实数据的恢复演练**（当前演练用的是空库），才能把 D7 正式结案。
-7. Q7 前置未变：GitHub OAuth App 需在 **M1 结束前**注册并启用 Device Flow，`client_id` 只放服务端环境变量；M2 开发期一律用 `httptest` 假端点。
+4. **P0-11 ViewModel 已完成**（ADR-014）：状态模型独立成包、Q5 等级分档、领域结果映射、三层守卫实测注入失败。
+5. **P0-12 领域事件与插件骨架已完成**（本轮提交，ADR-015）：两条通道分离、成就校验门、编译期注册表、装配层端到端集成测试、插件禁 DB 守卫实测注入失败；从零启动实测 `plugins=1 post_created_subscribers=1`。
+6. 下一步是 **M1 最后一项 P0-13 内存连接注册表**（100 连接上下线、写库次数为 0）。完成后 M1 关死（验收：无 UI 也能发帖，用例层测试覆盖权限与校验）。
+7. P0 结束前需补做一次**带真实数据的恢复演练**（当前演练用的是空库），才能把 D7 正式结案。
+8. Q7 前置未变：GitHub OAuth App 需在 **M1 结束前**注册并启用 Device Flow，`client_id` 只放服务端环境变量；M2 开发期一律用 `httptest` 假端点。

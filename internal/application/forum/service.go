@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
+	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/domain/post"
 	"github.com/jeeinn/motd/internal/domain/thread"
@@ -32,18 +34,48 @@ func (a Actor) checkWrite() error {
 }
 
 // Service 编排论坛用例。事务边界在这里确定：一个用例 = 一次 repos.Write。
+// 事件只在事务提交后发布；投递失败不改变已提交的业务结果，只计数并上报。
 type Service struct {
-	repos Repos
-	now   func() time.Time
+	repos           Repos
+	now             func() time.Time
+	sink            DomainEventSink
+	onPublishErr    PublishObserver
+	publishFailures atomic.Int64
 }
 
-// ServiceOption 用于注入时钟；限流判定必须可测，不能靠真实等待 60 秒。
+// ServiceOption 用于注入时钟与事件出口；限流判定必须可测，不能靠真实等待 60 秒。
 type ServiceOption func(*Service)
 
 func WithClock(f func() time.Time) ServiceOption {
 	return func(s *Service) {
 		if f != nil {
 			s.now = f
+		}
+	}
+}
+
+// WithEventSink 注入领域事件出口；不注入时用例行为完全不变（P0-10 回归集不受影响）。
+func WithEventSink(sink DomainEventSink) ServiceOption {
+	return func(s *Service) { s.sink = sink }
+}
+
+// WithPublishObserver 注入投递失败观察者，装配层通常接 slog。
+func WithPublishObserver(obs PublishObserver) ServiceOption {
+	return func(s *Service) { s.onPublishErr = obs }
+}
+
+// PublishFailures 是事件投递失败次数，供运维观测。
+func (s *Service) PublishFailures() int64 { return s.publishFailures.Load() }
+
+// publish 在 repos.Write 成功返回后调用：此刻事务已提交，订阅者看到的数据是确定的。
+func (s *Service) publish(ctx context.Context, e event.DomainEvent) {
+	if s.sink == nil {
+		return
+	}
+	if err := s.sink.Publish(ctx, e); err != nil {
+		s.publishFailures.Add(1)
+		if s.onPublishErr != nil {
+			s.onPublishErr(e, err)
 		}
 	}
 }
@@ -165,7 +197,7 @@ func (s *Service) CreateThread(ctx context.Context, actor Actor, in CreateThread
 	}
 
 	now := s.now().UTC()
-	var threadID int64
+	var threadID, postID int64
 	err := s.repos.Write(ctx, func(tx WriteTx) error {
 		if err := s.checkWritePermission(ctx, tx, actor.UserID); err != nil {
 			return err
@@ -192,7 +224,7 @@ func (s *Service) CreateThread(ctx context.Context, actor Actor, in CreateThread
 		if err != nil {
 			return err
 		}
-		_, err = tx.InsertPost(ctx, NewPost{
+		postID, err = tx.InsertPost(ctx, NewPost{
 			ThreadID: threadID, UserID: actor.UserID, BodyMD: in.Body,
 			Status: post.StatusNormal, CreatedAt: now,
 		})
@@ -201,6 +233,17 @@ func (s *Service) CreateThread(ctx context.Context, actor Actor, in CreateThread
 	if err != nil {
 		return 0, err
 	}
+	// 事务已提交才发布：订阅者（插件）看到的是确定状态，不会读到未提交数据。
+	s.publish(ctx, event.DomainEvent{
+		ID:         fmt.Sprintf("post:%d", postID),
+		Type:       event.EventPostCreated,
+		OccurredAt: now,
+		ActorID:    actor.UserID,
+		NodeID:     in.NodeID,
+		ThreadID:   threadID,
+		PostID:     postID,
+		FirstPost:  true,
+	})
 	return threadID, nil
 }
 
@@ -256,6 +299,15 @@ func (s *Service) CreatePost(ctx context.Context, actor Actor, in CreatePostInpu
 	if err != nil {
 		return 0, err
 	}
+	s.publish(ctx, event.DomainEvent{
+		ID:         fmt.Sprintf("post:%d", postID),
+		Type:       event.EventPostCreated,
+		OccurredAt: now,
+		ActorID:    actor.UserID,
+		ThreadID:   in.ThreadID,
+		PostID:     postID,
+		FirstPost:  false,
+	})
 	return postID, nil
 }
 

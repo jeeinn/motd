@@ -154,3 +154,22 @@
 - 工程取舍：禁用词按**驼峰词段精确相等**匹配，而不是整名子串。子串匹配会把 `EmptyRows` 里的 `pty`、`Description` 里的 `esc` 误判成渲染概念；`NextCursor` 是分页游标（数据语义），不因含 `cursor` 被拦。长组合词（如 `CursorPos`）另用整名子串匹配。
 - 已知边界：`RowMeta.AuthorID` 目前只保留语义 ID，仓储查询未 join `users`，`Author` 为空。P0-23 终端页面需要展示作者名时补仓储投影，字段已预留。
 - 验证：16 条测试（状态模型 5 / 映射 5 / 等级 2 / 守卫 4），全量 `go build` / `go vet` / `go test ./...` 通过。
+
+## ADR-015 领域事件与插件骨架：端口在使用方、成就不写库、两条通道分离
+
+- 状态：已实现（P0-12，2026-11-18）
+- 依赖方向解法（本轮最关键的结构决策）：
+  - `application` 不能 import `plugin`（§2.2 禁止表）。因此 `application/forum/events.go` 声明 `DomainEventSink`，参数类型取自 `domain/event`；`plugin/events.DomainBus.Publish` 靠**结构化接口匹配**实现它，两边互不 import。
+  - `plugin` 不能 import `infrastructure`。受限能力由 `cmd/server/wiring.go` 装配时注入 `registry.Context`（只读查询 + 成就申请门），cmd 是唯一能同时看到三层的分组。
+  - `archtest` 新增两条守卫：扫描 `internal/plugin` 禁 `database/sql` / `modernc.org/sqlite` / `internal/infrastructure`；扫描 `internal/application` 禁 `internal/plugin`。实测注入后守卫退出码 1。
+- 事件发布时机：`CreateThread` / `CreatePost` 在 `repos.Write` **成功返回之后**才发布 `EventPostCreated`（§2.4 流程图：提交 → 发布 → 订阅）。写入失败绝不发事件。事务已提交，投递失败**不回滚、不改变用例返回值**，只增 `Service.PublishFailures()` 并通过 `WithPublishObserver` 上报，避免调用方误判为发帖失败而重试出重复帖。
+- 两条通道不共用总线/类型/语义：
+  - `DomainBus`：同步派发，校验事件自洽性，收集全部订阅者错误（不短路），`Published` / `Failures` 可观测；
+  - `InteractionBus`：带缓冲 channel + 非阻塞 `TryPublish`，满即丢弃并计 `Dropped`；`Close` 先与 send 互斥再排空在途事件，使 `Handled()` 为确定值。心跳、按键、连接类信号绝不写 SQLite（§2.6）。
+- 插件能力边界：`registry.Context` 只有 `ReadOnlyQuery`（当前仅 `ThreadTitle`）与 `AchievementGate`。`init()` 编译期注册、无动态加载；`All()` 返回防御性副本，重名 / 空名 / 缺 handler / 非法订阅 / 无名命令一律拒绝。
+- 成就链路：`demo` 插件订阅 `PostCreated` → 取主题标题作 evidence → `application/user.AchievementService.Apply` 四道校验（代码白名单、用户 ID、账号 `active`、未解锁）→ `AchievementStore.Grant`。重复申请返回 `Already=true` 而非错误。
+- **P0 不写 SQLite**：成就系统属 P1 范围（P0-PLAN §1.1），`MemoryAchievementStore` 只是可观测占位；`achievements` 表已建但本阶段不写。P1 换成读写该表的实现即可，`application/user` 校验逻辑不变。
+- 已知边界：
+  1. 领域事件的「可靠」在 P0 仅限**单进程内同步投递**；进程崩溃会丢未处理事件。P1 需补 `domain_event_outbox` 表，与业务写入同事务落库后再投递（记为 P0-PLAN §7 R12）。
+  2. 成就状态在内存，重启即失；这是 P0 未启用成就系统的预期行为，不影响 D1–D7。
+- 验证：新增 34 条测试（事件模型 2 / 两条通道 8 / 注册表 4 / demo 4 / 成就校验 5 / 用例发布 6 / 守卫 3 / 端到端装配 2）；全量 `go build` / `go vet` / `go test ./...` 通过；从零启动实测 `nodes=5 plugins=1 post_created_subscribers=1`、`/healthz → ok dev queue=0/256`；端到端测试用真实 SQLite + 真实队列 + 真实插件链路验证发帖后成就解锁且只解锁一次。

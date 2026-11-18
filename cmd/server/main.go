@@ -1,7 +1,8 @@
 // Command server 是 motd 的单进程入口：Go 单体 + SQLite + SSH TUI。
 //
-// 当前阶段：骨架。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
-// 写入队列启动，并提供运维探针 /healthz。SSH 入口、认证与论坛用例按 docs/P0-PLAN.md 逐项接入。
+// 当前阶段：M1。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
+// 写入队列、论坛用例与插件事件链装配，并提供运维探针 /healthz。
+// SSH 入口、认证与终端页面按 docs/P0-PLAN.md 逐项接入。
 package main
 
 import (
@@ -15,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/config"
+	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
 )
 
@@ -67,15 +68,22 @@ func run() error {
 	defer writer.Stop()
 	logger.Info("写入队列就绪", "capacity", writer.Cap(), "timeout", "3s")
 
-	// 装配论坛用例并读一次 DB：这是「迁移 → 种子 → application 端口 → 读池」的启动自检。
-	// /healthz 仍是纯运维探针，不承载业务（ADR-006）。
-	repos := sqlite.NewForumRepos(pools, writer)
-	forumService := forum.NewService(repos)
-	nodes, err := forumService.ListNodes(ctx)
+	// 装配论坛用例 + 插件事件链，并读一次 DB 做启动自检：
+	// 「迁移 → 种子 → application 端口 → 读池」。/healthz 仍是纯运维探针（ADR-006）。
+	rt, err := newForumRuntime(pools, writer, func(e event.DomainEvent, err error) {
+		logger.Warn("领域事件投递失败（事务已提交，不回滚）",
+			"event_id", e.ID, "type", e.Type, "err", err)
+	})
+	if err != nil {
+		return fmt.Errorf("装配论坛运行时失败: %w", err)
+	}
+	nodes, err := rt.Service.ListNodes(ctx)
 	if err != nil {
 		return fmt.Errorf("启动自检：读取版块失败: %w", err)
 	}
-	logger.Info("论坛用例就绪", "nodes", len(nodes))
+	logger.Info("论坛用例就绪", "nodes", len(nodes),
+		"plugins", len(rt.Plugins),
+		"post_created_subscribers", rt.Bus.SubscriberCount(event.EventPostCreated))
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
