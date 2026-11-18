@@ -70,6 +70,23 @@ motdctl restore <backup-file> --target <path>
 - 仅公钥认证，禁密码、禁 root。对外 22 → 本机 2222 的转发与防火墙放行由部署方完成（目标为 Linux/systemd，用户已确认放行）。
 - 满员时新连接在握手前收到明文拒绝提示；`/healthz` 的 `online` / `active` 反映内存注册表（ADR-016），重启归零。
 
+### GitHub OAuth App 凭据（Q7 已完成）
+
+- **2026-11-18：V 先生已注册 OAuth App 并启用 Device Flow，`client_id` 已取得。**
+- 变量名 **`MOTD_GITHUB_CLIENT_ID`**，由 `internal/config` 在 P0-15 读取后注入 `internal/infrastructure/github`。换 token **不需要** `client_secret`（P0-PLAN §7 R1），凭证只放服务端环境变量。
+- **纪律**：`client_id` 不进仓库、不写进 systemd unit、不留在命令行历史。unit 是 world-readable，明文 `Environment=` 等同于泄露；用独立环境文件：
+
+  ```bash
+  sudo install -d -m 0750 /etc/motd
+  sudo install -m 0600 -o root -g root /dev/null /etc/motd/motd.env
+  # 写入：MOTD_GITHUB_CLIENT_ID=<你的 client_id>
+  ```
+
+  unit 内只写 `EnvironmentFile=/etc/motd/motd.env`（`deploy/motd.service` 由 P0-28 产出）。
+
+- **开发 / 测试不需要设置它**：`httptest` 假端点覆盖 Device Flow 全部分支，不依赖真实凭据与外网。未设置时 `/login` 返回明确提示，不 panic、不静默失败；`/healthz` 不回显该值。
+- 真实联调（D2 手工验收）与 P0-28 部署自检前必须就位。
+
 ## 4. 恢复流程
 
 1. **停服**：`systemctl stop motd`。
@@ -133,3 +150,19 @@ find data/backups -name 'motd-*.db' -mtime +14 -print
 
 - `/healthz` 返回 `ok <version> queue=<depth>/<cap> online=<n> active=<n> commits=<n>`：`queue` 观察写入背压，`online/active` 是内存在线注册表（重启归零，非业务数据），`commits` 是进程启动以来成功提交的事务数。全部为运维可观测字段，不承载业务流量（ADR-006 / ADR-016）。
 - 待接入告警：最近备份时间超过 26 h、`verify` 失败、队列深度持续接近容量。
+
+## 9. 部署与上线清单（P0 收尾交付）
+
+> 目标形态（V 先生 2026-11-18 13:43 确认）：**本地交叉编译出单个二进制 → 上传测试 VPS → Linux/systemd 托管 → 放行 `2222`**（对外 22→2222 转发由部署方完成）。**P0 全部完成后，按本节逐项交付可直接复制的命令与实测结果**；`deploy/motd.service` 与启动自检脚本由 P0-28 产出。本节是交付约定，不是已完成事实。
+
+| # | 步骤 | 交付物 / 验收点 |
+| --- | --- | --- |
+| 1 | 交叉编译 `GOOS=linux GOARCH=amd64`，`-ldflags` 注入 version | `bin/motd-linux-amd64` + sha256，上传 VPS |
+| 2 | 目录与运行账号：`/opt/motd`（程序）、`/var/lib/motd`（数据），非 root 运行 | 目录 0750、数据目录属主正确；`data/` 不进仓库 |
+| 3 | `/etc/motd/motd.env`（0600 root:root）注入 `MOTD_GITHUB_CLIENT_ID` | 见 §3 凭据小节；unit 只引用 `EnvironmentFile=` |
+| 4 | 安装 `deploy/motd.service`（`GOMEMLIMIT=800MiB` / `GOGC=50` / `Restart=on-failure`） | `systemctl daemon-reload && systemctl enable --now motd` |
+| 5 | SSH host key 首次生成与**重启复用**检查 | 重启前后指纹一致，客户端无 `host key changed` |
+| 6 | 端口放行与 22→2222 转发（部署方执行） | `ssh -p 2222 <vps>` 进入访客会话 |
+| 7 | 启动自检 + `/healthz` | 迁移版本、host key、`ok <version> queue=... online=...` |
+| 8 | 备份 cron + 一次**带真实数据**的恢复演练 | 结案 D7；见 §5 待办 |
+| 9 | D1–D7 验收清单逐条记录实测结果 | 写回本手册 |
