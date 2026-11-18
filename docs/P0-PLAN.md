@@ -1,9 +1,9 @@
 # P0 实施计划（核心论坛闭环）
 
-> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 已完成
+> 状态：**Q1–Q7 已全部拍板（2026-11-18）**；**M0、M1、第三波 M3 全部完成**（P0-01 ~ P0-13、P0-21 ~ P0-23）；**第四波 M2 进行中**（V 先生 2026-11-18 12:59 拍板按 §5 波次），P0-14 / P0-15 已完成
 > 依据：设计评审稿 v0.2 §6（P0 范围）、§2.2（模块边界）、§2.3（统一 ViewModel）、§2.4（插件权限）、§2.6（写入边界）、§3.5（安全渲染）、§4.4（Device Flow）
 > 托管：`git@github.com:jeeinn/motd.git` ｜ module：`github.com/jeeinn/motd`
-> 更新：2026-11-18 13:52
+> 更新：2026-11-18 14:12
 
 ---
 
@@ -176,7 +176,7 @@
   6. `cmd/server` 移除 `guestResolver` 占位，注入 `auth.NewResolver(sqlite.NewSSHKeyLookup(pools))`；启动日志加「身份解析就绪」。
   7. 边界：`ssh_keys` 表在 `0001_init.sql` 已存在，本项**不需要新迁移**；绑定 / 解绑写入属于 P0-18，本项只提供只读端口。账号 `status` 不在本项判定（由 P0-10 事务内复核），避免快照过期造成越权。详见 ADR-020。
 
-**P0-15 GitHub Device Flow 客户端**
+**P0-15 GitHub Device Flow 客户端** ✅
 - 产出：`infrastructure/github/device.go` —— `POST /login/device/code`、`POST /login/oauth/access_token`、`GET /user`、`GET /user/emails`
 - 规则（已对照官方文档复核，见 §7）：
   - 换 token **不需要** `client_secret`，`grant_type=urn:ietf:params:oauth:grant-type:device_code`
@@ -187,6 +187,12 @@
 - 依赖：P0-03 ｜ 量级：1.5
 - 前置（Q7 已拍板）：**第二波（M1 结束）前**注册 GitHub OAuth App 并启用 Device Flow，`client_id` 只放服务端环境变量；本任务开发期一律用 `httptest` 假端点，不等真实凭据
 - Q3 约束：P0 由 SSH 会话在**进程内**调用本客户端，不开 HTTP 端点；`infrastructure/github` 只暴露 Go 接口，不绑定 transport
+- 执行补充（2026-11-18，ADR-021）：
+  1. 分层按 ADR-020 同口径：`application/auth/device.go` 定义 `DeviceFlowClient` 端口、4 个值对象、`PollStatus` 分类与 `ClassifyDeviceError` / `NextInterval` 纯函数；`infrastructure/github` 只做 HTTP 实现，`cmd/server/github_wiring.go` 装配。**零新增第三方依赖**，`go.mod` 未改。
+  2. 官方复核新增两处偏差（§7 R13 / R14）：错误码实际 **8 个**（比 R3 补完的清单多 `unsupported_grant_type`），且过期码在官方表格 / 正文分别为 `expired_token` / `token_expired`，双兼容；Device Flow 两端点用 `Accept: application/json`，`/user` 与 `/user/emails` 用 `application/vnd.github+json`，**两套不能混用**。
+  3. 退避落地为 `NextInterval(last, err)`：`slow_down` 取响应新 `interval`，未带则 `last+5`，恒 `>= max(last, 5)`；客户端不 sleep，P0-16 状态机驱动节奏。验收「轮询间隔不得小于 interval」由纯函数 + 端到端序列测试双重覆盖。
+  4. 安全边界：请求 10s 硬超时、响应体限 1 MiB、错误消息不带响应体 / token / client_id；缺 `client_id` 时两个 POST 返回 `auth.ErrClientIDMissing` 且不发请求，启动不 panic；archtest 静态守卫禁止本包引入 `client_secret`（负向注入实测）。
+  5. 28 个新增测试函数；从零启动实测 `client_id_configured=false|true` 两分支均正常，日志不回显凭据值。本项**不建表、不写库、不 sleep**，状态机与 `device_auth_states` 属 P0-16。
 
 **P0-16 Device Flow 状态机**
 - 产出：`device_auth_states` 的读写与状态迁移用例（`pending → authorized|denied|expired`）
@@ -406,8 +412,10 @@ Q1 与 Q3 是结构性决策。若后续要改，M0 的依赖守卫与 M2 的认
 | R10 | 发帖限流的计数单位 | 设计稿未定义 | `CreateThread` 同事务产生主题 + 首帖两行；若按行计数，一次发帖消耗两份配额 | 按**发帖动作**计数，用 `COUNT(DISTINCT created_at)` 去重（60 秒冷却保证同用户不会同秒产生两次独立发帖）。用例层与真实 SQL 均有回归测试 |
 | R11 | ViewModel 字段集 | 计划只列 `Screen{Kind, Rows, StatusBar, Overlay}`、`Row{Index, Score, Title, Meta, ID}` | §2.3 的状态图还含焦点 / 选中项，详情屏另需主题正文；原字段集无法表达 | 补 `Selection` / `Pagination` / `Detail` / `Row.Body`，并独立成包（ADR-014）。`RowMeta.Author` 暂空：仓储未 join `users`，P0-23 补投影 |
 | R12 | 领域事件「可靠投递」的实现边界 | §2.4 要求领域事件可靠投递、可持久化 | P0 只做单进程内同步派发；进程崩溃会丢未处理事件，且无 outbox 表 | P0 范围内可靠（同步、失败可观测）；**P1 前置**：补 `domain_event_outbox` 表，与业务写入同事务落库后再投递（ADR-015） |
+| R13 | Device Flow 错误码完整清单 | R3 补完后 7 个 | 官方文档实为 **8 个**：多 `unsupported_grant_type`；且过期码表格写 `expired_token`、正文写 `token_expired` | 8 个全部显式分类，过期码双兼容；写进 P0-15 与 ADR-021 |
+| R14 | Device Flow 与 REST API 的 `Accept` 头 | 计划统一 `Accept: application/json` | Device Flow 两端点默认 form-urlencoded，须显式要 `application/json`；`/user`、`/user/emails` 官方推荐 `application/vnd.github+json` | 按端点分两套，混用会把表单文本当成成功响应；负向测试锁死，写进 P0-15 |
 
-R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界。其余为计划内调整。
+R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现并修正的语义偏差，R11 是字段集按设计稿补全，R12 是需要带到 P1 的边界，R13 / R14 是 P0-15 对照 GitHub 官方文档新发现的两处偏差（错误码清单与 `Accept` 头）。其余为计划内调整。
 
 ---
 
@@ -428,4 +436,5 @@ R5 是唯一同时改动了 DDL 用户名约束的条目；R10 是本轮发现�
 13. **P0-23 终端安全渲染已完成**（ADR-019）：三段分离、唯一 SGR 常量表、两条路径不共用净化、22 条恶意样本固化。第三波 M3 全部关死；2026-11-18 已推送 4 个提交，远端 `main` = `88e7dd4`，本地与远端一致。
 14. **部署交付约定**（V 先生 2026-11-18 13:43 确认）：最终产物是**本地交叉编译的单个二进制**，由用户上传测试 VPS、以 Linux/systemd 托管并放行 `2222`。**P0 全部完成后需额外交付一份逐步部署指引**（编译 → 目录权限 → 凭据注入 → unit → host key → 端口转发 → 自检 → 带数据恢复演练 → D1–D7 验收），责任划分与清单骨架见 `docs/OPS.md §9`；unit 与自检脚本由 P0-28 产出。
 15. **下一步：第四波 M2 认证**，按 `P0-14 → 15 → 16 → 17 → 18 → 19 → 20` 推进，每项严格「实现 → 全量回归通过 → 单独提交 → 下一步」。
-16. **P0-14 公钥身份解析已完成**（ADR-020）：`application/auth.KeyLookup` 端口 + `auth.NewResolver` 三状态 + `sqlite.SSHKeyLookup` 只读查 `ssh_keys`；查库失败一律拒绝认证不降级访客、archtest 禁止业务层解析客户端公钥文本、`forum.ActorFromPrincipal` 落实访客只读；`cmd/server` 移除 `guestResolver` 占位。从零启动实测日志出现「身份解析就绪 mode=ssh_keys」，host key 指纹与格式契约一致；`ssh_keys` 表已在 `0001_init.sql`，本项无新迁移。**下一步 P0-15 GitHub Device Flow 客户端**（`httptest` 假端点，不依赖真实凭据）。
+16. **P0-14 公钥身份解析已完成**（ADR-020）：`application/auth.KeyLookup` 端口 + `auth.NewResolver` 三状态 + `sqlite.SSHKeyLookup` 只读查 `ssh_keys`；查库失败一律拒绝认证不降级访客、archtest 禁止业务层解析客户端公钥文本、`forum.ActorFromPrincipal` 落实访客只读；`cmd/server` 移除 `guestResolver` 占位。从零启动实测日志出现「身份解析就绪 mode=ssh_keys」，host key 指纹与格式契约一致；`ssh_keys` 表已在 `0001_init.sql`，本项无新迁移。**P0-15 已完成**（见下条）。
+17. **P0-15 GitHub Device Flow 客户端已完成**（ADR-021）：`application/auth.DeviceFlowClient` 端口 + 4 个值对象 + `ClassifyDeviceError` / `NextInterval` 纯函数；`infrastructure/github` 用标准库实现 4 个端点（端点可注入、`httptest` 假端点）、**8 个错误码**显式分类、`slow_down` 取响应新 `interval` 否则 +5 秒、两套 `Accept` 头、请求 10s 硬超时与 1 MiB 响应限长；`config` 读取 `MOTD_GITHUB_CLIENT_ID`，缺值时两个 POST 返回 `auth.ErrClientIDMissing` 且不发请求、启动不 panic；archtest 两条静态守卫（认证层禁 import HTTP/JSON、本包禁出现 `client_secret`）均含负向注入。**零新增第三方依赖**，本项不建表、不写库、不 sleep。全量回归 30 个包通过，从零启动实测 `client_id_configured=false|true` 两分支正常、日志不回显凭据值。**下一步 P0-16 Device Flow 状态机**（`device_auth_states` 持久化与 `pending → authorized|denied|expired` 迁移），继续按「实现 → 全量回归通过 → 单独提交 → 下一步」推进。

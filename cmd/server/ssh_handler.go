@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/input"
 	"github.com/jeeinn/motd/internal/application/presence"
@@ -20,10 +21,21 @@ import (
 // 只能经 P0-23 的净化 + 白名单渲染后才能出现；在此之前一律零回显。
 type inputHandler struct {
 	reg *command.Registry
+
+	// deviceFlow 由 P0-15 装配，P0-16 状态机 / P0-19 的 /login 消费。
+	// 端口类型是 application/auth.DeviceFlowClient，cmd 不碰 HTTP 细节。
+	deviceFlow auth.DeviceFlowClient
 }
 
 func newInputHandler() *inputHandler {
 	return &inputHandler{reg: command.Default()}
+}
+
+// withDeviceFlow 注入 GitHub Device Flow 客户端，保持 newInputHandler() 的无参
+// 签名不变（现有会话层测试零改动）。P0-16 之后由页面控制器直接读取该字段。
+func (h *inputHandler) withDeviceFlow(df auth.DeviceFlowClient) *inputHandler {
+	h.deviceFlow = df
+	return h
 }
 
 // commandLine 是斜杠命令的行编辑缓冲。P0-22 只做收集与提交，不回显原文。

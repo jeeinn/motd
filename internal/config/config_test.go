@@ -47,3 +47,23 @@ func TestLoadSSHDefaults(t *testing.T) {
 		t.Errorf("SSH 默认空闲超时应为 10m，实际 %v", cfg.SSHIdleTimeout)
 	}
 }
+
+func TestLoadGitHubClientID(t *testing.T) {
+	t.Setenv("MOTD_GITHUB_CLIENT_ID", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GitHubClientID != "" {
+		t.Errorf("未配置时 client_id 应为空，实际 %q", cfg.GitHubClientID)
+	}
+
+	t.Setenv("MOTD_GITHUB_CLIENT_ID", "  Iv1.abc123  ")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GitHubClientID != "Iv1.abc123" {
+		t.Errorf("client_id 应去除首尾空白，实际 %q", cfg.GitHubClientID)
+	}
+}

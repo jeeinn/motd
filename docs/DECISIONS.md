@@ -258,3 +258,27 @@
   3. 已吊销公钥的**已有连接**按设计稿「按策略处理」留给 P1 会话撤销，本项只拦新认证。
 - 实测发现并修复的真实缺陷：首轮全量回归中 `repo_auth_test.go` 手写 43 字符指纹常量时 `authFPRevoked` 少了一个字符，被 `ValidFingerprint` 正确拦下，`TestResolverWithRealSQLite/已吊销→拒绝` 报「指纹格式非法」而非预期的 `ErrKeyRevoked`。已改为 `strings.Repeat("B", 43)` 程序化生成，不再手数长度；校验逻辑本身无需改动，反而证明它在真实链路上确实生效。
 - 验证：`application/auth` 三状态 / 非法指纹 / 查库失败 / 脏 UserID / nil 端口共 7 组；`application/forum` Actor 映射 2 组；`infrastructure/sqlite` 查库三状态 / 注入串 / Resolver 端到端 3 组；`internal/archtest` 静态守卫 + 负向注入 2 组；`transport/ssh` 指纹格式契约 1 组。全量 `go build` / `go vet` / `go test ./...` 通过。
+
+## ADR-021 GitHub Device Flow 客户端：端口在 application，协议在 infrastructure，零新依赖
+
+- 状态：已实现（P0-15，2026-11-18），第四波 M2 第二项
+- 结论：
+  - **分层**：`application/auth` 定义 `DeviceFlowClient` 端口、`DeviceCode` / `AccessToken` / `GitHubUser` / `GitHubEmail` 值对象、`PollStatus` 决策分类与 `ClassifyDeviceError` / `NextInterval` 两个纯函数；`infrastructure/github.Client` 实现 4 个端点。依赖方向仍是 infrastructure → application，与 ADR-020 的 `KeyLookup` 同一口径。`cmd/server` 只依赖端口，HTTP 细节不进装配主文件（抽到 `github_wiring.go`）。
+  - **四个端点**：`POST /login/device/code`、`POST /login/oauth/access_token`、`GET /user`、`GET /user/emails`。端点地址抽成可注入的 `Endpoints`，生产指向 `github.com` / `api.github.com`，测试全部指向 `httptest.Server`。Q3 兑现：P0 全程进程内调用，不开任何业务 HTTP 端点，不绑定 transport。
+  - **零新增第三方依赖**：只用 `net/http` / `net/url` / `encoding/json` 等标准库，`go.mod` 一行未改（第三波引入 `x/crypto/ssh` 后继续按最小集）。
+  - **换 token 不需要 `client_secret`**（§7 R1）：两个 POST 的请求体只有 `client_id` / `scope`、`client_id` / `device_code` / `grant_type` 三组参数；`grant_type` 固定为 `urn:ietf:params:oauth:grant-type:device_code`，`scope` 固定为 `read:user user:email`（接口不暴露这两个参数，调用方无法放大权限）。archtest 静态守卫禁止 `infrastructure/github` 出现 `client_secret` 标识符或字符串字面量。
+  - **8 个错误码显式分类**：`authorization_pending` → 继续；`slow_down` → 延长间隔；`expired_token` / `token_expired` → 重新申请；`access_denied` / `device_flow_disabled` / `incorrect_client_credentials` / `incorrect_device_code` / `unsupported_grant_type` → 终止；未识别码 → `PollUnknown` 终止且不吞。`PollError.Error()` 只返回净化后的中文提示，不带响应体 / token / client_id。设计稿只列 4 个，§7 R3 补 3 个，本轮对照官方文档又补 `unsupported_grant_type`，并兼容官方表格与正文对过期码的两个名字。
+  - **退避语义**（§7 R2）：`slow_down` 优先取响应携带的新 `interval`；未带时在上次基础上加 5 秒；其余情况不缩小。`NextInterval` 返回值恒 `>= max(last, 5)`，客户端本身不 sleep，轮询节奏由 P0-16 状态机驱动；`DeviceCode.PollInterval()` 让调用方只能拿到合法间隔，验收项「轮询间隔不得小于 interval」有可测落点。
+  - **两套 `Accept` 头**（§7 R14）：Device Flow 两个端点默认返回 form-urlencoded，必须显式 `Accept: application/json`；`/user` 与 `/user/emails` 用官方推荐的 `application/vnd.github+json` + `Authorization: Bearer`。混用会把表单文本当成成功响应，已用负向测试锁死。
+  - **失败关闭与不泄漏**：`client_id` 缺失时客户端仍可构造（本机 / `httptest` 无需真实凭据），但两个 POST 返回 `auth.ErrClientIDMissing` 且不发出请求，启动不 panic；每次请求带 10s 硬超时（不依赖调用方 `http.Client` 是否设 Timeout）；响应体限 1 MiB；错误消息不携带响应体原文；`/user` 缺少合法数字 `id` 直接报错（§4.3 身份主键）。
+  - **装配**：`cmd/server` 注入 `newDeviceFlowClient(cfg)` 到 `inputHandler`（`withDeviceFlow` 保持 `newInputHandler()` 无参签名、现有会话层测试零改动）；启动日志只报 `client_id_configured` 布尔值与 scope，**不打印凭据值**（OPS §3）。P0-16 状态机 / P0-19 `/login` 直接消费该端口。
+- 理由：设计稿 §4.4 明确要求「实际编码前针对 GitHub 当前官方文档独立复核」，本轮复核得到 R13 / R14 两处计划外偏差，必须落成实现与测试而不是留在评审稿里。把错误码分类与退避做成 application 层纯函数，P0-16 状态机无需理解 HTTP 即可被测试驱动；把 `client_secret` 做成会失败的静态守卫，避免后续有人把 Web 流程的凭据习惯带进 Device Flow。
+- 已知边界：
+  1. P0-15 是客户端库，P0-16 状态机才接入轮询循环并持久化 `device_auth_states`；本项不建表、不写库、不 sleep。
+  2. `/user/emails` 用 `per_page=100` 取单页上限，P0 不实现分页；用户邮箱超过 100 条时 P1 补分页。
+  3. 未实现 `refresh_token` / `expires_in`（OAuth App 未启用过期令牌）、未固定 `X-GitHub-Api-Version`、未校验 `token_type`；P0 拿到 `access_token` 后立即查用户并丢弃，不持久化令牌。
+  4. `error_description` 被解析后刻意不采用：它是 GitHub 的英文原文，不应直接展示或进入日志；中文提示由 `ClassifyDeviceError` 统一生成。
+- 实测发现并修复的真实缺陷：
+  1. 首轮 `go vet` 报 `device_test.go` 把 `auth.DeviceCode` 误写成本包 `DeviceCode`，改为包限定后通过。
+  2. 首轮全量回归 `TestClassifyDeviceErrorUnknownIsSanitized` 误报：`strings.Contains(msg, "\x9b")` 是**字节级**匹配，会命中中文「回」的 UTF-8 次字节 `0x9B`。改为 `strings.ContainsRune`（按 rune 比较）——与 P0-23 里 C1 CSI 与 UTF-8 continuation byte 混淆是同一类陷阱，只是这次踩在测试自身而非实现上。净化逻辑本身正确，无需改动。
+- 验证：新增 28 个测试函数（`application/auth` 7：9 个错误码 / 未知码净化 / `safeCode` / interval 回落 / token 有效性 / `NextInterval` 10 组 / 序列不缩小；`infrastructure/github` 16：两个端点的请求形状与请求体精确断言、9 个错误码、第一步错误、非 2xx 不泄漏、`/user` 与 `/user/emails` 头与字段、缺 token / 缺 client_id、响应体限长、非 JSON 拒绝、context 取消、端点默认值、`flexInt` 5 组、轮询序列；`internal/archtest` 4：两条静态守卫 + 各自负向注入；`internal/config` 1：`MOTD_GITHUB_CLIENT_ID` 读取与去空白）。全量 `go build` / `go vet` / `go test ./...` 通过（30 个包）；从零启动实测两种分支均出现 `GitHub Device Flow 客户端就绪 client_id_configured=false|true scope="read:user user:email"`，无 panic，日志不回显凭据值。

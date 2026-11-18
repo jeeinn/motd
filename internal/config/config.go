@@ -25,6 +25,9 @@ type Config struct {
 	SSHMaxConns int
 	// SSHIdleTimeout SSH 会话空闲超时。
 	SSHIdleTimeout time.Duration
+	// GitHubClientID 是 Q7 的 OAuth App client_id，只从 MOTD_GITHUB_CLIENT_ID 读取。
+	// Device Flow 不需要 client_secret（§7 R1）；值不进仓库、不写 systemd unit（OPS §3）。
+	GitHubClientID string
 	// LogLevel debug / info / warn / error。
 	LogLevel string
 	// LogFormat text / json。
@@ -42,6 +45,7 @@ func Load() (Config, error) {
 		SSHAddr:        env("MOTD_SSH_ADDR", ":2222"),
 		SSHMaxConns:    IntEnv("MOTD_SSH_MAX_CONNS", 100),
 		SSHIdleTimeout: DurationEnv("MOTD_SSH_IDLE_TIMEOUT", 10*time.Minute),
+		GitHubClientID: env("MOTD_GITHUB_CLIENT_ID", ""),
 		LogLevel:       strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
 		LogFormat:      strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
 	}

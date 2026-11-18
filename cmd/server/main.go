@@ -1,8 +1,8 @@
 // Command server 是 motd 的单进程入口：Go 单体 + SQLite + SSH TUI。
 //
-// 当前阶段：M3。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
-// 写入队列、论坛用例与插件事件链装配、SSH 入口，并提供运维探针 /healthz。
-// 认证与终端页面按 docs/P0-PLAN.md 逐项接入。
+// 当前阶段：第四波 M2 认证。启动时完成配置加载、日志、SQLite 打开（双池）、迁移执行、
+// 写入队列、论坛用例与插件事件链装配、身份解析、GitHub Device Flow 客户端与 SSH 入口，
+// 并提供运维探针 /healthz。状态机、登录交互与终端页面按 docs/P0-PLAN.md 逐项接入。
 package main
 
 import (
@@ -110,6 +110,14 @@ func run() error {
 	resolver := auth.NewResolver(sqlite.NewSSHKeyLookup(pools))
 	logger.Info("身份解析就绪", "mode", "ssh_keys")
 
+	// GitHub Device Flow 客户端（P0-15）。缺 client_id 时客户端仍可构造，
+	// 但两个需要 client_id 的 POST 端点会返回 auth.ErrClientIDMissing；
+	// 日志只报「是否已配置」，绝不打印凭据值（OPS §3）。
+	deviceFlow := newDeviceFlowClient(cfg)
+	logger.Info("GitHub Device Flow 客户端就绪",
+		"client_id_configured", cfg.GitHubClientID != "",
+		"scope", auth.DeviceScope)
+
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:        cfg.SSHAddr,
 		DataDir:     cfg.DataDir,
@@ -117,7 +125,7 @@ func run() error {
 		IdleTimeout: cfg.SSHIdleTimeout,
 		Resolver:    resolver,
 		Presence:    rt.Presence,
-		Handler:     newInputHandler(),
+		Handler:     newInputHandler().withDeviceFlow(deviceFlow),
 		Logger:      logger,
 	})
 	if err != nil {
