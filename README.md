@@ -103,4 +103,4 @@ scripts/                 备份恢复脚本
 
 ## 许可证
 
-[MIT](LICENSE) © 2026 一颗红心
+[MIT](LICENSE) © 2026 Jeeinn
