@@ -1,41 +1,44 @@
-# Release Notes — v0.2.1
+# Release Notes — v0.3.0
 
 **发布日期**：2026-11-19
-**Git tag**：[`v0.2.1`](https://github.com/jeeinn/motd/releases/tag/v0.2.1)
+**Git tag**：[`v0.3.0`](https://github.com/jeeinn/motd/releases/tag/v0.3.0)
 **Module**：`github.com/jeeinn/motd`
 
-> 小版本体验补齐。无 schema 迁移，测试从 632 增至 651。
+> 本版补齐账号自助能力与编辑手感：邮箱注册/登录/找回、正文跨行退格合并。无 schema 迁移，测试从 651 增至 717。
 
-## 本版变化
+## 亮点
 
-- **详情阅读**：主题标题与正文之间新增虚线分隔，与下方「── 回复 ──」上下对称（服务端固定文案 + 暗色样式，无新增光标控制）。
-- **作者删除**：新增 `/delete [id]`。无参删当前打开的主题，带 `<id>` 删指定回复；仅作者本人可操作，非作者、访客及目标不存在统一提示「仅作者可删除」。
-- **软删不级联**：被删主题下的回复行保留在库，随主题从详情、列表与全文检索中一并隐藏。检索 SQL 增加所属主题 `status='active'` 过滤，防止已删内容从搜索结果泄漏。
-- **修复**：删除失败时写事务内部错误细节不再回显到终端。
-
-## 升级提示
-
-从 v0.2.0 升级**无需迁移**（仍止于 0007），直接替换二进制后启动即可。
-
-被删内容无公开恢复入口，如需找回只能从数据库层操作。`hidden` 状态预留给将来的治理角色，当前无入口。
+- **邮箱注册 / 登录 / 找回**：`/register` / `/verify <码>` / `/resend` / `/recover` / `/login email`。自带 SMTP（163 隐式 TLS 465 + 授权码），验证码只存 HMAC 散列、单事务原子消费；发信在写事务提交后才触网；argon2id(19MiB, t=2, p=1) 口令；复用 v0.2.0 的双维限流 / 审计 / 会话撤销。`/verify` 设密码需**两次确认**，找回成功后该账号全部会话失效。
+- **正文跨行退格合并**：空行行首按退格会把上一行并入、光标停在拼接处；回显只用已有的 SGR+EL+CUU 白名单序列，未放宽 CUP/CUD/ED，安全边界零变化。
+- **SSH 登录引导**：连接时 banner 始终提示「非 root 用户名 + 公钥登录 / 未绑定公钥以访客进入 / 禁 root 禁密码」，解决 `Permission denied (publickey)` 无从下手的问题。
+- **实测修复**：邮箱流程结束后密码掩码不再泄漏到后续命令输入；`/verify` 两次密码不一致时回退重输、不消费验证码。
 
 ## 安装与运行
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.2.1
+go install github.com/jeeinn/motd/cmd/server@v0.3.0
 # 或从源码构建
 go build -o motd ./cmd/server && ./motd
 ```
 
 配置见 [README](README.md) 与 [`.env.sample`](.env.sample)。
 
+**邮箱配置**：复制 `.env.sample` 为 `.env`（0600），填 `MOTD_EMAIL_ENABLED=true` 与 `MOTD_SMTP_HOST` / `PORT` / `USER` / `PASS` / `FROM`（163 用**授权码**，非登录密码；不进仓库、不进 systemd unit）。**程序不自动读 `.env` 文件**——systemd 用 `EnvironmentFile=`，手动运行先 `set -a; source .env; set +a` 再启动。
+
+**升级提示**：从 v0.2.x 升级**无需迁移**（仍止于 0007），替换二进制即可。
+
 ## 变更明细
 
-见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.2.1]` 段落。
+见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.3.0]` 段落。
 
 ## 已知问题与限制
 
-沿用 v0.2.0：邮箱注册独立在下一阶段；限流计数纯内存、重启清零；正文提交用 `.` 或 Ctrl-D（Ctrl+Enter 在通用终端不可靠）；跨行退格与方向键行内移动计划在下个版本。
+- 限流计数纯内存：进程重启清零、多实例不共享。
+- 验证码 HMAC pepper 为进程随机：**重启会使在途验证码失效**，重新 `/resend` 即可（换取库泄漏无法离线爆破 6 位码）。
+- `/recover` 对未注册邮箱同样回"若邮箱已注册则已发送"（防枚举），但实际**不会发信**；因此可能出现"以为发了但没收到"的困惑——这是防账号存在性泄露的既定取舍。
+- 正文单逻辑行超终端宽度自动折行时，跨行退格的 CUU 只上移一个物理行；行内左右移动不做。
+- 访客只读；Ctrl+Enter 在通用终端不可靠，正文提交用 `.` 或 Ctrl-D。
+- `kill -9` + WAL 恢复演练已在隔离环境通过；`-race` 因本机无 CGO/gcc 未启用；1000 在线未压测。
 
 ## 破坏性变更
 
