@@ -711,3 +711,19 @@
 - 代价 / 边界：多一个启动副作用点；非法 `.env` 行静默忽略（不阻塞启动，但也不会提示写错）；`MOTD_DOTENV_DISABLED` 写进被加载文件要到下次启动才生效。
 - 验证：737 测试全绿；`dotenv_test.go` 6 用例（进程优先 / 查找顺序含不合并 / 格式容错 / 开关 / 错误不泄漏 / 配置字段），全部用 t.TempDir() 自建占位 `.env`，零命中真实凭据路径；go.mod/go.sum 零变更。
 - 关联：`ADR-021`、`docs/PHASE2-PLAN.md §5`。
+
+## ADR-046 展示时区可配置（MOTD_DISPLAY_TIMEZONE）
+
+- 状态：已采纳（2026-11-19，v0.3.1.1 patch）
+- 背景：用户实测反馈帖子/回复时间显示为 UTC。存储层 `created_at` 是 INTEGER（Unix 秒，时区无关），application/domain 的 `.UTC()` 属存储归一化；缺陷面只在展示层硬编码 UTC（`view.go:303` 的 `formatTime` 与 `ssh_handler.go` 的 `/keys` 详情）。
+- 结论：
+  1. 新增 `MOTD_DISPLAY_TIMEZONE`（默认 `Asia/Shanghai`），支持 IANA 名 / UTC / Local；配置在 `config.Load()` 解析一次得到 `DisplayLocation *time.Location`，非法值**启动期直接失败**、绝不静默回落 UTC；
+  2. main 启动期一次性 `terminal.SetDisplayLocation()`，论坛 `formatTime` 与 `/keys` 的 `formatKeyTime` 共用 `terminal.DisplayLocation()` 单一来源；包级 `atomic.Pointer[time.Location]` 保证多会话并发无锁读取；
+  3. 论坛格式串 `MM-DD HH:MM` 不变、`sec<=0` 空串行为不变；`/keys` 后缀取**时间戳自身所在时刻**的时区缩写（CST/UTC/EST…），空缩写回退时区名——比取 `time.Now()` 更准，跨 DST 历史时间正确；不再硬编码 " UTC"；
+  4. 二进制内嵌 IANA 时区库（`_ "time/tzdata"`），distroless/scratch 无需挂载 zoneinfo；std lib、无第三方依赖。
+- 备选与否决理由：
+  - **(a) 给 `RenderScreen` 加显式 location 参数**：更纯，但需改 17 处调用点（含 15 处测试）与两路下发（pageController / loginPresenter），且 cmd/server 测试里约 10 处直接构造 `&pageController{}` 会产生 nil location、需额外防御——对 patch 扩散面过大，否决。
+  - **(b) 包级 set-once location**：采用。`RenderScreen` 的纯函数承诺澄清而非破坏——它仍是 (Screen, width) + 一份不可变进程配置的确定性函数，不读时钟、不碰 DB/SSH、不持有会话状态；测试用 `SetDisplayLocation` + `t.Cleanup` 复位隔离。
+- 代价 / 边界：二进制因内嵌 tzdata 略增数百 KB；时区是进程级策略、不随会话变化（若将来要多用户各自时区，需重设为 session 级并回到方案 a）；`-race` 因本机无 gcc 未跑，但并发读测试 `go test -count=20 -run TestDisplayLocationConcurrentRead` 稳定通过。
+- 验证：749 测试全绿（737 → +12）；config 5 用例（默认 / IANA / UTC / Local / 非法值 fail-fast）+ terminal 5 用例（不同 location 输出不同 / 格式串不变 / sec<=0 / 并发读）+ cmd/server 2 用例（/keys 时间按配置、后缀非硬编码）；E14「时间未带时区」/ E18「环境变量静默兜底」门禁 PASS；业务层 UTC 归一化 git diff 0 行。
+- 关联：`ADR-045`（.env 自动加载优先级）、`docs/PHASE2-PLAN.md`。

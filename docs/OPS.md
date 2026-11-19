@@ -80,6 +80,14 @@ chmod 600 .env
 
 脚本 `backup.sh` / `restore.sh` 只单独读 `MOTD_DB_PATH` / `MOTD_BACKUP_DIR` / `MOTDCTL_BIN` 三项，**不加载整个 `.env`**——cron 里要么显式 export，要么在脚本外层 source。
 
+### 展示时区（MOTD_DISPLAY_TIMEZONE，v0.3.1-patch）
+
+- 变量名 `MOTD_DISPLAY_TIMEZONE`，默认 `Asia/Shanghai`。支持 IANA 名（`Asia/Shanghai`、`America/New_York`）、`UTC`、`Local`；空串按未设置回落默认。
+- **仅影响终端呈现**：论坛列表/详情时间（`MM-DD HH:MM`）与 `/keys` 公钥详情的创建 / 最近使用时间（绝对时间 + 时区缩写，如 `CST`）。存储层仍以 Unix 秒归一化，历史数据无需迁移、无新迁移。
+- **非法值启动期直接失败**并打印含变量名的错误，绝不静默回落 UTC——静默回落正是本次要修的体验 bug。进程环境变量 / systemd `EnvironmentFile` 优先于仓库 `.env`（复用 v0.3.1 的自动加载优先级）。
+- 二进制已内嵌 IANA 时区库（`time/tzdata`），distroless / scratch 镜像无需额外挂载 zoneinfo；代价是二进制体积增加数百 KB。
+- 时区是**进程级展示策略**（等价 locale），启动期注入一次、之后只读（`atomic.Pointer`），多 SSH 会话并发渲染无锁安全；不是会话状态，不随连接变化。
+
 ### SSH 入口（P0-21）
 
 - `MOTD_SSH_ADDR`（默认 `:2222`，Q4 已拍板）、`MOTD_SSH_MAX_CONNS`（默认 100）、`MOTD_SSH_IDLE_TIMEOUT`（默认 `10m`）。
