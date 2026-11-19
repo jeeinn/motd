@@ -7,7 +7,7 @@
 
 SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览、发帖、回复；所有交互都在终端内完成，无需浏览器。
 
-- 版本：`v0.2.0`（2026-11-19）
+- 版本：`v0.2.1`（2026-11-19）
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
@@ -15,7 +15,7 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 
 - SSH 入口：仅公钥认证，禁 root，默认端口 `:2222`
 - 论坛核心：5 个版块、keyset 分页、软删除过滤、访客只读、发帖与回复
-- 互动：投票（`/vote up|down|rm`，幂等）、全文搜索（`/search`，FTS5 + 中文短词回退）
+- 互动：投票（`/vote up|down|rm`，幂等）、全文搜索（`/search`，FTS5 + 中文短词回退）、作者软删自己的主题/回复（`/delete`）
 - 登录：GitHub Device Flow，公钥绑定与软吊销，断线重连凭公钥恢复登录态
 - 认证安全：认证限流与审计事件、`/logout` 撤销该账号全部会话、`/keys <指纹>` 公钥详情
 - 终端界面：版块 / 主题 / 详情 / 编辑四页，正文支持多行（Enter 换行、`.` 或 Ctrl-D 提交）
@@ -28,7 +28,7 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 安装（Go 1.26.3+）：
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.2.0   # 生成 server 二进制
+go install github.com/jeeinn/motd/cmd/server@v0.2.1   # 生成 server 二进制
 ```
 
 或从源码构建并启动（Windows 下把 `-o motd` 改为 `-o motd.exe`）：
