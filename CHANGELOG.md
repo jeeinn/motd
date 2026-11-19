@@ -15,6 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.2.1] - 2026-11-19
+
+低风险体验补齐，无 schema 迁移。
+
+### Added
+
+- 主题详情页标题与正文之间新增虚线分隔（服务端固定文案 + 暗色样式，无新增光标控制）。
+- 新增 `/delete [id]`：作者可软删自己的主题或回复；无参删当前主题，带参删指定回复；非作者、访客及目标不存在统一提示「仅作者可删除」。
+
+### Changed
+
+- 软删不硬删、不级联：被删主题下的回复行保留，并随主题从详情、列表与全文检索中一并隐藏。检索 SQL 增加所属主题 `status='active'` 过滤，避免已删主题内容从搜索结果泄漏。
+
+### Fixed
+
+- 修复删除失败时写事务内部错误细节可能回显到终端的问题，统一为固定提示文案。
+
 ## [0.2.0] - 2026-11-19
 
 第二阶段发布。补齐认证安全、论坛互动与编辑体验，迁移扩展到 0007，测试从 456 增至 632。
@@ -65,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/jeeinn/motd/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jeeinn/motd/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jeeinn/motd/releases/tag/v0.1.0

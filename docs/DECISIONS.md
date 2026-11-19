@@ -600,3 +600,19 @@
 - 代价 / 边界：已吊销钥匙历史查不到（P2 可加管理端 `/keys --all`）；label 设置入口未开放（P2 可加 `/key label`）。
 - 验证：`key_detail_test.go` 覆盖正常读取 / 不存在 / 跨用户 / 已吊销；`TestRunKeysDetailAndOwnership` 覆盖详情字段、跨用户不泄露、恶意参数不回显、无参仍列表。
 - 关联：`ADR-024`、`OPS.md` 认证安全小节。
+
+## ADR-038 软删主题的跨读路径可见性
+
+- 状态：已采纳（2026-11-19，v0.2.1）
+- 结论：
+  1. 作者删除主题时**保留下属回复行**（不级联物理删，护住引用完整性），仅置 `threads.status='deleted'`；回复行的 `posts.status` 不变；
+  2. 详情、列表、全文检索三条读路径都把"所属主题 `status<>'active'`"视为不存在；检索在 SQL 层 `JOIN threads t ON t.id = p.thread_id AND t.status='active'` 落地（FTS MATCH 与 LIKE 回退两条分支都加），由 archtest 静态守卫 + 负向注入锁定；
+  3. 所有权判定集中在 application 层唯一的 `canModify(userID, ownerID)`；非作者、访客、目标不存在或已删统一回「仅作者可删除」固定文案，不泄露状态、不回显事务内部错误；
+  4. 无公开恢复入口；`hidden` 预留给将来治理角色，当前无入口；冻结账号仍可删自己内容（统一提示口径优先）。
+- 理由：仅按 `posts.status` 过滤会让已删主题下的回复仍被 `/search` 命中并泄漏，违背"随主题一并不可见"的产品决策。级联硬删会破坏引用完整性；在 FTS 同步层过滤易与 `RebuildFTS` 漂移——SQL 读路径过滤是最小且确定的位置。
+- 代价 / 边界：
+  - 已删内容留在库里，只能从 DB 层找回（非目标）。
+  - FTS 索引行仍在（删除主题不动 posts 行），但被查询层过滤，属预期行为，无需 `fts-rebuild` 清理。
+  - 将来引入版主时只在 `canModify` 一处加 `author OR moderator` 分支，`hidden` 作治理位复用。
+- 验证：`delete_test.go`（应用层 6）/ `repo_delete_test.go`（真实 SQLite 3）/ `repo_search.go` 两条 JOIN 过滤 / `archtest/delete_test.go` 4 守卫 + 3 负向注入 / `cmd/server/delete_command_test.go` 端到端 5 用例。三条验收（作者删后回复保留但不可见、非作者零变更、已删内容返回不存在）全过。
+- 关联：`docs/PHASE2-PLAN.md §1.2`、`ADR-013`（软删口径）、`ADR-033`（FTS 索引一致性）。
