@@ -631,3 +631,43 @@
   - 回显整行重写有少量额外字节（1 Mbps 下可忽略）。
 - 验证：`composer_test.go` 5 项（空行并入 / 首行无动作 / 连续空行逐次合并 / 合并后续输 / 宽字符行）；`line_echo_test.go` 3 项（输出只含白名单、零 CUP/CUD/ED/DECSET、合并文本 ESC 被净化）；端到端合入→续输→Ctrl-D 提交落库；`archtest/safe_test.go` 2 守卫 + 负向注入（CUP/CUD/ED 必失败）；`ansi.go` git diff 为空。
 - 关联：`docs/PHASE2-PLAN.md §2.2`、`ADR-027`、`ADR-034`、`ADR-038`。
+
+## ADR-040 邮箱验证码两段式投递与单事务原子消费
+
+- 状态：已采纳（2026-11-19，v0.3.0-email）
+- 结论：
+  1. 配置显式 resolve：`MOTD_EMAIL_ENABLED` 默认 false，开启时逐项校验 `MOTD_SMTP_HOST` / `PORT` / `USER` / `PASS` / `FROM`，缺哪项报哪项、不静默兜底；凭据只从 `.env`（0600）读，不进仓库、不进 systemd unit、不进日志（启动日志只打 enabled/host/port）；
+  2. **两段式发信**：先在 `Writer.Submit` 单事务内写 `email_tokens`（只存 `code_hash`），**提交成功后才在事务外发信**（465 隐式 TLS + PLAIN AUTH，有界并发 4、10s 超时）；发信失败保留 token 自然过期，不补偿删除；`/resend` 另写新 token 并把旧 token 置 `consumed_at`；
+  3. `/verify <code>` 单事务原子消费：`UPDATE email_tokens SET consumed_at=? WHERE id=? AND consumed_at IS NULL` + `RowsAffected==1` 抢消费（并发下仅一者成功）→ 校验 purpose / expires_at / attempts<5 → 同事务建 `users` / `identities` / `local_credentials`；错码在事务内 `attempts++`；
+  4. 密码在 `/verify` 之后以独立隐藏字段设置（设计稿 §4.5），不经命令行参数——避免密码回显与会话暂存；argon2id 19MiB / t=2 / p=1。
+- 理由：3s 写超时扛不住 SMTP 网络调用，网络调用绝不进唯一写连接事务；验证码只存 HMAC 散列，库泄漏也无法离线爆破 6 位码；密码独立隐藏字段是 `setSecret()` 的既定语义。
+- 代价 / 边界：
+  - 发信失败时 token 留库自然过期（TTL 10min），无补偿删除。
+  - HMAC pepper 为进程随机：**服务重启会使在途验证码失效**，用户可 `/resend` 重发；换得"库泄漏无法离线爆破"（已接受，写进 OPS）。
+  - 无新迁移：`email_tokens` / `users` / `identities` / `local_credentials` 均已在 0001 建好，迁移仍止于 0007。
+- 验证：705 测试全绿；`archtest/email_test.go` 4 守卫（发信不在写事务 / code 只存 hash + 两个负向注入）；真 SQLite 并发抢消费测试；配置缺项逐个点名；`.env` gitignore + 工作区/HEAD 凭据零命中；163 SMTP 465+AUTH 实测通过（凭据不落代码）。
+- 关联：`docs/PHASE1-PLAN.md §2.9`、`ADR-015`、`ADR-033`。
+
+## ADR-041 邮箱身份归属：email 作 provider_uid，不自动合并（D-c / R7）
+
+- 状态：已采纳（2026-11-19，v0.3.0-email）
+- 结论：
+  1. 邮箱身份的 `provider='email'`，`provider_uid` 取 email 本身（GitHub 身份取数字 UID，两者不混淆）；`primary_email` **仍不加 UNIQUE**——这是"禁止按邮箱自动合并"的结构保证（沿用 ADR-023）；
+  2. 邮箱被占用时回固定提示，**绝不自动合并账号**；当前无 `/unlink` 命令，提示不指向不存在的操作（改为"如需变更归属请联系管理员处理"）；
+  3. `/recover` 响应统一"若邮箱已注册则已发送"，防账号存在性枚举；找回成功后撤销该用户全部 SSH 会话（复用 M2 `UserSessionRevoker` 提交后调用模式）。
+- 理由：同一邮箱可能属不同 GitHub UID（ADR-023 已定），自动合并会造成账号串号；找回响应统一文案避免把邮箱目录暴露给未认证调用方。
+- 代价 / 边界：变更邮箱归属当前只能从数据层处理（`/unlink` / `/link` 属后续阶段）；用户看到"联系管理员"但暂无自助入口——优于指向死命令。
+- 验证：`email_service_test.go` 占用场景（seedIdentity 后 RequestCode 报 ErrEmailOccupied）、找回未知邮箱统一响应、recover 会话撤销；固定提示断言不指向"解绑"命令。
+- 关联：`ADR-023`、`docs/PHASE1-PLAN.md §2.9 R7`。
+
+## ADR-042 邮箱通道参数与限流口径
+
+- 状态：已采纳（2026-11-19，v0.3.0-email）
+- 结论：
+  1. SMTP 走 465 隐式 TLS + PLAIN AUTH（163 实测可用），发信错误归一、不回显 AUTH 串；单一 `email.Sender` 实现，不预留第二 Provider（避免孤儿抽象）；IMAP 993 本轮不接（找回走发码 + SSH 输入，不读邮箱）；
+  2. 验证码 TTL 10min；限流复用 M2 `application/auth/ratelimit.go`，键 `hash(email)`：60s 重发冷却、每小时 5 封、5 次尝试；叠加 IP 维度防滥号；错码 5 次锁 15min；
+  3. 命令面只做终端 `/register` / `/verify` / `/resend` / `/recover` / `/login email`，**不做任何 HTTP 端点**（对外接口继续冻结）。
+- 理由：163 授权码非登录密码，只放服务端 `.env`；滥用入口（公开注册）必须双维限流；HTTP 端点会焊死对外契约（P3 未验证前不做）。
+- 代价 / 边界：进程重启清空限流计数（M2 已知限制）；163 单账号发信量受服务商限制，5 封/小时是保守值。
+- 验证：`infrastructure/email/sender_test.go`、`config/email_test.go`（缺项报错）、限流用例；命令白名单测试。
+- 关联：`ADR-030`、`docs/PHASE1-PLAN.md §2.9`。

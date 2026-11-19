@@ -186,6 +186,18 @@ chmod 600 .env
 - FTS 索引由 0007 触发器在 `posts.status` 变更时同步；删除主题本身不动 posts 行，索引行仍在但被查询层过滤，这是预期行为，**无需用 `fts-rebuild` 清理**。无公开恢复入口（被删内容如需找回只能从 DB 层操作，属非目标）。
 - 本轮无新迁移（仍止于 0007），无需回填。冻结账号（status 非 active）当前仍可删自己内容，统一提示口径优先。
 
+### 邮箱认证（v0.3.0-email）
+
+**环境变量**（在 `.env` 里配置，见 `.env.sample`）：`MOTD_EMAIL_ENABLED`（默认 `false`）、`MOTD_SMTP_HOST`、`MOTD_SMTP_PORT`（默认 465）、`MOTD_SMTP_USER`、`MOTD_SMTP_PASS`、`MOTD_EMAIL_FROM`。
+
+- **凭据纪律**：163 用**授权码**（不是邮箱登录密码）；只从 `.env`（0600 root:root）读，不进仓库、不进 systemd unit、不进日志。启动日志只打 `enabled/host/port`，不打 user/pass。开启时六项缺任一即报错、明确点名缺哪项，不静默兜底。
+- **通道**：465 隐式 TLS + PLAIN AUTH（163 已实测连通）；发信有界并发 4、独立 10s 超时；单一 Sender 实现，不接第三方邮件 API。IMAP 993 未接入（找回走发码 + SSH 输入，不读邮箱）。
+- **终端命令**：`/register`（交互输邮箱 → 发码）、`/verify <验证码>`（交互输密码，只回显 `*`）、`/resend`、`/recover`（统一响应"若邮箱已注册则已发送"防枚举）、`/login email`。`/login` 无参提示改为「仅支持 /login github 或 /login email」。
+- **验证码**：TTL 10min、只存 HMAC 散列不存明文；60s 重发冷却、每小时 5 封、5 次尝试（错码 5 次锁 15min），叠加 IP 维度。`HMAC pepper 为进程随机`——**服务重启会使在途验证码失效**，用户重新 `/resend` 即可；这是为"库泄漏无法离线爆破 6 位码"接受的代价。
+- **账号口径**：同一邮箱不会自动合并到已有账号（`primary_email` 无 UNIQUE 是结构性保证）；占用时提示「不会自动合并；如需变更归属请联系管理员处理」——当前无 `/unlink` 命令，变更归属只能从数据层处理。`/recover` 成功后该用户**全部 SSH 会话立即失效**，需用 `/login email` 重新登录。
+- **无新迁移**：`email_tokens` / `users` / `identities` / `local_credentials` 均已在 0001 建好，迁移仍止于 0007。发信在写事务**提交之后**执行（3s 写超时扛不住 SMTP），失败则 token 自然过期、不补偿删除。
+- 用户后期更换邮箱凭据：只改 `.env` 三行（USER / PASS / FROM），代码无需改动。
+
 ## 4. 恢复流程
 
 1. **停服**：`systemctl stop motd`。

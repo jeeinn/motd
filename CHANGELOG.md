@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **邮箱注册/登录/密码找回**：`/register` / `/verify <code>` / `/resend` / `/recover` / `/login email`，自带 163 SMTP 隐式 TLS 通道；验证码只存 HMAC 散列、单事务原子消费；两段式发信（写事务提交后才触网）；argon2id(19MiB, t=2, p=1) 本地口令；复用 M2 双维限流 / 审计 / 会话撤销。无新迁移（表已在 0001）。
+
+### Changed
+
+- `/login` 无参提示改为「仅支持 /login github 或 /login email」。
+
+### Notes
+
+- 所有交互项均已完成；邮箱凭据仅在本地 `.env` 配置，不进仓库。
+
+## [0.3.0] - 2026-11-19
+
+### Added
+
 - **正文跨行退格合并**：空行行首按退格现在删除该空行并把上一行文本并入，光标停在拼接处可继续输入（此前无动作）；首行空退格保持无动作。
 - 新增白名单内 CUU+EL 整行重绘回显，ADR-027 白名单零改动，未放宽 CUP/CUD/ED。
 
