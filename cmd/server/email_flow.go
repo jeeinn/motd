@@ -38,6 +38,7 @@ const (
 	emailHintPassword   = "请输入密码后按 Enter 确认（Esc 取消）"
 	emailHintSetPwd     = "请设置密码（至少 8 位）后按 Enter 确认（Esc 取消）"
 	emailHintNewPwd     = "请输入新密码（至少 8 位）后按 Enter 确认（Esc 取消）"
+	emailHintConfirmPwd = "请再次输入密码确认（Esc 取消）"
 
 	emailTextRegisterSent = "验证码已发送至邮箱，请在 10 分钟内输入 /verify <验证码> 完成注册。"
 	emailTextRecoverSent  = "若邮箱已注册，验证码已发送；请在 10 分钟内输入 /verify <验证码> 重置密码。"
@@ -50,6 +51,7 @@ const (
 	emailTextBadEmail     = "邮箱格式不合法，请重新执行 /register 或 /recover。"
 	emailTextBadCode      = "验证码无效、已使用或已过期，请重新 /register 或 /recover。"
 	emailTextBadPassword  = "密码至少 8 位，请重新输入 /verify <验证码>。"
+	emailTextPwdMismatch  = "两次密码不一致，请重新输入 /verify <验证码>。"
 	emailTextBadLogin     = "邮箱或密码错误。"
 	emailTextSendFailed   = "验证码邮件发送失败，请稍后重试或输入 /resend。"
 	emailTextFailed       = "邮箱操作失败，请稍后重试。"
@@ -81,6 +83,10 @@ type emailFlow struct {
 	recover bool // verify：pending 是找回流程 → 提示输入新密码
 	buf     []rune
 	stage   int // login: 0=email 1=password；其余只有 stage 0
+	// verify 的密码二次确认（仅 register/recover 的 verify，login 不使用）：
+	// 第一次输入存 firstPwd，confirm=true 时进入二次输入；两次一致才提交 service。
+	firstPwd string
+	confirm  bool
 }
 
 // newEmailFlow 创建一条流程并输出第一步提示。svc 为空由调用方拦截，
@@ -106,6 +112,9 @@ func (f *emailFlow) currentPrompt() (string, bool) {
 	case emailFlowRecover:
 		return emailHintRecover, false
 	case emailFlowVerify:
+		if f.confirm {
+			return emailHintConfirmPwd, true
+		}
 		if f.recover {
 			return emailHintNewPwd, true
 		}
@@ -120,8 +129,22 @@ func (f *emailFlow) currentPrompt() (string, bool) {
 	}
 }
 
+// finish 复位本流程对 echo 的副作用：secret 掩码必须随流程结束一起消失，
+// 否则下一条斜杠命令的回显会被永久打成 '*'（用户实测 /login 被掩码）。
+// 幂等：finish 与 clearEmailFlow 可能都会调到。
+func (f *emailFlow) finish() {
+	f.echo.setSecret(false)
+}
+
 // step 处理一个按键。done=true 表示流程结束（成功或失败），调用方应清掉 flow。
+// 流程一旦结束（done/cancelled）立即复位回显掩码，覆盖所有出口，
+// 调用方无论在哪里清 flow 都不会遗漏 secret 泄漏。
 func (f *emailFlow) step(ctx context.Context, _ *pageController, m input.KeyMsg) (done bool, cancelled bool) {
+	defer func() {
+		if done || cancelled {
+			f.finish()
+		}
+	}()
 	switch m.Kind {
 	case input.KeyEsc, input.KeyCtrlC:
 		f.echo.newline()
@@ -183,6 +206,22 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 		return true
 
 	case emailFlowVerify:
+		// 注册设密码 / 找回新密码：两次输入确认。验证码只在两次一致时
+		// 才交给 service 消费；不一致时回第一次输入重来，码不消费、不计数。
+		if !f.confirm {
+			f.firstPwd = value
+			f.confirm = true
+			f.showStep()
+			return false
+		}
+		if value != f.firstPwd {
+			f.firstPwd = ""
+			f.confirm = false
+			_, _ = io.WriteString(f.sess, emailTextPwdMismatch+"\r\n")
+			f.showStep()
+			return false
+		}
+		f.firstPwd = ""
 		res, err := f.svc.Verify(ctx, *f.pending, f.code, value, f.ipHash)
 		if err != nil {
 			f.writeError(err)
@@ -217,6 +256,16 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 	return true
 }
 
+// clearEmailFlow 结束并摘掉当前邮箱流程，复位回显掩码。
+// 所有流程出口（done/cancelled/被新命令取代）都经此收口。
+func (p *pageController) clearEmailFlow() {
+	if p.emailFlow == nil {
+		return
+	}
+	p.emailFlow.finish()
+	p.emailFlow = nil
+}
+
 // handleEmailCommand 把四条邮箱命令接到分步流程 / 直接动作上。
 // 只使用注册表白名单解析出的 inv，绝不把用户原文写回终端。
 func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession, pc *pageController, inv command.Invocation) {
@@ -231,6 +280,7 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 			kind = emailFlowRecover
 		}
 		pc.invalidateScreen()
+		pc.clearEmailFlow() // 若旧流程尚未结束就被新命令取代，先复位其 secret 掩码
 		pc.emailFlow = newEmailFlow(kind, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false)
 	case "verify":
 		if pc.pendingEmail == "" {
@@ -239,6 +289,7 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 		}
 		pc.invalidateScreen()
 		recover := pc.pendingPurpose == auth.EmailPurposeRecover
+		pc.clearEmailFlow() // 同上：新命令取代旧流程时先复位
 		pc.emailFlow = newEmailFlow(emailFlowVerify, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, inv.Args[0], recover)
 	case "resend":
 		if pc.pendingEmail == "" {

@@ -29,6 +29,12 @@ var (
 	ErrRevokedKey = errors.New("motd: 公钥已吊销，拒绝认证")
 )
 
+// sshLoginBanner 是服务端生成的固定引导文案（ADR-019：固定文本路径，
+// 不含任何用户数据 / 凭据 / 指纹）。始终随 SSH banner 下发，使被拒的
+// root 用户或密码登录用户知道正确姿势；两行 CRLF 收口，1 Mbps 带宽友好。
+const sshLoginBanner = "motd: 请用任意非 root 用户名 + 本机 SSH 公钥登录（禁 root、禁密码认证）。\r\n" +
+	"motd: 未绑定公钥将以访客进入；访客可浏览并使用 /register 完成注册。\r\n"
+
 // Config 是 SSH 入口的全部外部依赖。
 // Resolver / Presence / Handler 都由 cmd 装配注入：transport 不碰数据库、
 // 不碰渲染实现，也不自己决定身份策略（§2.2 禁止表）。
@@ -153,11 +159,21 @@ func (s *Server) Addr() string {
 
 func (s *Server) full() bool { return len(s.slots) >= cap(s.slots) }
 
+// fullLine 是满员提示的唯一生成点，rejectFull 与 bannerCallback 共用。
+func (s *Server) fullLine() string {
+	return fmt.Sprintf("motd: 连接数已满（%d/%d），请稍后重试\r\n", len(s.slots), cap(s.slots))
+}
+
+// bannerCallback 在 SSH 用户认证之前下发：始终带登录引导，满员时再叠加满员提示。
+// root / 密码认证被拒的客户端通常只看到通用的 Permission denied (publickey)，
+// 这段 banner 给出可操作的提示（禁 root、仅公钥、访客放行、可 /register）。
 func (s *Server) bannerCallback(_ gossh.ConnMetadata) string {
+	var b strings.Builder
 	if s.full() {
-		return fmt.Sprintf("motd: 连接数已满（%d/%d），请稍后重试\r\n", len(s.slots), cap(s.slots))
+		b.WriteString(s.fullLine())
 	}
-	return ""
+	b.WriteString(sshLoginBanner)
+	return b.String()
 }
 
 func (s *Server) publicKeyCallback(conn gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
@@ -262,7 +278,7 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func (s *Server) rejectFull(c net.Conn) {
-	_, _ = io.WriteString(c, fmt.Sprintf("motd: 连接数已满（%d/%d），请稍后重试\r\n", len(s.slots), cap(s.slots)))
+	_, _ = io.WriteString(c, s.fullLine())
 	_ = c.Close()
 }
 

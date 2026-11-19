@@ -257,7 +257,7 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			pc.invalidateScreen()
 			done, cancelled := pc.emailFlow.step(ctx, pc, m)
 			if cancelled || done {
-				pc.emailFlow = nil
+				pc.clearEmailFlow() // 复位 secret 掩码（step 内已 finish，这里保证 flow 一定被摘掉）
 				_ = pc.refresh(ctx, sess)
 			}
 			return false
@@ -429,6 +429,7 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 					_, _ = io.WriteString(sess, emailTextNotReady+"\r\n")
 				} else {
 					pc.invalidateScreen()
+					pc.clearEmailFlow() // 若已有邮箱流程未结束，先复位其 secret 掩码
 					pc.emailFlow = newEmailFlow(emailFlowLogin, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false)
 				}
 				return outcomeContinue
