@@ -616,3 +616,18 @@
   - 将来引入版主时只在 `canModify` 一处加 `author OR moderator` 分支，`hidden` 作治理位复用。
 - 验证：`delete_test.go`（应用层 6）/ `repo_delete_test.go`（真实 SQLite 3）/ `repo_search.go` 两条 JOIN 过滤 / `archtest/delete_test.go` 4 守卫 + 3 负向注入 / `cmd/server/delete_command_test.go` 端到端 5 用例。三条验收（作者删后回复保留但不可见、非作者零变更、已删内容返回不存在）全过。
 - 关联：`docs/PHASE2-PLAN.md §1.2`、`ADR-013`（软删口径）、`ADR-033`（FTS 索引一致性）。
+
+## ADR-039 跨行退格合并的回显协议（方案 B 收窄版）
+
+- 状态：已采纳（2026-11-19，v0.3.0）
+- 结论：
+  1. 正文编辑态在空行行首按退格：composer 删除该空行、`ComposerOp` 带回 `MergedLines` / `MergedText`，回显层用 `safe.CursorUp(1)` + `\r` + `safe.ClearToEOL()` 整行重绘合并后的文本，光标停在两行拼接处可续输；首行空退格无动作；
+  2. **ADR-027 白名单零改动**：全程只用 SGR + EL + CUU，绝不内联 ESC、绝不放宽 CUP(H/f)/CUD(B)/ED/DECSET；用户文本仍经 `SanitizeText`，与编辑控制分属两条写入路径；
+  3. 标题阶段维持单行退格语义，不做跨行；行内左右移动本版不做；
+  4. 超宽自动折行与 kitty keyboard protocol 留待后续（与既有宽字符退格限制同源）。
+- 理由：用户真实痛点是"跨行退格不回上一行"，方向键只是设想的手段。输入侧方向键早已可用（decoder 提升 CSI/SS3 为 KeyArrow*），真正限制是输出侧禁 CUP。方案 B 用逻辑光标 + 当前行整行重绘在白名单内达成目标，不牺牲安全边界。
+- 代价 / 边界：
+  - 单逻辑行超终端宽度自动折行时 CUU 只上移一个物理行（本版不处理）。
+  - 回显整行重写有少量额外字节（1 Mbps 下可忽略）。
+- 验证：`composer_test.go` 5 项（空行并入 / 首行无动作 / 连续空行逐次合并 / 合并后续输 / 宽字符行）；`line_echo_test.go` 3 项（输出只含白名单、零 CUP/CUD/ED/DECSET、合并文本 ESC 被净化）；端到端合入→续输→Ctrl-D 提交落库；`archtest/safe_test.go` 2 守卫 + 负向注入（CUP/CUD/ED 必失败）；`ansi.go` git diff 为空。
+- 关联：`docs/PHASE2-PLAN.md §2.2`、`ADR-027`、`ADR-034`、`ADR-038`。

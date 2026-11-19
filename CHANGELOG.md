@@ -15,6 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.3.0] - 2026-11-19
+
+### Added
+
+- **正文跨行退格合并**：空行行首按退格现在删除该空行并把上一行文本并入，光标停在拼接处可继续输入（此前无动作）；首行空退格保持无动作。
+- 新增白名单内 CUU+EL 整行重绘回显，ADR-027 白名单零改动，未放宽 CUP/CUD/ED。
+
+### Changed
+
+- `ComposerOp` 扩展跨行合并信息（`MergedLines` / `MergedText`）；标题阶段维持单行语义。
+
+### Notes
+
+- 本段仅含交互改进；邮箱注册/登录/找回另行发布。行内左右移动、超宽自动折行不在本版。
+
 ## [0.2.1] - 2026-11-19
 
 低风险体验补齐，无 schema 迁移。
@@ -82,7 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jeeinn/motd/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jeeinn/motd/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jeeinn/motd/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jeeinn/motd/releases/tag/v0.1.0
