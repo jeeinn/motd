@@ -518,3 +518,35 @@
   - 撤销只覆盖在线会话；已签发的外部凭据（如未来的 CLI token）不在本 ADR 范围（P2）。
 - 验证：`logout_test.go` 覆盖先撤销后审计、审计失败不回滚、访客拒绝；`revoke_user_test.go` 覆盖同账号 2 会话全撤、异账号/访客不误伤；archtest `TestLogoutRevokesBeforeAudit` 守卫。
 - 关联：`docs/PHASE1-PLAN.md` §2.5、`P0-PLAN.md §4.6`、`ADR-024`。
+
+## ADR-032 投票分数与主题活跃度正交：AdjustScore 与 TouchThread 分离
+
+- 状态：已采纳（2026-11-19，P1-M3）
+- 结论：
+  1. `TouchThread`（`UPDATE threads SET last_reply_at=?, score=score+?`）**仅供发帖/回复**，推进活跃度以维持 `SortLatest` 语义；
+  2. 投票走独立的 `AdjustScore`（`UPDATE threads SET score=score+? WHERE id=?`），**绝不触碰 last_reply_at**——评价行为不能把旧主题顶到"最新"；
+  3. `WriteTx` 新增 `GetVote` / `UpsertVote` / `DeleteVote` / `AdjustScore` / `PostThreadID`；`DeleteVote` 显式存在是因为 `votes.value CHECK(value IN (-1,1))` 不允许用 0 表示撤销，把删除塞进 UpsertVote 会造成沉默逻辑错误；
+  4. 投票幂等靠 `UNIQUE(user_id,target_type,target_id)` + `delta = 新值 - 旧值`（同值 delta=0 直接返回）；事件 `EventVoteCast` 与业务写同事务入 outbox，幂等键 `vote:<uid>:<type>:<id>`。
+- 理由：分数（`score`）与活跃度（`last_reply_at`）是两个正交语义：前者是评价累计、后者是时间排序。P0 的 `TouchThread` 把两者塞进一条 UPDATE 是因为当时只有回复会改分数；P1 引入投票后必须拆分，否则投票会污染排序。
+- 代价 / 边界：
+  - 多一个端口方法与一条 SQL，换来排序语义不被评价行为污染（值得）。
+  - 事件幂等键固定 → 改票/撤销的后续事件被 outbox 的 `event_id UNIQUE` 静默去重，插件只感知**首次投票**。若插件需感知每次票变，需换含序号/值的键（待拍板，当前按首次投票口径）。
+  - 终端 `/vote` 只对当前打开的 thread；Service 层已完整支持 post 目标（取所属 thread 记分、不碰 last_reply_at），命令行暂不暴露。
+- 验证：`archtest/vote_test.go` + `vote_negative_test.go` 正向守卫 + 负向注入（vote.go 出现 TouchThread / last_reply_at / 缺 ON CONFLICT 均失败）；`vote_integration_test.go` 覆盖幂等、改票 delta（-1→1=+2）、撤销、访客拒绝、目标不存在、分数事务一致、事件入 outbox。隔离库实测投票路径零 TouchThread 调用。
+- 关联：`docs/PHASE1-PLAN.md` §2.4、`ADR-015`。
+
+## ADR-033 FTS5 外部内容表的索引一致性：posts_fts_indexed 跟踪表
+
+- 状态：已采纳（2026-11-19，P1-M3）
+- 结论：
+  1. 迁移 `0007` 建 FTS5 外部内容表 `posts_fts`（`content='posts'`, `content_rowid='id'`, `tokenize='trigram'`）+ 三条同步触发器（INSERT/UPDATE/DELETE）+ 存量回填；
+  2. 新增 `posts_fts_indexed(post_id)` 小表作为"哪些行真正在索引里"的**唯一事实来源**：FTS5 外部内容表对未索引行发 `'delete'` 会报 `disk image is malformed`（实测复现），而 `SELECT rowid FROM posts_fts` 会从外部表合成行、无法判断是否已索引；
+  3. 触发器只在确认 `posts_fts_indexed` 有该行时才发 `'delete'`，顺序为先删倒排项再删标记；status 转 `deleted`/`hidden` 时撤索引，与 `PostReader` 只暴露 `status='normal'` 的口径一致；
+  4. 恢复备份后**不自动重建**，需显式 `motdctl fts-rebuild --db <path>`（用 FTS5 `delete-all` + 仅回填 normal 行，不用 `DELETE FROM posts_fts`——同样踩 malformed 陷阱）。
+- 理由：外部内容表没有"是否索引"的内省手段，靠推测会损坏索引；一张小跟踪表换来确定的同步语义。trigram 分词让中文短语可检索，代价是 <3 码点查询无结果，应用层回退 LIKE 并转义 `%`/`_`/`\`。
+- 代价 / 边界：
+  - 多一张小表，未来换索引实现时仍需维护它。
+  - MATCH 串整体加引号、内部引号翻倍、仅作绑定参数，用户输入 `*`/`"`/`%`/`_` 均为字面量（archtest 负向注入守拼接）。
+  - 页长锁 20、摘要 ≤240 字节，适配 1 Mbps 约束。
+- 验证：隔离库实测 v6→v7 迁移在 4 条历史帖上回填 `posts_fts=4` / `posts_fts_indexed=4`、三触发器建成；回滚到备份后 schema=6、FTS 表消失、数据完整。`archtest/search_test.go` 负向注入（拼接 MATCH / 无 trigram / LIKE 无 ESCAPE 均失败）。
+- 关联：`docs/PHASE1-PLAN.md` §2.6、`OPS.md` FTS 恢复说明。

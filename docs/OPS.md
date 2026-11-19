@@ -56,10 +56,13 @@ cron 示例：
 `motdctl` 也支持直接调用：
 
 ```bash
-motdctl backup  [--db <path>] [--dir <dir>]
-motdctl verify  <backup-file>
-motdctl restore <backup-file> --target <path>
+motdctl backup      [--db <path>] [--dir <dir>]
+motdctl verify      <backup-file>
+motdctl restore     <backup-file> --target <path>
+motdctl fts-rebuild [--db <path>]        # P1-M3：恢复备份后重建全文索引
 ```
+
+**FTS 索引维护（P1-M3）**：迁移 0007 引入 FTS5 外部内容表 `posts_fts` 与跟踪表 `posts_fts_indexed`。**从备份恢复后必须显式执行** `motdctl fts-rebuild --db <path>`（输出 `indexed=N`）重建索引，**不做启动自动重建**。只索引 `status='normal'` 的正文；`fts-rebuild` 内部用 FTS5 `delete-all` 而非 `DELETE FROM posts_fts`（后者会踩 `disk image is malformed`）。详见 `DECISIONS.md ADR-033`。
 
 环境变量：`MOTD_DB_PATH`（默认 `./data/motd.db`）、`MOTD_BACKUP_DIR`（默认 `./data/backups`）、`MOTDCTL_BIN`（脚本用的工具路径）、`MOTD_GITHUB_CLIENT_ID`（P0-15 起由 `config.Load` 读取，默认空；见下方凭据小节）。
 
@@ -144,6 +147,13 @@ motdctl restore <backup-file> --target <path>
 **审计落库**：`auth_events` 表复用 0001 已有 schema 与 `idx_auth_events_time`，无新迁移；application 只入队，落库走 `Writer.Submit` 批量 INSERT。
 
 **本地复现**：`./scripts/repro_auth_limit.sh`（隔离临时库，不碰 `data/`），实测输出 `accepted=3 rejected=2 retry_after=2m0s auth_events=5 dropped=1`。
+
+### 论坛互动（P1-M3）
+
+- **投票** `/vote <up|down|rm>`：只对**当前打开的 thread**，访客拒绝。投票走 `AdjustScore` 只改 `threads.score`、**不推进 `last_reply_at`**，因此不影响 `SortLatest` 排序（ADR-032）；同一用户对同一目标重复投票不加分（幂等），改票按差值计（`-1 → +1` = +2）。
+- **搜索** `/search <关键词>`：≥3 码点走 FTS5 trigram，<3 码点回退 LIKE；结果页 `n/p` 翻页、Enter 打开主题，页长锁 20、摘要 ≤240 字节。用户输入的 `*`/`"`/`%`/`_` 均按字面量处理（防 FTS 语法注入）。
+- **恢复后索引重建**：见上方 `motdctl fts-rebuild`——恢复备份后 FTS 索引不会自动回来，必须手动重建，否则搜索返回空。这是刻意设计（重建时机由运维掌控，避免启动时整库扫描）。
+- 审计事件 `EventVoteCast` 随投票写同事务入 outbox；幂等键固定，插件只感知**首次投票**（改票/撤销事件被去重）。
 
 ## 4. 恢复流程
 
