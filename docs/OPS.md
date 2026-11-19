@@ -66,6 +66,16 @@ motdctl fts-rebuild [--db <path>]        # P1-M3：恢复备份后重建全文�
 
 环境变量：`MOTD_DB_PATH`（默认 `./data/motd.db`）、`MOTD_BACKUP_DIR`（默认 `./data/backups`）、`MOTDCTL_BIN`（脚本用的工具路径）、`MOTD_GITHUB_CLIENT_ID`（P0-15 起由 `config.Load` 读取，默认空；见下方凭据小节）。
 
+**配置入口：`.env.sample`**（仓库根目录）。它是全部环境变量的带注释清单——数据位置、监听地址、日志、GitHub 凭据、认证安全（P1-M2）共 16 项，末段还预留了下一阶段邮箱包的变量名（当前设置不生效）。部署时复制为 `.env` 再修改：
+
+```bash
+cp .env.sample .env
+# 编辑 .env 填入实际值，尤其是 MOTD_GITHUB_CLIENT_ID
+chmod 600 .env
+```
+
+`.env` 含凭据、已被 `.gitignore` 排除；`.env.sample` 可安全提交。**空值 = 未设置 = 回落默认值**，想用默认值就留空或注释掉该行。systemd 用 `EnvironmentFile=/opt/motd/.env` 加载（unit 只引用文件、不写凭据）。脚本 `backup.sh` / `restore.sh` 只单独读 `MOTD_DB_PATH` / `MOTD_BACKUP_DIR` / `MOTDCTL_BIN` 三项，不加载整个 `.env`——cron 里要么显式 export，要么在脚本外层 source。
+
 ### SSH 入口（P0-21）
 
 - `MOTD_SSH_ADDR`（默认 `:2222`，Q4 已拍板）、`MOTD_SSH_MAX_CONNS`（默认 100）、`MOTD_SSH_IDLE_TIMEOUT`（默认 `10m`）。
