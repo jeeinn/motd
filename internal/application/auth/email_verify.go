@@ -20,11 +20,51 @@ type EmailVerifyResult struct {
 	SessionsClosed int // 仅 recover：重置后撤销的旧会话数
 }
 
+// PreCheckCode 是 /verify 收密码前的**只读预检**（v0.3.1 体验项）：
+// 校验格式 + token 存在/未消费/未过期/尝试未超限，命中即放行进入密码交互，
+// 否则统一回 ErrInvalidCode，让用户不必白输两遍 argon2 才被告知码无效。
+//
+// 三条硬边界：
+//  1. 全程只读——走 EmailTokenReader 的读池方法，不进写事务、不消费 token、
+//     不计 attempts、不建号、不改密（archtest 有机械守卫）；
+//  2. 防爆破——预检本身是「码是否有效」的 oracle，先过独立的轻量 IP/邮箱
+//     限流（notePrecheck），杜绝攻击者无限试码；
+//  3. 非信任决策——只优化体验，正式 Verify() 会重做全部校验并抢消费；
+//     预检通过后到 Verify 之间 token 可失效（TOCTOU），由 Verify 兜底。
+func (s *EmailAuthService) PreCheckCode(ctx context.Context, rawEmail, code, ipHash string) error {
+	email, err := s.normalizeAndValidate(rawEmail)
+	if err != nil {
+		return err
+	}
+	if !validCode(code) {
+		return ErrInvalidCode
+	}
+	// oracle 必须限流；用独立实例，不与 Verify 的 attempts 计数串号。
+	if err := s.notePrecheck(email, ipHash); err != nil {
+		return err
+	}
+	token, err := s.store.FindLatestActiveTokenReadOnly(ctx, email)
+	if err != nil {
+		return ErrInvalidCode // 与 Verify 同口径：没有待验证流程 → 统一「码无效」
+	}
+	if !codeMatches(s.pepper, code, token.CodeHash) {
+		return ErrInvalidCode
+	}
+	now := s.now().UTC()
+	if token.Consumed || !now.Before(token.ExpiresAt) || token.Attempts >= 5 {
+		return ErrInvalidCode
+	}
+	return nil
+}
+
 // Verify 单事务原子消费验证码；register 建号、recover 重置密码。
 //
 // 顺序：入参收口 → argon2 散列密码（事务外，19MiB 不占写连接）→
 // 限流 → 单写事务（比码/查过期/查次数 → 抢消费 → 建号或改密）→
 // 提交后按 recover 撤销全部会话（内存动作）。
+//
+// 注意：/verify 命令在调用本方法前已做只读预检（PreCheckCode），但本方法
+// 仍独立重做全部校验，预检结果不被信任（TOCTOU 正确）。
 func (s *EmailAuthService) Verify(ctx context.Context, rawEmail, code, password, ipHash string) (EmailVerifyResult, error) {
 	email, err := s.normalizeAndValidate(rawEmail)
 	if err != nil {
@@ -224,6 +264,20 @@ func (s *EmailAuthService) noteAttempt(email, ipHash string) error {
 	}
 	if ipHash != "" {
 		return s.attempts.AllowScope("attempts:i:" + ipHash)
+	}
+	return nil
+}
+
+// notePrecheck 给预检做轻量防爆破，口径与 noteAttempt 一致（邮箱哈希 + IP
+// 双作用域），但用独立实例 + 更宽阈值：一次正常 verify 会各调预检与 Verify
+// 一次，分开计数才不会把 5 次上限挤成 2 次。作用域带 "precheck:" 前缀，
+// 与 attempts / cooldown / hourly 完全隔离。
+func (s *EmailAuthService) notePrecheck(email, ipHash string) error {
+	if err := s.precheck.AllowScope("precheck:e:" + emailScopeHash(email)); err != nil {
+		return err
+	}
+	if ipHash != "" {
+		return s.precheck.AllowScope("precheck:i:" + ipHash)
 	}
 	return nil
 }

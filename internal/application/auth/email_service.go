@@ -25,6 +25,7 @@ type EmailAuthService struct {
 	cooldown *RateLimiter // 60s 重发冷却
 	hourly   *RateLimiter // 每小时 5 封
 	attempts *RateLimiter // 5 次验证/登录尝试
+	precheck *RateLimiter // 预检防爆破：独立于 attempts，避免正常 verify 被双重计数
 
 	now      func() time.Time
 	pepper   []byte
@@ -32,11 +33,15 @@ type EmailAuthService struct {
 	codeLife time.Duration
 }
 
-// 三种窗口独立实例，复用 ratelimit.go 同一套状态机（§2.9）。
+// 四种窗口独立实例，复用 ratelimit.go 同一套状态机（§2.9）。
 var (
 	DefaultEmailCooldown = RateLimitConfig{MaxAttempts: 1, Window: 60 * time.Second, Lockout: 60 * time.Second, MaxKeys: 4096}
 	DefaultEmailHourly   = RateLimitConfig{MaxAttempts: 5, Window: time.Hour, Lockout: time.Hour, MaxKeys: 4096}
 	DefaultEmailAttempts = RateLimitConfig{MaxAttempts: 5, Window: time.Hour, Lockout: 15 * time.Minute, MaxKeys: 4096}
+	// 预检是「码是否有效」的 oracle，必须限流；但阈值比 Verify 宽，
+	// 让写错一两次码的正常用户不会在收密码前就被锁住，也不与 Verify 的
+	// attempts 计数串号（一次正常 verify = 预检 1 次 + Verify 1 次）。
+	DefaultEmailPrecheck = RateLimitConfig{MaxAttempts: 20, Window: time.Hour, Lockout: 15 * time.Minute, MaxKeys: 4096}
 )
 
 const DefaultEmailCodeTTL = 10 * time.Minute
@@ -83,6 +88,15 @@ func WithEmailLimiters(cooldown, hourly, attempts *RateLimiter) EmailServiceOpti
 		}
 	}
 }
+
+// WithEmailPrecheckLimiter 注入预检专用限流器（测试可注入假时钟）；nil 忽略。
+func WithEmailPrecheckLimiter(precheck *RateLimiter) EmailServiceOption {
+	return func(s *EmailAuthService) {
+		if precheck != nil {
+			s.precheck = precheck
+		}
+	}
+}
 func WithEmailCodeTTL(d time.Duration) EmailServiceOption {
 	return func(s *EmailAuthService) {
 		if d > 0 {
@@ -105,6 +119,7 @@ func NewEmailAuthService(store EmailStore, sender EmailSender, revoker UserSessi
 		cooldown: NewRateLimiter(WithRateLimitConfig(DefaultEmailCooldown)),
 		hourly:   NewRateLimiter(WithRateLimitConfig(DefaultEmailHourly)),
 		attempts: NewRateLimiter(WithRateLimitConfig(DefaultEmailAttempts)),
+		precheck: NewRateLimiter(WithRateLimitConfig(DefaultEmailPrecheck)),
 		now:      time.Now,
 		pepper:   pepper,
 		newCode:  generateCode,

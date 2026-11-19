@@ -36,6 +36,8 @@ type cmdMemStore struct {
 	creds      map[int64]string
 	nextID     int64
 	committed  bool
+	reads      int // 只读端口调用计数，供「预检不写库」断言
+	writes     int // 写事务调用计数
 }
 
 func newCmdMemStore() *cmdMemStore {
@@ -43,6 +45,7 @@ func newCmdMemStore() *cmdMemStore {
 }
 
 func (s *cmdMemStore) Write(_ context.Context, fn func(auth.EmailWriteTx) error) error {
+	s.writes++
 	s.committed = false
 	if err := fn(&cmdMemTx{s: s}); err != nil {
 		return err
@@ -86,9 +89,11 @@ func (t *cmdMemTx) InsertEmailToken(_ context.Context, n auth.NewEmailToken) (in
 	})
 	return id, nil
 }
-func (t *cmdMemTx) FindLatestActiveToken(_ context.Context, email string) (auth.EmailTokenView, error) {
-	for i := len(t.s.tokens) - 1; i >= 0; i-- {
-		tok := t.s.tokens[i]
+
+// cmdLatestActiveToken 与写事务里的 FindLatestActiveToken 共用投影逻辑。
+func cmdLatestActiveToken(tokens []*cmdMemToken, email string) (auth.EmailTokenView, error) {
+	for i := len(tokens) - 1; i >= 0; i-- {
+		tok := tokens[i]
 		if tok.email == email && !tok.consumed {
 			return auth.EmailTokenView{
 				ID: tok.id, Email: tok.email, CodeHash: tok.codeHash,
@@ -97,6 +102,16 @@ func (t *cmdMemTx) FindLatestActiveToken(_ context.Context, email string) (auth.
 		}
 	}
 	return auth.EmailTokenView{}, auth.ErrNoPendingToken
+}
+
+// FindLatestActiveTokenReadOnly 走读池语义：只记 reads，不碰 committed/writes。
+func (s *cmdMemStore) FindLatestActiveTokenReadOnly(_ context.Context, email string) (auth.EmailTokenView, error) {
+	s.reads++
+	return cmdLatestActiveToken(s.tokens, email)
+}
+
+func (t *cmdMemTx) FindLatestActiveToken(_ context.Context, email string) (auth.EmailTokenView, error) {
+	return cmdLatestActiveToken(t.s.tokens, email)
 }
 func (t *cmdMemTx) ConsumeEmailToken(_ context.Context, id int64, _ time.Time) error {
 	for _, tok := range t.s.tokens {

@@ -17,8 +17,9 @@ import (
 // local_credentials / email_tokens 四张表均已在 0001_init.sql 建好，无新迁移。
 // 本文件绝不触发网络发信——那是 application 在事务提交后的职责。
 var (
-	_ auth.EmailStore   = (*EmailRepos)(nil)
-	_ auth.EmailWriteTx = (*sqlEmailTx)(nil)
+	_ auth.EmailStore       = (*EmailRepos)(nil)
+	_ auth.EmailTokenReader = (*EmailRepos)(nil)
+	_ auth.EmailWriteTx     = (*sqlEmailTx)(nil)
 )
 
 type EmailRepos struct {
@@ -86,14 +87,21 @@ func (w *sqlEmailTx) InsertEmailToken(ctx context.Context, t auth.NewEmailToken)
 	return id, nil
 }
 
-// FindLatestActiveToken 取最近一条未消费的 register/recover token。
+// rowQuerier 是 QueryRowContext 的最小抽象；*Pools（读池）与 *sql.Tx（写事务）
+// 都实现它。预检与正式 Verify 共用下面同一条查询，杜绝两处口径漂移。
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// findLatestActiveToken 取最近一条未消费的 register/recover token。
 // verify 用途（绑定新邮箱）本里程碑未启用，不进入候选集。
-func (w *sqlEmailTx) FindLatestActiveToken(ctx context.Context, email string) (auth.EmailTokenView, error) {
+// 纯 SELECT：调用方无论是读池还是写事务都不产生任何写入。
+func findLatestActiveToken(ctx context.Context, q rowQuerier, email string) (auth.EmailTokenView, error) {
 	var (
 		view      auth.EmailTokenView
 		expiresAt int64
 	)
-	err := w.tx.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT id, email, code_hash, purpose, expires_at, attempts
 		FROM email_tokens
 		WHERE lower(email) = lower(?) AND consumed_at IS NULL
@@ -108,6 +116,17 @@ func (w *sqlEmailTx) FindLatestActiveToken(ctx context.Context, email string) (a
 	}
 	view.ExpiresAt = time.Unix(expiresAt, 0).UTC()
 	return view, nil
+}
+
+// FindLatestActiveTokenReadOnly 是预检专用读池入口：与写事务里的
+// FindLatestActiveToken 共用同一条 SQL，但不占用唯一写连接、不写库。
+func (r *EmailRepos) FindLatestActiveTokenReadOnly(ctx context.Context, email string) (auth.EmailTokenView, error) {
+	return findLatestActiveToken(ctx, r.pools, email)
+}
+
+// FindLatestActiveToken 在写事务内取 token，供 Verify 抢消费前比对。
+func (w *sqlEmailTx) FindLatestActiveToken(ctx context.Context, email string) (auth.EmailTokenView, error) {
+	return findLatestActiveToken(ctx, w.tx, email)
 }
 
 // ConsumeEmailToken 条件更新抢消费：consumed_at IS NULL 保证并发只有一个成功。

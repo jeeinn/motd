@@ -222,3 +222,121 @@ func TestCodeHashGuardDetectsInjectedPlainColumn(t *testing.T) {
 		t.Fatalf("code_hash 列必须被接受: plain=%v hash=%v", plain, hash)
 	}
 }
+
+// ---- 预检只读（v0.3.1）----
+
+// /verify 收密码前的 PreCheckCode 只优化体验，不得写库：一旦它消费 token
+// 或计 attempts，就会与正式 Verify 重复扣减，甚至被当成信任决策。
+// 这里用 AST 定位 PreCheckCode 函数体，扫描其中的写库入口调用；带负向注入，
+// 证明守卫不是空转。
+
+var precheckWriteMethods = map[string]bool{
+	"Write": true, "Submit": true, // 事务入口
+	"InsertEmailToken": true, "ConsumeEmailToken": true, "NoteEmailTokenAttempt": true,
+	"UpsertLocalCredential": true, "InsertUser": true, "InsertIdentity": true,
+}
+
+type precheckWriteViolation struct {
+	file string
+	line int
+	call string
+}
+
+// checkPreCheckNoWrite 返回 (违规列表, 是否找到 PreCheckCode, 解析错误)。
+func checkPreCheckNoWrite(path string) ([]precheckWriteViolation, bool, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	found := false
+	var out []precheckWriteViolation
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "PreCheckCode" || fn.Body == nil {
+			continue
+		}
+		found = true
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if precheckWriteMethods[sel.Sel.Name] {
+				pos := fset.Position(call.Pos())
+				out = append(out, precheckWriteViolation{file: pos.Filename, line: pos.Line, call: sel.Sel.Name})
+			}
+			return true
+		})
+	}
+	return out, found, nil
+}
+
+func TestPreCheckCodeNeverWritesToStore(t *testing.T) {
+	root := findModuleRoot(t)
+	files, err := goFilesIn(root, filepath.Join("internal", "application", "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, path := range files {
+		vs, found, err := checkPreCheckNoWrite(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			continue
+		}
+		checked++
+		for _, v := range vs {
+			t.Errorf("预检调用了写库入口 %s: %s:%d", v.call, v.file, v.line)
+		}
+	}
+	if checked != 1 {
+		t.Fatalf("应恰好扫到 1 个 PreCheckCode 实现，实际 %d（守卫可能漏扫）", checked)
+	}
+}
+
+func TestPreCheckWriteGuardDetectsInjectedViolation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.go")
+	src := `package bad
+
+func (s *EmailAuthService) PreCheckCode(ctx context.Context) error {
+	return s.store.Write(ctx, func(tx EmailWriteTx) error { return nil })
+}
+`
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vs, found, err := checkPreCheckNoWrite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("注入的源文件里应能定位到 PreCheckCode")
+	}
+	if len(vs) != 1 || vs[0].call != "Write" {
+		t.Fatalf("注入的 Write-in-PreCheck 必须被检出 1 处，实际 %+v", vs)
+	}
+	// 空实现不得被误判为违规，否则守卫会在正常代码上假红。
+	good := filepath.Join(dir, "good.go")
+	srcOK := `package good
+
+func (s *EmailAuthService) PreCheckCode(ctx context.Context) error {
+	_, err := s.store.FindLatestActiveTokenReadOnly(ctx, "a@b.com")
+	return err
+}
+`
+	if err := os.WriteFile(good, []byte(srcOK), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vsOK, foundOK, err := checkPreCheckNoWrite(good)
+	if err != nil || !foundOK || len(vsOK) != 0 {
+		t.Fatalf("只读实现应零违规: vs=%+v found=%v err=%v", vsOK, foundOK, err)
+	}
+}

@@ -33,6 +33,7 @@ type fakeEmailStore struct {
 	creds              map[int64]string
 	nextID             int64
 	writes             int
+	reads              int // 只读端口调用计数，供「预检不写库」断言
 	lastWriteCommitted bool
 }
 
@@ -126,9 +127,11 @@ func (t *fakeEmailTx) InsertEmailToken(_ context.Context, n NewEmailToken) (int6
 	return t.s.nextID, nil
 }
 
-func (t *fakeEmailTx) FindLatestActiveToken(_ context.Context, email string) (EmailTokenView, error) {
-	for i := len(t.s.tokens) - 1; i >= 0; i-- {
-		tok := t.s.tokens[i]
+// fakeLatestActiveToken 与写事务里的 FindLatestActiveToken 共用同一投影逻辑，
+// 保证预检读池与正式 Verify 看到的是同一口径。
+func fakeLatestActiveToken(tokens []*fakeEmailToken, email string) (EmailTokenView, error) {
+	for i := len(tokens) - 1; i >= 0; i-- {
+		tok := tokens[i]
 		if tok.email == email && !tok.consumed && (tok.purpose == EmailPurposeRegister || tok.purpose == EmailPurposeRecover) {
 			return EmailTokenView{
 				ID: tok.id, Email: tok.email, CodeHash: tok.codeHash,
@@ -137,6 +140,18 @@ func (t *fakeEmailTx) FindLatestActiveToken(_ context.Context, email string) (Em
 		}
 	}
 	return EmailTokenView{}, ErrNoPendingToken
+}
+
+// FindLatestActiveTokenReadOnly 走「读池」：只记 reads，绝不递增 writes。
+func (s *fakeEmailStore) FindLatestActiveTokenReadOnly(_ context.Context, email string) (EmailTokenView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	return fakeLatestActiveToken(s.tokens, email)
+}
+
+func (t *fakeEmailTx) FindLatestActiveToken(_ context.Context, email string) (EmailTokenView, error) {
+	return fakeLatestActiveToken(t.s.tokens, email)
 }
 
 func (t *fakeEmailTx) ConsumeEmailToken(_ context.Context, id int64, _ time.Time) error {

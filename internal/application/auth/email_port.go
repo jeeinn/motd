@@ -106,9 +106,20 @@ type EmailUnitOfWork interface {
 	Write(ctx context.Context, fn func(EmailWriteTx) error) error
 }
 
+// EmailTokenReader 是 /verify 预检专用的只读端口：只暴露读方法，结构上拿不到
+// 任何写库能力（入库写必须经 EmailUnitOfWork.Write 的写事务）。
+// 与 EmailWriteTx.FindLatestActiveToken 同口径，但走读池、无副作用。
+type EmailTokenReader interface {
+	// FindLatestActiveTokenReadOnly 取该邮箱最近一条未消费的 register/recover token；
+	// 未命中返回 ErrNoPendingToken。不消费、不计尝试、不建号。
+	FindLatestActiveTokenReadOnly(ctx context.Context, email string) (EmailTokenView, error)
+}
+
 // EmailStore 是装配给 EmailAuthService 的完整端口集合。
 // FindCredentialByEmail 走读池，供 /login email 在事务外做 argon2 校验。
+// FindLatestActiveTokenReadOnly 走读池，供 /verify 收密码前的只读预检使用。
 type EmailStore interface {
 	EmailUnitOfWork
+	EmailTokenReader
 	FindCredentialByEmail(ctx context.Context, email string) (CredentialView, error)
 }

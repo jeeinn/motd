@@ -380,7 +380,8 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 	case actionCommandStart:
 		// 提示语若说「以 / 开头」，用户补打一个 / 会得到 //login → 未知命令
 		// （本机实测反馈）。具体措辞见 commandEntryHint 的回归测试。
-		_, _ = io.WriteString(sess, commandEntryHint)
+		// v0.3.1：每会话只打一次，后续进入命令输入静默，避免反复滚动。
+		pc.maybeShowCommandEntryHint(sess)
 		// 提示换行后再回显预置的 '/'，保证用户输入行连续（ADR-026）。
 		pc.echo.preloadedSlash()
 	case actionPasteNotice:

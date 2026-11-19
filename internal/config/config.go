@@ -47,6 +47,9 @@ type Config struct {
 	LogLevel string
 	// LogFormat text / json。
 	LogFormat string
+	// DotEnvDisabled 表示启动时是否关闭 .env 自动加载（逃生舱）。
+	// 只读展示用：真正的开关在进程入口 LoadDotEnv 里、在 Load 之前生效。
+	DotEnvDisabled bool
 }
 
 // 认证安全默认值的唯一事实来源。application/auth 侧有一份等价兜底，
@@ -80,6 +83,7 @@ func Load() (Config, error) {
 		AuditFlushInterval:   DurationEnv("MOTD_AUDIT_FLUSH_INTERVAL", DefaultAuditFlushInterval),
 		LogLevel:             strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
 		LogFormat:            strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
+		DotEnvDisabled:       dotEnvDisabled(),
 	}
 
 	// 邮箱配置显式 resolve：启用时逐项校验、缺哪项报哪项，不做静默兜底；

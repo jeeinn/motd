@@ -288,8 +288,15 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 			return
 		}
 		pc.invalidateScreen()
-		recover := pc.pendingPurpose == auth.EmailPurposeRecover
 		pc.clearEmailFlow() // 同上：新命令取代旧流程时先复位
+		// v0.3.1：收密码前先做只读预检。原先 FindLatestActiveToken 排在
+		// hashPassword 之后，无效码也要白输两遍 19MiB argon2 才报错。
+		// 预检只优化体验、不是信任决策；正式 Verify 仍独立重做全部校验（TOCTOU 正确）。
+		if err := h.email.PreCheckCode(ctx, pc.pendingEmail, inv.Args[0], sess.RemoteIPHash()); err != nil {
+			writeEmailError(sess, err) // ErrInvalidCode → emailTextBadCode；限流 → 等待秒数
+			return
+		}
+		recover := pc.pendingPurpose == auth.EmailPurposeRecover
 		pc.emailFlow = newEmailFlow(emailFlowVerify, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, inv.Args[0], recover)
 	case "resend":
 		if pc.pendingEmail == "" {

@@ -88,6 +88,56 @@ func TestEmailReposTokenLifecycle(t *testing.T) {
 	}
 }
 
+// v0.3.1：预检专用的只读入口走读池，不消费、不计数，且与写事务同口径。
+func TestEmailReposReadOnlyTokenPeek(t *testing.T) {
+	ctx := context.Background()
+	pools, _, repos := newEmailReposTest(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	var tokenID int64
+	if err := repos.Write(ctx, func(tx auth.EmailWriteTx) error {
+		var err error
+		tokenID, err = tx.InsertEmailToken(ctx, auth.NewEmailToken{
+			Email: "peek@example.com", CodeHash: "peek-hash", Purpose: auth.EmailPurposeRecover,
+			ExpiresAt: now.Add(10 * time.Minute), CreatedAt: now,
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 反复预检都不改变库状态。
+	for i := 0; i < 3; i++ {
+		got, err := repos.FindLatestActiveTokenReadOnly(ctx, "PEEK@example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ID != tokenID || got.CodeHash != "peek-hash" || got.Purpose != auth.EmailPurposeRecover || got.Attempts != 0 || got.Consumed {
+			t.Fatalf("只读投影不对: %+v", got)
+		}
+	}
+	var attempts, consumed int
+	if err := pools.QueryRowContext(ctx, `SELECT attempts, CASE WHEN consumed_at IS NULL THEN 0 ELSE 1 END FROM email_tokens WHERE id = ?`, tokenID).Scan(&attempts, &consumed); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || consumed != 0 {
+		t.Fatalf("只读预检不得改库: attempts=%d consumed=%d", attempts, consumed)
+	}
+
+	// 与写事务里的 FindLatestActiveToken 看到同一个 token（共用水准）。
+	if err := repos.Write(ctx, func(tx auth.EmailWriteTx) error {
+		got, err := tx.FindLatestActiveToken(ctx, "peek@example.com")
+		if err != nil {
+			return err
+		}
+		if got.ID != tokenID {
+			return fmt.Errorf("读池与写事务口径不一致: %d vs %d", got.ID, tokenID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // 并发抢消费：N 个写事务同时 UPDATE 同一行，只有 1 个 RowsAffected==1。
 func TestEmailReposConcurrentConsumeHasSingleWinner(t *testing.T) {
 	ctx := context.Background()

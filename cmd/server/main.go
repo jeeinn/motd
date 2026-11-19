@@ -38,6 +38,11 @@ func main() {
 }
 
 func run() error {
+	// .env 只填空缺，必须早于 config.Load()；返回值只有文件路径，不含任何键值。
+	dotenvSource, err := config.LoadDotEnv()
+	if err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -45,6 +50,12 @@ func run() error {
 
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
+	// 只打来源路径或 env_only，绝不打印键、值或授权码（ADR-021）。
+	if dotenvSource == "" {
+		logger.Info("配置来源 env_only")
+	} else {
+		logger.Info("配置来源", "file", dotenvSource)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

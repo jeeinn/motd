@@ -77,6 +77,9 @@ type pageController struct {
 	pendingEmail   string
 	pendingPurpose string
 	emailFlow      *emailFlow
+	// v0.3.1：命令输入提示每会话只打一次。pageController 由 Serve 每连接新建，
+	// 所以重连是新会话、会重新打印一次；绝不放到进程级 inputHandler 上。
+	entryHintShown bool
 }
 
 type editorStage uint8
@@ -186,6 +189,17 @@ func (p *pageController) render(sess pageSession) error {
 
 // invalidateScreen 由调用方在输出任何非屏幕文本前调用（ADR-027）。
 func (p *pageController) invalidateScreen() { p.screenLines = 0 }
+
+// maybeShowCommandEntryHint 只在本次会话首次按 / 进入命令输入时打印提示，
+// 之后静默。实测一次会话里 help/top/verify/recover 后各刷一次，滚动严重。
+// out 用 io.Writer 是为了能在没有真实 SSH 会话的单元测试里回归。
+func (p *pageController) maybeShowCommandEntryHint(out io.Writer) {
+	if p.entryHintShown {
+		return
+	}
+	p.entryHintShown = true
+	_, _ = io.WriteString(out, commandEntryHint)
+}
 
 // writeFixed 只输出服务端编译期常量，走 RenderSystem 路径。
 func (p *pageController) writeFixed(sess pageSession, text string) error {
