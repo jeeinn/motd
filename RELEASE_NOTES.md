@@ -1,42 +1,50 @@
-# Release Notes — v0.1.0
+# Release Notes — v0.2.0
 
 **发布日期**：2026-11-19
-**Git tag**：[`v0.1.0`](https://github.com/jeeinn/motd/releases/tag/v0.1.0)
+**Git tag**：[`v0.2.0`](https://github.com/jeeinn/motd/releases/tag/v0.2.0)
 **Module**：`github.com/jeeinn/motd`
 
-> 首个 GitHub 开源版本。此前项目在本地已可用，本次发布不改变功能，仅将其以语义化版本正式公开。
+> 第二阶段发布。在 v0.1.0 的可用闭环之上补齐认证安全、论坛互动与编辑体验。迁移扩展到 0007，测试从 456 增至 632。
 
 ## 亮点
 
-- **命令行论坛，SSH 即入口**：`ssh -p 2222 localhost` 连入，用键盘和斜杠命令浏览版块 / 主题、发帖、回复；仅公钥认证，禁 root。
-- **完整业务闭环**：5 个版块种子、keyset 分页、软删除过滤、访客只读、GitHub Device Flow 登录与公钥绑定、断开重连凭公钥恢复会话。
-- **四页终端界面**：版块 / 主题 / 详情 / 编辑，原地重绘导航，分层安全渲染。
-- **运维就绪**：`/healthz` 探活、配置 / 日志 / 优雅停机、SQLite 版本化迁移、写入队列、备份恢复工具与演练脚本。
-- **质量基线**：全量 `go build` / `go vet` / `go test -count=1 ./...` 通过，456 个测试函数，含真实 SSH 客户端闭环与带数据重启演练。
+- **论坛互动**：投票 `/vote up|down|rm`（幂等、改票按差值计分）、全文搜索 `/search`（FTS5 trigram，中文短词回退 LIKE，特殊字符按字面量）。投票只改分数、不推进主题活跃度，不影响排序。
+- **认证安全**：`auth_events` 审计（溢出 fail-closed）、按 IP/用户/邮箱的内存限流、`/logout` 撤销该账号全部在线会话、`/keys <指纹>` 公钥详情（防指纹枚举）。
+- **多行正文**：Enter 换行，单独一行 `.` 或 Ctrl-D 提交；粘贴整块进正文、内部换行不误提交；标题仍 Enter 确认。
+- **登录呈现**：`/login` 发起屏改为论坛同款 Screen，状态栏与版块页一致。
+- **数据完整性**：主题软删（`threads.status`）、回复父子同 thread 约束、领域事件 outbox（事务内落库、提交后投递、崩溃重扫）。
+- **运维**：设备码过期清理、公钥 `last_used_at` 节流、`motdctl fts-rebuild`、`.env.sample` 全量配置示例（17 项中文注释）。
 
 ## 安装与运行
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.1.0
+go install github.com/jeeinn/motd/cmd/server@v0.2.0
 # 或从源码构建
 go build -o motd ./cmd/server && ./motd
 ```
 
-启动后：探活 `curl -s http://127.0.0.1:8080/healthz`，连入 `ssh -p 2222 localhost`。首次启动自动在 `./data` 建库并执行迁移。完整配置见 README。
+启动后：探活 `curl -s http://127.0.0.1:8080/healthz`，连入 `ssh -p 2222 localhost`。首次启动自动在 `./data` 建库并执行迁移。
+
+**升级提示**：从 v0.1.0 的数据库启动会自动应用 0004~0007 四个迁移（只向前）。升级前请先备份 `data/motd.db`。从备份恢复后，必须执行 `motdctl fts-rebuild --db <path>` 重建全文索引，否则搜索返回空。
+
+配置见 [README](README.md) 与 [`.env.sample`](.env.sample)。
 
 ## 变更明细
 
-见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.1.0]` 段落。
+见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.2.0]` 段落。
 
 ## 已知问题与限制
 
-- 真实 GitHub Device Flow 授权链路已修但因连接心跳缺陷需重启后再复测一次完整闭环；VPS 上的凭据注入与出站放行尚未验证。
-- 认证类限流 / 安全日志（P1）、100 连接压测（P3）、systemd 部署附件、浏览器 TUI 与搜索 / 投票等 P1 能力暂未包含。
-- 未做 `kill -9` 硬杀演练与 `-race` 检测。
+- **邮箱注册 / 登录 / 密码找回**独立为下一阶段，本版本不含；`.env.sample` 已预留其变量名（当前不生效）。
+- 限流计数纯内存：进程重启清零、多实例不共享。
+- Ctrl+Enter 在通用 SSH 终端字节级不可区分，本版本不做提交键；正文提交用 `.` 或 Ctrl-D，Ctrl+Enter 增强留待后续。
+- `kill -9` + WAL 恢复演练已在隔离环境通过；`-race` 因本机无 CGO/gcc 未启用，不声称 race-free。
+- 100 连接压测、目标 1000 在线（P3）尚未验证；systemd 部署附件与浏览器 TUI 未包含。
+- 编辑器退格不跨行回到上一行；`label` 字段无设置入口、恒为空。
 
 ## 破坏性变更
 
-无。这是首个版本。
+无公共接口破坏性变更。内部行为变化：投票分数走独立路径、恢复后 FTS 索引需手动重建。
 
 ## 致谢
 

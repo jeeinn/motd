@@ -7,7 +7,7 @@
 
 SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览、发帖、回复；所有交互都在终端内完成，无需浏览器。
 
-- 版本：`v0.1.0`（首个公开版本，2026-11-19）
+- 版本：`v0.2.0`（2026-11-19）
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
@@ -15,18 +15,20 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 
 - SSH 入口：仅公钥认证，禁 root，默认端口 `:2222`
 - 论坛核心：5 个版块、keyset 分页、软删除过滤、访客只读、发帖与回复
+- 互动：投票（`/vote up|down|rm`，幂等）、全文搜索（`/search`，FTS5 + 中文短词回退）
 - 登录：GitHub Device Flow，公钥绑定与软吊销，断线重连凭公钥恢复登录态
-- 终端界面：版块 / 主题 / 详情 / 编辑四页，原地重绘导航，分层安全渲染
+- 认证安全：认证限流与审计事件、`/logout` 撤销该账号全部会话、`/keys <指纹>` 公钥详情
+- 终端界面：版块 / 主题 / 详情 / 编辑四页，正文支持多行（Enter 换行、`.` 或 Ctrl-D 提交）
 - 运维：`/healthz` 探活、配置 / 日志 / 优雅停机、SQLite 版本化迁移、写入队列、备份恢复
 
-详细变更见 [CHANGELOG.md](CHANGELOG.md)，首个版本说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+详细变更见 [CHANGELOG.md](CHANGELOG.md)，当前版本说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。配置见 [`.env.sample`](.env.sample)。
 
 ## 快速开始
 
 安装（Go 1.26.3+）：
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.1.0   # 生成 server 二进制
+go install github.com/jeeinn/motd/cmd/server@v0.2.0   # 生成 server 二进制
 ```
 
 或从源码构建并启动（Windows 下把 `-o motd` 改为 `-o motd.exe`）：
@@ -60,8 +62,9 @@ ssh -p 2222 localhost
 | `MOTD_SSH_MAX_CONNS` | `100` | SSH 最大并发连接数 |
 | `MOTD_SSH_IDLE_TIMEOUT` | `10m` | 会话空闲超时 |
 | `MOTD_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App 的 `client_id`；未设置时 `/login` 返回明确提示，不 panic、日志不回显值 |
+| `MOTD_AUTH_LIMIT_*` / `MOTD_AUDIT_*` | 见示例 | 认证限流与审计参数（P1 新增），共 6 项 |
 
-凭证通过环境变量注入，不要提交 `.env` 或密钥文件（`.gitignore` 已覆盖）。
+全部 17 个环境变量（含脚本用的 `MOTDCTL_BIN`）及其默认值见 [`.env.sample`](.env.sample)。复制为 `.env` 后按需修改：`cp .env.sample .env && chmod 600 .env`。凭证通过环境变量注入，不要提交 `.env` 或密钥文件（`.gitignore` 已覆盖）。
 
 ## 开发
 
@@ -81,7 +84,11 @@ go build -o bin/motdctl ./cmd/motdctl
 scripts/backup.sh                                   # 生成备份 + sha256
 scripts/restore.sh --verify <backup-file>            # 只校验
 scripts/restore.sh <backup-file> <target-path>      # 恢复（目标必须不存在）
+go build -o bin/motdctl ./cmd/motdctl               # 构建管理工具
+bin/motdctl fts-rebuild --db <target-path>          # 恢复后重建全文索引（必须执行）
 ```
+
+从备份恢复后须显式执行 `fts-rebuild`，否则搜索返回空（索引不随备份自动重建）。
 
 ## 目录结构
 

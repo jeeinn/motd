@@ -15,6 +15,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.2.0] - 2026-11-19
+
+第二阶段发布。补齐认证安全、论坛互动与编辑体验，迁移扩展到 0007，测试从 456 增至 632。
+
+### Added
+
+- **论坛互动**：投票/点赞（`/vote up|down|rm`，幂等、改票按差值计分）、全文搜索（`/search`，FTS5 trigram + 短词 LIKE 回退 + 特殊字符字面量处理）、搜索结果页（`n/p` 翻页、Enter 打开主题）。
+- **认证安全**：`auth_events` 审计（有界缓冲 + 批量落库 + 溢出 fail-closed）、按 IP/用户/邮箱的认证限流（纯内存滑动窗口）、`/logout` 注销并撤销该账号全部在线会话、`/keys <指纹>` 公钥详情。
+- **多行编辑**：正文 Enter 换行、单独一行 `.` 或 Ctrl-D 提交；粘贴整块进正文、内部换行不误提交；标题仍是 Enter 确认。
+- **运维**：`device_auth_states` 过期清理、SSH 公钥 `last_used_at` 节流更新、`motdctl fts-rebuild` 恢复后重建索引、`.env.sample` 全量环境变量示例（17 项，带中文注释）。
+- **数据完整性前置**：`threads.status` 主题软删、回复父子同 thread 约束、领域事件 outbox（事务内落库、提交后投递、崩溃可重扫）。
+- 新增迁移 0004~0007；全量测试 632 个函数。
+
+### Changed
+
+- `/login` 发起屏改为论坛同款 Screen 与共享渲染器，状态栏与版块页一致；渐进状态行仍为固定文本。
+- `TouchThread` 仅供发帖/回复；投票改用独立的 `AdjustScore`，不再影响主题排序（`last_reply_at`）。
+- 恢复备份后 FTS 索引不再自动重建，需显式执行 `motdctl fts-rebuild`。
+
+### Security
+
+- 投票分数与主题活跃度正交，评价行为不再污染排序。
+- 审计缓冲溢出 fail-closed：审计缺失期间拒绝认证动作，不做 fail-open 放行。
+- `/keys` 详情将 userID 纳入查询条件，跨用户与不存在返回同一错误，防止指纹枚举。
+- FTS 检索的 MATCH 串参数化并转义，用户输入的 `*`/`"`/`%`/`_` 按字面量处理。
+
 ## [0.1.0] - 2026-11-19
 
 首个开源版本。将原本本地可用的 MVP 正式以 `v0.1.0` 公开，代码与功能未做破坏性调整。
@@ -39,5 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jeeinn/motd/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jeeinn/motd/releases/tag/v0.1.0
