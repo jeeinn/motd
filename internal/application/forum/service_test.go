@@ -370,6 +370,43 @@ func (x *fakeTx) PostThreadID(_ context.Context, postID int64) (int64, error) {
 	return p.ThreadID, nil
 }
 
+// 删除路径的 fake 语义：thread.Thread 没有 Status 字段（本轮不迁移），
+// 因此把主题移出 map 来等价「对公开读取不可见」；posts 保留原行，只改 Status，
+// 这样「回复行仍在库」在应用层测试里也能被断言。真实 SQL 行为由 sqlite 集成测试守。
+func (x *fakeTx) ThreadOwner(_ context.Context, threadID int64) (int64, error) {
+	t, ok := x.state.threads[threadID]
+	if !ok {
+		return 0, ErrNotFound
+	}
+	return t.UserID, nil
+}
+
+func (x *fakeTx) PostOwner(_ context.Context, postID int64) (int64, error) {
+	p, ok := x.state.posts[postID]
+	if !ok || p.Status != post.StatusNormal {
+		return 0, ErrNotFound
+	}
+	return p.UserID, nil
+}
+
+func (x *fakeTx) SoftDeleteThread(_ context.Context, threadID int64) error {
+	if _, ok := x.state.threads[threadID]; !ok {
+		return ErrNotFound
+	}
+	delete(x.state.threads, threadID)
+	return nil
+}
+
+func (x *fakeTx) SoftDeletePost(_ context.Context, postID int64) error {
+	p, ok := x.state.posts[postID]
+	if !ok || p.Status != post.StatusNormal {
+		return ErrNotFound
+	}
+	p.Status = post.StatusDeleted
+	x.state.posts[postID] = p
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // 测试辅助
 // ---------------------------------------------------------------------------

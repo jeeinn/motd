@@ -157,3 +157,42 @@ func TestRenderScreenDetailShowsBodyAndReplies(t *testing.T) {
 	}
 	assertOnlySGR(t, out)
 }
+
+// v0.2.1：标题与正文之间必须有固定虚线，且不改动用户正文的任何一个字节。
+func TestRenderScreenDetailHasSeparatorBetweenTitleAndBody(t *testing.T) {
+	s := baseScreen(viewmodel.ScreenThreadDetail)
+	s.Detail = viewmodel.Detail{ID: 3, Title: "标题锚点", Body: "正文锚点"}
+	s.Rows = []viewmodel.Row{{Index: 1, ID: 9, Body: "回复锚点"}}
+	s.Selection.FocusedIndex = 1
+
+	out, err := RenderScreen(s, 80)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	// 固定文案只走 SGR 样式，不引入任何光标定位 / 清屏序列。
+	assertOnlySGR(t, out)
+
+	lines := strings.Split(stripSGR(out), "\n")
+	titleLine, sepLine, bodyLine := -1, -1, -1
+	for i, line := range lines {
+		switch line {
+		case "标题锚点":
+			titleLine = i
+		case "──":
+			if sepLine < 0 {
+				sepLine = i
+			}
+		case "正文锚点":
+			bodyLine = i
+		}
+	}
+	if titleLine < 0 || bodyLine < 0 {
+		t.Fatalf("标题或正文未作为独立行出现: %q", stripSGR(out))
+	}
+	if sepLine < 0 || !(titleLine < sepLine && sepLine < bodyLine) {
+		t.Fatalf("虚线必须位于标题与正文之间: %q", stripSGR(out))
+	}
+	if !strings.Contains(out, "回复锚点") {
+		t.Fatal("虚线插入不得吞掉下方回复行")
+	}
+}

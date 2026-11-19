@@ -51,6 +51,8 @@ var defaultCommands = []Command{
 	{Name: "open", Usage: "/open <id>", Summary: "打开指定主题", MinArgs: 1, MaxArgs: 1},
 	{Name: "new", Usage: "/new", Summary: "新建主题", MaxArgs: 0},
 	{Name: "reply", Usage: "/reply", Summary: "回复当前主题", MaxArgs: 0},
+	// v0.2.1：无参删当前主题，带一个 id 则删当前主题下的该条回复（仅作者）。
+	{Name: "delete", Usage: "/delete [id]", Summary: "删除当前主题 / 指定回复（仅作者）", MinArgs: 0, MaxArgs: 1},
 	// MinArgs=0 是刻意的：/login 不带参数时不落到通用「参数个数不符」，
 	// 而是进入 handle 的 provider 白名单分支，给出「仅支持 /login github」。
 	{Name: "login", Usage: "/login github", Summary: "GitHub Device Flow 登录", MinArgs: 0, MaxArgs: 1, Aliases: []string{"signin"}},

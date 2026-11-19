@@ -156,6 +156,15 @@ type WriteTx interface {
 	// PostThreadID 返回内容所属主题；内容不存在或不可见时返回 ErrNotFound。
 	// 投票目标是 post 时用它确定分数记到哪个 thread。
 	PostThreadID(ctx context.Context, postID int64) (int64, error)
+	// ThreadOwner 返回主题作者 ID。主题不存在或 status<>'active' 时返回 ErrNotFound，
+	// 让「取目标 + 判权 + 软删」落在同一事务快照内，不留 TOCTOU 窗口。
+	ThreadOwner(ctx context.Context, threadID int64) (int64, error)
+	// PostOwner 返回内容作者 ID。内容不存在或 status<>'normal' 时返回 ErrNotFound。
+	PostOwner(ctx context.Context, postID int64) (int64, error)
+	// SoftDeleteThread 只把 threads.status 置为 deleted：不物理删除、不级联回复。
+	SoftDeleteThread(ctx context.Context, threadID int64) error
+	// SoftDeletePost 只把 posts.status 置为 deleted：不物理删除、不级联。
+	SoftDeletePost(ctx context.Context, postID int64) error
 	// AppendOutbox 在业务写事务内追加一条领域事件（R12）。
 	// 必须与业务写同提交、同回滚；event_id 唯一，重复事件静默去重。
 	// 投递绝不在这里做——handler 只能在事务提交后由 Outbox 调度器调用。

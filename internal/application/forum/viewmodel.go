@@ -64,6 +64,12 @@ func NoticeFromError(err error) viewmodel.Notice {
 		n.Kind, n.Code = viewmodel.NoticeWarning, "forbidden"
 	case errors.Is(err, ErrNotFound):
 		n.Kind, n.Code = viewmodel.NoticeWarning, "not_found"
+	case errors.Is(err, ErrNotOwner):
+		n.Kind, n.Code = viewmodel.NoticeWarning, "not_owner"
+		// 哨兵错误必须有稳定的对外文案：写事务会把错误包成
+		// 「写入事务失败（不可重试）: ...」，直接 err.Error() 既暴露内部实现，
+		// 又破坏「仅作者可删除」的统一口径。
+		n.Message = ErrNotOwner.Error()
 	case errors.Is(err, ErrInvalidSort), errors.Is(err, ErrInvalidCursor),
 		errors.Is(err, ErrInvalidLimit), errors.Is(err, ErrInvalidTitle),
 		errors.Is(err, ErrInvalidBody), errors.Is(err, ErrInvalidVote),

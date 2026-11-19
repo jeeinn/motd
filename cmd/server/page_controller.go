@@ -406,11 +406,66 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.startComposer(sess, false)
 	case "vote":
 		return p.vote(ctx, sess, inv.Args[0])
+	case "delete":
+		return p.delete(ctx, sess, inv.Args)
 	case "search":
 		return p.showSearch(ctx, sess, strings.Join(inv.Args, " "), 1)
 	default:
 		return p.writeFixed(sess, "该命令暂未接入（按 ? 查看全部命令）")
 	}
+}
+
+// delete 的确切口径（v0.2.1）：
+//   - /delete        → 删除当前打开的主题；
+//   - /delete <id>   → 删除当前主题下 ID 为 <id> 的回复。
+//
+// 两者都要求当前处于主题详情页（目标明确、删后导航确定）。
+// id 严格按十进制正整数解析，与 /open 同款：不回显用户原文。
+// 非作者 / 访客 / 目标不存在统一由用例层给出「仅作者可删除」。
+func (p *pageController) delete(ctx context.Context, sess pageSession, args []string) error {
+	if p.service == nil {
+		return p.writeFixed(sess, "论坛服务尚未就绪")
+	}
+	if p.screen.Kind != viewmodel.ScreenThreadDetail || p.threadID <= 0 {
+		return p.writeFixed(sess, "请先打开一个主题再删除")
+	}
+
+	targetType, targetID := forum.DeleteThread, p.threadID
+	if len(args) > 0 {
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil || id <= 0 {
+			return p.writeFixed(sess, "ID 必须是正整数")
+		}
+		targetType, targetID = forum.DeletePost, id
+	}
+
+	res, err := p.service.Delete(ctx, p.deleteActor(ctx, sess), targetType, targetID)
+	if err != nil {
+		return p.fail(sess, err)
+	}
+	p.notice = viewmodel.Notice{Kind: viewmodel.NoticeSuccess, Code: "deleted", Message: "已删除"}
+	if res.TargetType == forum.DeleteThread {
+		// 主题已软删，回列表；node 上下文在 showDetail 时保持不变。
+		return p.showThreads(ctx, sess, p.nodeID, p.nodeSlug, p.cursor, p.offset)
+	}
+	return p.showDetail(ctx, sess, p.threadID)
+}
+
+// deleteActor 只提供所有权判定需要的 UserID：访客保持零值，由 canModify 统一拒绝。
+// 刻意不复用 p.actor（它给访客 ErrReadOnly），否则访客与非作者会得到两种提示，
+// 破坏「仅作者可删除」的防枚举口径。
+func (p *pageController) deleteActor(ctx context.Context, sess pageSession) forum.Actor {
+	principal := sess.Principal()
+	if !principal.IsUser() {
+		return forum.Actor{Guest: true}
+	}
+	a := forum.Actor{UserID: principal.UserID}
+	if p.users != nil {
+		if status, err := p.users.Status(ctx, principal.UserID); err == nil {
+			a.Status = status
+		}
+	}
+	return a
 }
 
 // ---------------------------------------------------------------------------

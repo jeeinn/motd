@@ -29,6 +29,8 @@ func normalizeSearchLimit(n int) int {
 //   - <3 码点 trigram 实测返回 0，改走 LIKE 并转义通配符。
 //
 // 两条 SQL 都 JOIN posts 过滤 status='normal'，并多取一条判断 hasMore。
+// v0.2.1 追加 JOIN threads 过滤 status='active'：作者软删主题时回复行按产品决策保留，
+// 若不连带过滤所属主题，已删主题的内容仍会被 /search 命中并泄漏。
 func (r *ForumRepos) SearchPosts(ctx context.Context, q forum.SearchQuery) ([]forum.SearchHit, bool, error) {
 	limit := normalizeSearchLimit(q.Limit)
 	offset := q.Offset
@@ -46,6 +48,7 @@ func (r *ForumRepos) SearchPosts(ctx context.Context, q forum.SearchQuery) ([]fo
 			SELECT p.id, p.thread_id, snippet(posts_fts, 0, '', '', '…', 8)
 			FROM posts_fts
 			JOIN posts p ON p.id = posts_fts.rowid AND p.status = 'normal'
+			JOIN threads t ON t.id = p.thread_id AND t.status = 'active'
 			WHERE posts_fts MATCH ?
 			ORDER BY rank
 			LIMIT ? OFFSET ?`,
@@ -53,10 +56,11 @@ func (r *ForumRepos) SearchPosts(ctx context.Context, q forum.SearchQuery) ([]fo
 	} else {
 		// 短查询回退 LIKE：pattern 已转义 % / _ / \，不会退化成通配扫描。
 		rows, err = r.pools.QueryContext(ctx, `
-			SELECT id, thread_id, body_md
-			FROM posts
-			WHERE status = 'normal' AND body_md LIKE ? ESCAPE '\'
-			ORDER BY id DESC
+			SELECT p.id, p.thread_id, p.body_md
+			FROM posts p
+			JOIN threads t ON t.id = p.thread_id AND t.status = 'active'
+			WHERE p.status = 'normal' AND p.body_md LIKE ? ESCAPE '\'
+			ORDER BY p.id DESC
 			LIMIT ? OFFSET ?`,
 			"%"+forum.EscapeLikePattern(q.Query)+"%", limit+1, offset)
 	}

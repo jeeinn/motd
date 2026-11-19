@@ -25,6 +25,11 @@ var (
 	ErrInvalidVoteTarget = errors.New("投票目标类型不合法")
 	// ErrInvalidQuery 表示搜索词为空或分页参数越界。
 	ErrInvalidQuery = errors.New("搜索参数不合法")
+	// ErrNotOwner 是删除权限的统一对外口径：非作者、访客、目标不存在或已删，
+	// 一律返回它，避免通过「能否删除」探测内容的存在性与状态（v0.2.1）。
+	ErrNotOwner = errors.New("仅作者可删除")
+	// ErrInvalidDeleteTarget 表示删除目标类型不是 thread/post（内部调用错误，非用户文本）。
+	ErrInvalidDeleteTarget = errors.New("删除目标类型不合法")
 )
 
 // RateLimitError 表示命中发帖限流（Q6：每人 60 秒 1 帖、每小时 10 帖）。

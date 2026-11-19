@@ -52,6 +52,12 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 			return "", err
 		}
 		b.WriteByte('\n')
+		// v0.2.1：标题与正文之间的固定虚线，与下方「── 回复 ──」上下对称。
+		// 服务端固定文案走 RenderSystem：零用户内容、零光标控制，不碰 ADR-019 / ADR-027。
+		if err := sys(&b, "──", safe.StyleDim); err != nil {
+			return "", err
+		}
+		b.WriteByte('\n')
 		if s.Detail.Body != "" {
 			if err := ext(&b, s.Detail.Body, width); err != nil {
 				return "", err
