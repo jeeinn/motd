@@ -550,3 +550,53 @@
   - 页长锁 20、摘要 ≤240 字节，适配 1 Mbps 约束。
 - 验证：隔离库实测 v6→v7 迁移在 4 条历史帖上回填 `posts_fts=4` / `posts_fts_indexed=4`、三触发器建成；回滚到备份后 schema=6、FTS 表消失、数据完整。`archtest/search_test.go` 负向注入（拼接 MATCH / 无 trigram / LIKE 无 ESCAPE 均失败）。
 - 关联：`docs/PHASE1-PLAN.md` §2.6、`OPS.md` FTS 恢复说明。
+
+## ADR-034 多行正文提交语义：Enter 换行，哨兵 / Ctrl-D 提交
+
+- 状态：已采纳（2026-11-19，P1-M4，二轮讨论拍板）
+- 结论：
+  1. 正文编辑态：`KeyEnter` **只插入换行**、绝不提交；单独一行恰好为 `.`（`SubmitSentinel`）后按 Enter 提交，哨兵行不进正文；`KeyCtrlD`（0x04）立即提交；
+  2. `KeyPaste` 整块进正文，内部换行**不拆成 KeyEnter**——粘贴进来的 `.` 行不会被误判为哨兵（`decoder.go` 保证一次 paste 只产一个 `KeyPaste`）；
+  3. 标题字段仍是单行、Enter 确认（两套 Enter 语义在 UI 明示）；
+  4. **禁用 Ctrl+Enter 作为提交键**：通用 VT/xterm/conhost 下 Enter / Shift+Enter / Ctrl+Enter 都发 `0x0D`、字节级不可区分；且"Ctrl+Enter 提交"与"Enter 换行"物理冲突（都要解释 CR）。Ctrl+Enter 增强（kitty CSI-u / modifyOtherKeys 探测）整体挪 P2；
+  5. UI 硬约束：服务端固定文案只出现哨兵与 Ctrl-D，archtest + 单测双重禁止 "Ctrl+Enter" 字样进入 `cmd/server` / `application/input` 生产源码。
+- 理由：候选 B（Ctrl+Enter 提交）语义直观但跨 SSH 客户端不可靠，且需终端能力探测（P1 对外接口冻结期不引入）；候选 A（Enter 提交）正文无法换行。选 C 是零协议依赖、与 here-doc 习惯一致，代价是用户记一个新约定。
+- 代价 / 边界：编辑器退格不跨行回到上一行（已知限制，逐字符 `\b` 擦除的边界）；行数与字节数双上限防滥用。
+- 验证：`input/composer_test.go` 8 项（换行/哨兵/Ctrl-D/多行粘贴/退格/双上限/多字节计数/副本）；`archtest/composer_test.go` 3 守卫 + 负向注入（上层 import / paste re-split / 粘贴分支 KeyEnter / Ctrl+Enter 文案）；`TestNoCtrlEnterInServerFixedText` 扫源码零命中；真实 SSH e2e 正文提交改 Ctrl-D、标题仍 Enter。
+- 关联：`docs/PHASE1-PLAN.md` §2.7、`ADR-019`、`ADR-027`。
+
+## ADR-035 过期设备码清理策略：只清自身过期行，保护在途登录
+
+- 状态：已采纳（2026-11-19，P1-M4）
+- 结论：
+  1. `device_auth_states` 清理在进程启动时立即执行一次、之后每小时一次，走唯一写入队列的单事务参数化 DELETE；
+  2. **只删自身 `expires_at` 已过的行**，四态（pending/authorized/denied/expired）共用该条件；未过期的 `pending` 代表在途设备码登录，绝不删除（OPS 多次记过：手工 DELETE 会让在途会话因 `ErrDeviceAuthNotFound` 中断）；
+  3. 可重复执行，第二次零删除（幂等）；停机时先等清理循环退出再关写队列（defer 顺序固定）。
+- 理由：表只增不删会让历史行无限累积（`idx_device_auth_states_expiry` 已存在但无 job）；按 `expires_at` 而非按 status 过滤，是因为 pending 之外的终态也可能尚未过期，过早删会破坏审计追溯。
+- 代价 / 边界：pending 严格按自身 `expires_at` 清理；若客户端恰在过期瞬间仍在轮询，下一次会拿到"码不存在"——既定口径，grace period 需另立 ADR。
+- 验证：`maintenance_test.go` 覆盖终态过期被清 / pending 未过期保留 / 在途仍可迁移 / 幂等；进程级 ticker 测试覆盖启动即跑 + 周期跑 + ctx 取消退出。
+- 关联：`OPS.md` Device Flow 状态表小节、`DECISIONS.md` ADR-022。
+
+## ADR-036 公钥使用痕迹写入策略：5 分钟节流 + 异步写
+
+- 状态：已采纳（2026-11-19，P1-M4）
+- 结论：
+  1. SSH 公钥认证成功（且指纹命中已绑定用户）后，经 `UsageRecordingResolver` 装饰器记录 `ssh_keys.last_used_at`；访客、失败认证不记录；
+  2. 同一指纹 **≥5min 最多排一次写**，写动作在独立 goroutine 经写入队列完成，失败只记日志、**不影响认证结果**；
+  3. 采用「先标记窗口、后异步写」：写失败时该钥匙要等下一个 5min 窗口才重试——详情页最近使用时间**可能滞后一个窗口**（已接受）。
+- 理由：每次连接都写库会放大唯一写通道的压力（单写连接恒为 1、队列 256）；`last_used_at` 是展示性字段，不值得为它阻塞认证或挤占业务写入。
+- 代价 / 边界：至多一个窗口的展示滞后；停机时 `Wait()` 等在途写完成后再停写队列。
+- 验证：`key_usage_test.go` 覆盖同钥节流 / 跨钥独立 / 写失败不阻塞 / 默认窗口 ≥5min；装饰器测试覆盖绑定用户记录、访客与失败不记录、空依赖 panic。
+- 关联：`docs/PHASE1-PLAN.md` §2.8、`OPS.md` 认证安全小节。
+
+## ADR-037 `/keys <fingerprint>` 详情边界
+
+- 状态：已采纳（2026-11-19，P1-M4）
+- 结论：
+  1. `KeyBindingReader` 新增 `GetByFingerprint(ctx, userID, fingerprint)`，**userID 必须进查询 WHERE**；跨用户与不存在返回**同一错误**，不区分以避免指纹枚举；
+  2. 详情含 label / created_at / last_used_at；`label` 当前无输入口、恒为空，输出仍经净化；
+  3. 只覆盖未吊销钥匙（与 `/keys` 列表同口径），已吊销历史不展示。
+- 理由：指纹是半公开标识（认证成功才可见），若详情接口跨用户可查，会变成账号关联枚举面；统一错误是最小泄露口径。
+- 代价 / 边界：已吊销钥匙历史查不到（P2 可加管理端 `/keys --all`）；label 设置入口未开放（P2 可加 `/key label`）。
+- 验证：`key_detail_test.go` 覆盖正常读取 / 不存在 / 跨用户 / 已吊销；`TestRunKeysDetailAndOwnership` 覆盖详情字段、跨用户不泄露、恶意参数不回显、无参仍列表。
+- 关联：`ADR-024`、`OPS.md` 认证安全小节。
