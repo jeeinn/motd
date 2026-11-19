@@ -19,6 +19,12 @@ var (
 	ErrInvalidLimit  = errors.New("分页大小不合法")
 	// ErrParentThreadMismatch 表示回复的父帖不属于同一主题（R8）。
 	ErrParentThreadMismatch = errors.New("父帖与回复不在同一主题")
+	// ErrInvalidVote 表示投票值不在 -1/1 的取值域内。
+	ErrInvalidVote = errors.New("投票值不合法")
+	// ErrInvalidVoteTarget 表示投票目标类型不是 thread/post。
+	ErrInvalidVoteTarget = errors.New("投票目标类型不合法")
+	// ErrInvalidQuery 表示搜索词为空或分页参数越界。
+	ErrInvalidQuery = errors.New("搜索参数不合法")
 )
 
 // RateLimitError 表示命中发帖限流（Q6：每人 60 秒 1 帖、每小时 10 帖）。

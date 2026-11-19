@@ -7,8 +7,8 @@ import (
 )
 
 func TestDefaultRegistryHasP0Commands(t *testing.T) {
-	// P1-M2 在 P0 九条之后追加 /logout，顺序固定（帮助文本由注册表生成）。
-	want := []string{"top", "open", "new", "reply", "login", "keys", "key", "logout", "help", "quit"}
+	// P1-M2 追加 /logout，P1-M3 追加 /vote 与 /search；顺序固定（帮助文本由注册表生成）。
+	want := []string{"top", "open", "new", "reply", "login", "keys", "key", "logout", "vote", "search", "help", "quit"}
 	all := Default().All()
 	if len(all) != len(want) {
 		t.Fatalf("P0 命令应为 %d 条，实际 %d", len(want), len(all))

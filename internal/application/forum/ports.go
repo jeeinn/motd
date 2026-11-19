@@ -15,6 +15,7 @@ import (
 	"github.com/jeeinn/motd/internal/domain/post"
 	"github.com/jeeinn/motd/internal/domain/thread"
 	"github.com/jeeinn/motd/internal/domain/user"
+	"github.com/jeeinn/motd/internal/domain/vote"
 )
 
 // ThreadSort 是主题列表的排序方式。用枚举而非字符串魔法值，非法值在用例入口即拒绝。
@@ -108,6 +109,27 @@ type PostReader interface {
 	ListPosts(ctx context.Context, q PostQuery) ([]post.Post, bool, error)
 }
 
+// SearchQuery 是正文检索的归一化参数：Query 已经过清洗，
+// Limit/Offset 已由用例层裁剪；仓储不得再放宽页长。
+type SearchQuery struct {
+	Query  string
+	Limit  int
+	Offset int
+}
+
+// SearchHit 是一条正文命中。Excerpt 是摘要，不含任何标记与渲染指令。
+type SearchHit struct {
+	ThreadID int64
+	PostID   int64
+	Excerpt  string
+}
+
+// SearchReader 是全文检索的只读端口。实现负责 FTS5/LIKE 的选择与 SQL 转义，
+// application 只决定「查询词是否合法」与「摘要/分页边界」。
+type SearchReader interface {
+	SearchPosts(ctx context.Context, q SearchQuery) ([]SearchHit, bool, error)
+}
+
 // WriteTx 是**单个事务内**的受限写入句柄。
 // 用例闭包只能拿到它，拿不到 *sql.Tx / *sql.DB；一个业务用例对应一次 UnitOfWork.Write。
 // 权限与限流查询也放在这里，保证「检查 + 写入」在同一事务快照内，不留 TOCTOU 窗口。
@@ -118,9 +140,22 @@ type WriteTx interface {
 	RecentWriteStats(ctx context.Context, userID int64, since time.Time) (WriteStats, error)
 	InsertThread(ctx context.Context, n NewThread) (int64, error)
 	InsertPost(ctx context.Context, p NewPost) (int64, error)
-	// TouchThread 在同一条 UPDATE 里维护 last_reply_at 与 score。
-	// scoreDelta 由调用方给出：P0 无投票传 0，P1 投票可直接复用同一事务路径。
+	// TouchThread 在同一条 UPDATE 里维护 last_reply_at 与 score，**仅供发帖/回复**。
+	// 投票绝不能调用它：投票改分数但不推进 last_reply_at，否则 SortLatest 会把旧主题
+	// 顶到最新。投票走下面的 AdjustScore。
 	TouchThread(ctx context.Context, threadID int64, at time.Time, scoreDelta int64) error
+	// GetVote 返回 (用户, 目标) 的当前投票值与是否存在；未投票返回 (0, false, nil)。
+	GetVote(ctx context.Context, userID int64, targetType vote.TargetType, targetID int64) (vote.Value, bool, error)
+	// UpsertVote 写入或覆盖投票（按 UNIQUE(user_id,target_type,target_id) 冲突更新）。
+	UpsertVote(ctx context.Context, userID int64, targetType vote.TargetType, targetID int64, value vote.Value, at time.Time) error
+	// DeleteVote 删除一条投票，供 Unvote 使用。投票值只允许 ±1，不能用 UpsertVote(0) 代替删除。
+	DeleteVote(ctx context.Context, userID int64, targetType vote.TargetType, targetID int64) error
+	// AdjustScore 只改 threads.score，**绝不触碰 last_reply_at**。
+	// delta 是新旧投票值之差；保证与 UpsertVote 在同一事务内提交。
+	AdjustScore(ctx context.Context, threadID int64, delta int64) error
+	// PostThreadID 返回内容所属主题；内容不存在或不可见时返回 ErrNotFound。
+	// 投票目标是 post 时用它确定分数记到哪个 thread。
+	PostThreadID(ctx context.Context, postID int64) (int64, error)
 	// AppendOutbox 在业务写事务内追加一条领域事件（R12）。
 	// 必须与业务写同提交、同回滚；event_id 唯一，重复事件静默去重。
 	// 投递绝不在这里做——handler 只能在事务提交后由 Outbox 调度器调用。
@@ -138,5 +173,6 @@ type Repos interface {
 	NodeReader
 	ThreadReader
 	PostReader
+	SearchReader
 	UnitOfWork
 }

@@ -250,6 +250,8 @@ func screenTitle(k viewmodel.ScreenKind) string {
 		return "motd · 登录"
 	case viewmodel.ScreenHelp:
 		return "motd · 帮助"
+	case viewmodel.ScreenSearchResults:
+		return "motd · 检索结果"
 	default:
 		return "motd"
 	}
@@ -263,6 +265,8 @@ func emptyHint(k viewmodel.ScreenKind) string {
 		return "（该版块暂无主题，登录后可用 /new 发第一帖）"
 	case viewmodel.ScreenThreadDetail:
 		return "（暂无回复，登录后可用 /reply 回复）"
+	case viewmodel.ScreenSearchResults:
+		return "（没有匹配的正文）"
 	default:
 		return "（暂无内容）"
 	}

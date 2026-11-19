@@ -15,17 +15,18 @@ import "fmt"
 type ScreenKind uint8
 
 const (
-	ScreenUnknown      ScreenKind = iota
-	ScreenNodes                   // 版块列表
-	ScreenThreads                 // 主题列表
-	ScreenThreadDetail            // 主题详情 + 回复列表
-	ScreenComposer                // 编辑态（发帖 / 回复）
-	ScreenLogin                   // Device Flow 登录态
-	ScreenHelp                    // 命令帮助
+	ScreenUnknown       ScreenKind = iota
+	ScreenNodes                    // 版块列表
+	ScreenThreads                  // 主题列表
+	ScreenThreadDetail             // 主题详情 + 回复列表
+	ScreenComposer                 // 编辑态（发帖 / 回复）
+	ScreenLogin                    // Device Flow 登录态
+	ScreenHelp                     // 命令帮助
+	ScreenSearchResults            // 正文检索结果
 )
 
 // Valid 报告页面种类是否在允许取值域内；零值不合法，调用方必须显式指定。
-func (k ScreenKind) Valid() bool { return k >= ScreenNodes && k <= ScreenHelp }
+func (k ScreenKind) Valid() bool { return k >= ScreenNodes && k <= ScreenSearchResults }
 
 // NoticeKind 是状态栏提示的语义分类。具体配色由 Renderer 决定。
 type NoticeKind uint8

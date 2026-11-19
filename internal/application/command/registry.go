@@ -60,6 +60,10 @@ var defaultCommands = []Command{
 	{Name: "key", Usage: "/key add | /key rm <fingerprint>", Summary: "绑定当前连接公钥 / 解绑指定指纹", MinArgs: 1, MaxArgs: 2},
 	// P1-M2：主动注销撤销该账号全部在线会话，无参数（不给「只注销某台」的假承诺）。
 	{Name: "logout", Usage: "/logout", Summary: "注销当前账号并撤销其全部在线会话", MaxArgs: 0},
+	// P1-M3：投票只作用于当前打开的主题（value 为 up/down/rm）。
+	{Name: "vote", Usage: "/vote <up|down|rm>", Summary: "给当前主题投赞成/反对票或撤销", MinArgs: 1, MaxArgs: 1},
+	// 关键词可含空格：MaxArgs=-1 后在页面层用空格拼回，仍只把整串作为查询词。
+	{Name: "search", Usage: "/search <关键词>", Summary: "检索正文", MinArgs: 1, MaxArgs: -1},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 }

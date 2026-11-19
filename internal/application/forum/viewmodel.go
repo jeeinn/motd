@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
 
 	"github.com/jeeinn/motd/internal/application/viewmodel"
 	"github.com/jeeinn/motd/internal/domain/node"
@@ -65,7 +66,8 @@ func NoticeFromError(err error) viewmodel.Notice {
 		n.Kind, n.Code = viewmodel.NoticeWarning, "not_found"
 	case errors.Is(err, ErrInvalidSort), errors.Is(err, ErrInvalidCursor),
 		errors.Is(err, ErrInvalidLimit), errors.Is(err, ErrInvalidTitle),
-		errors.Is(err, ErrInvalidBody):
+		errors.Is(err, ErrInvalidBody), errors.Is(err, ErrInvalidVote),
+		errors.Is(err, ErrInvalidVoteTarget):
 		n.Kind, n.Code = viewmodel.NoticeWarning, "invalid_input"
 	}
 	return n
@@ -131,6 +133,27 @@ func (s *Service) ScreenThreadDetail(ctx context.Context, threadID int64, v View
 	sc := screenOf(viewmodel.ScreenThreadDetail, rows, v)
 	sc.Detail = detail
 	sc.Pagination.HasMore = d.HasMore
+	return sc, nil
+}
+
+// ScreenSearchResults 输出检索结果屏。Row.ID 取 threadID，Enter 可直接打开主题；
+// postID 放在 Meta.Extra 里作为语义元信息，不参与渲染，避免把用户文本带进固定文案。
+func (s *Service) ScreenSearchResults(ctx context.Context, in SearchInput, v ViewContext) (viewmodel.Screen, error) {
+	res, err := s.Search(ctx, in)
+	if err != nil {
+		return viewmodel.Screen{}, err
+	}
+	rows := make([]viewmodel.Row, 0, len(res.Hits))
+	for i, h := range res.Hits {
+		rows = append(rows, viewmodel.Row{
+			Index: v.RowOffset + i + 1,
+			ID:    h.ThreadID,
+			Body:  h.Excerpt,
+			Meta:  viewmodel.RowMeta{Extra: strconv.FormatInt(h.PostID, 10)},
+		})
+	}
+	sc := screenOf(viewmodel.ScreenSearchResults, rows, v)
+	sc.Pagination.HasMore = res.HasMore
 	return sc, nil
 }
 

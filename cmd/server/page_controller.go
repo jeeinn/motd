@@ -61,8 +61,11 @@ type pageController struct {
 	threadID int64
 	cursor   string
 	offset   int
-	notice   viewmodel.Notice
-	editor   *pageEditor
+	// P1-M3 检索态：关键词与 1-based 页码，供 n/p 翻页与刷新复用。
+	searchQuery string
+	searchPage  int
+	notice      viewmodel.Notice
+	editor      *pageEditor
 	// 行编辑回显器：与页面状态一样每会话一份（ADR-026）。
 	echo *lineEcho
 	// 上一屏占用的行数（ADR-027）。>0 表示屏幕连续、可原地重绘；
@@ -245,6 +248,8 @@ func (p *pageController) refresh(ctx context.Context, sess pageSession) error {
 		return p.showDetail(ctx, sess, p.threadID)
 	case viewmodel.ScreenThreads:
 		return p.showThreads(ctx, sess, p.nodeID, p.nodeSlug, p.cursor, p.offset)
+	case viewmodel.ScreenSearchResults:
+		return p.showSearch(ctx, sess, p.searchQuery, p.searchPage)
 	default:
 		return p.showNodes(ctx, sess)
 	}
@@ -294,6 +299,8 @@ func (p *pageController) open(ctx context.Context, sess pageSession) error {
 		return p.showThreads(ctx, sess, row.ID, row.Meta.Node, "", 0)
 	case viewmodel.ScreenThreads:
 		return p.showDetail(ctx, sess, row.ID)
+	case viewmodel.ScreenSearchResults:
+		return p.showDetail(ctx, sess, row.ID)
 	default:
 		return nil
 	}
@@ -305,12 +312,20 @@ func (p *pageController) back(ctx context.Context, sess pageSession) error {
 		return p.showThreads(ctx, sess, p.nodeID, p.nodeSlug, p.cursor, p.offset)
 	case viewmodel.ScreenThreads:
 		return p.showNodes(ctx, sess)
+	case viewmodel.ScreenSearchResults:
+		return p.showNodes(ctx, sess)
 	default:
 		return nil
 	}
 }
 
 func (p *pageController) nextPage(ctx context.Context, sess pageSession) error {
+	if p.screen.Kind == viewmodel.ScreenSearchResults {
+		if !p.screen.Pagination.HasMore || p.searchPage >= 1<<20 {
+			return nil
+		}
+		return p.showSearch(ctx, sess, p.searchQuery, p.searchPage+1)
+	}
 	if p.screen.Kind != viewmodel.ScreenThreads || !p.screen.Pagination.HasMore {
 		return nil
 	}
@@ -319,6 +334,12 @@ func (p *pageController) nextPage(ctx context.Context, sess pageSession) error {
 }
 
 func (p *pageController) firstPage(ctx context.Context, sess pageSession) error {
+	if p.screen.Kind == viewmodel.ScreenSearchResults {
+		if p.searchPage <= 1 {
+			return nil
+		}
+		return p.showSearch(ctx, sess, p.searchQuery, 1)
+	}
 	if p.screen.Kind != viewmodel.ScreenThreads || p.cursor == "" {
 		return nil
 	}
@@ -365,6 +386,10 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.startComposer(sess, true)
 	case "reply":
 		return p.startComposer(sess, false)
+	case "vote":
+		return p.vote(ctx, sess, inv.Args[0])
+	case "search":
+		return p.showSearch(ctx, sess, strings.Join(inv.Args, " "), 1)
 	default:
 		return p.writeFixed(sess, "该命令暂未接入（按 ? 查看全部命令）")
 	}

@@ -68,12 +68,12 @@ func TestScreenKindValid(t *testing.T) {
 	if ScreenUnknown.Valid() {
 		t.Error("零值页面种类不应合法：调用方必须显式指定")
 	}
-	for _, k := range []ScreenKind{ScreenNodes, ScreenThreads, ScreenThreadDetail, ScreenComposer, ScreenLogin, ScreenHelp} {
+	for _, k := range []ScreenKind{ScreenNodes, ScreenThreads, ScreenThreadDetail, ScreenComposer, ScreenLogin, ScreenHelp, ScreenSearchResults} {
 		if !k.Valid() {
 			t.Errorf("页面种类 %d 应合法", k)
 		}
 	}
-	if (ScreenKind(200)).Valid() || (ScreenKind(7)).Valid() {
+	if (ScreenKind(200)).Valid() || (ScreenKind(8)).Valid() {
 		t.Error("越界页面种类不应合法")
 	}
 	if !NoticeNone.Valid() || (NoticeKind(5)).Valid() {

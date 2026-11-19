@@ -12,6 +12,9 @@ const (
 	TargetPost   TargetType = "post"
 )
 
+// Valid 报告目标类型是否合法。
+func (t TargetType) Valid() bool { return t == TargetThread || t == TargetPost }
+
 // Value 是投票方向：仅允许 +1 / -1。
 type Value int
 

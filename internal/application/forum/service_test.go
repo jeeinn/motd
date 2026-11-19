@@ -14,6 +14,7 @@ import (
 	"github.com/jeeinn/motd/internal/domain/post"
 	"github.com/jeeinn/motd/internal/domain/thread"
 	"github.com/jeeinn/motd/internal/domain/user"
+	"github.com/jeeinn/motd/internal/domain/vote"
 )
 
 // P0-10 回归集：全部用内存 fake，不依赖 SQLite / SSH / 渲染。
@@ -21,11 +22,19 @@ import (
 
 var testBase = time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
 
+// voteKey 是 UNIQUE(user_id,target_type,target_id) 的内存映射。
+type voteKey struct {
+	userID     int64
+	targetType vote.TargetType
+	targetID   int64
+}
+
 type fakeState struct {
 	nodes        map[int64]node.Node
 	threads      map[int64]thread.Thread
 	posts        map[int64]post.Post
 	users        map[int64]user.Status
+	votes        map[voteKey]vote.Value
 	outboxEvents []event.DomainEvent
 	nextThreadID int64
 	nextPostID   int64
@@ -37,6 +46,7 @@ func (s fakeState) clone() fakeState {
 		threads:      make(map[int64]thread.Thread, len(s.threads)),
 		posts:        make(map[int64]post.Post, len(s.posts)),
 		users:        make(map[int64]user.Status, len(s.users)),
+		votes:        make(map[voteKey]vote.Value, len(s.votes)),
 		nextThreadID: s.nextThreadID,
 		nextPostID:   s.nextPostID,
 		outboxEvents: append([]event.DomainEvent(nil), s.outboxEvents...),
@@ -53,12 +63,16 @@ func (s fakeState) clone() fakeState {
 	for k, v := range s.users {
 		out.users[k] = v
 	}
+	for k, v := range s.votes {
+		out.votes[k] = v
+	}
 	return out
 }
 
 type fakeRepos struct {
-	state          fakeState
-	failInsertPost error // 注入失败，用于验证事务回滚
+	state           fakeState
+	failInsertPost  error // 注入失败，用于验证事务回滚
+	failAdjustScore error // 注入失败，用于验证投票分数回滚
 }
 
 func newFakeRepos() *fakeRepos {
@@ -70,6 +84,7 @@ func newFakeRepos() *fakeRepos {
 		threads:      map[int64]thread.Thread{},
 		posts:        map[int64]post.Post{},
 		users:        map[int64]user.Status{1: user.StatusActive, 2: user.StatusActive},
+		votes:        map[voteKey]vote.Value{},
 		nextThreadID: 1,
 		nextPostID:   1,
 	}}
@@ -181,6 +196,32 @@ func (r *fakeRepos) ListPosts(ctx context.Context, q PostQuery) ([]post.Post, bo
 	return out, hasMore, nil
 }
 
+// SearchPosts 是 SearchReader 的内存实现：只做子串匹配，FTS/LIKE 的真实差异
+// 由 infrastructure 集成测试覆盖；这里锁定用例层的分页与摘要裁剪策略。
+func (r *fakeRepos) SearchPosts(_ context.Context, q SearchQuery) ([]SearchHit, bool, error) {
+	var out []SearchHit
+	for _, p := range r.state.posts {
+		if p.Status == post.StatusNormal && strings.Contains(p.BodyMD, q.Query) {
+			out = append(out, SearchHit{ThreadID: p.ThreadID, PostID: p.ID, Excerpt: p.BodyMD})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PostID > out[j].PostID })
+	limit := q.Limit
+	if limit <= 0 {
+		limit = SearchDefaultPageSize
+	}
+	if offset := q.Offset; offset >= len(out) {
+		out = nil
+	} else {
+		out = out[offset:]
+	}
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
+}
+
 // ---------------------------------------------------------------------------
 // UnitOfWork / WriteTx
 // ---------------------------------------------------------------------------
@@ -189,7 +230,9 @@ func (r *fakeRepos) ListPosts(ctx context.Context, q PostQuery) ([]post.Post, bo
 // 错误按真实 Writer 的方式包装一层，确保用例层的 errors.Is / errors.As 能穿透。
 func (r *fakeRepos) Write(ctx context.Context, fn func(WriteTx) error) error {
 	staged := r.state.clone()
-	if err := fn(&fakeTx{state: &staged, failInsertPost: r.failInsertPost}); err != nil {
+	if err := fn(&fakeTx{
+		state: &staged, failInsertPost: r.failInsertPost, failAdjustScore: r.failAdjustScore,
+	}); err != nil {
 		return fmt.Errorf("写入事务失败（不可重试）: %w", err)
 	}
 	r.state = staged
@@ -197,8 +240,9 @@ func (r *fakeRepos) Write(ctx context.Context, fn func(WriteTx) error) error {
 }
 
 type fakeTx struct {
-	state          *fakeState
-	failInsertPost error
+	state           *fakeState
+	failInsertPost  error
+	failAdjustScore error
 }
 
 func (x *fakeTx) UserStatus(ctx context.Context, userID int64) (user.Status, error) {
@@ -286,6 +330,44 @@ func (x *fakeTx) TouchThread(ctx context.Context, threadID int64, at time.Time, 
 	t.Score += scoreDelta
 	x.state.threads[threadID] = t
 	return nil
+}
+
+func (x *fakeTx) GetVote(_ context.Context, userID int64, targetType vote.TargetType, targetID int64) (vote.Value, bool, error) {
+	v, ok := x.state.votes[voteKey{userID, targetType, targetID}]
+	return v, ok, nil
+}
+
+func (x *fakeTx) UpsertVote(_ context.Context, userID int64, targetType vote.TargetType, targetID int64, value vote.Value, _ time.Time) error {
+	x.state.votes[voteKey{userID, targetType, targetID}] = value
+	return nil
+}
+
+func (x *fakeTx) DeleteVote(_ context.Context, userID int64, targetType vote.TargetType, targetID int64) error {
+	delete(x.state.votes, voteKey{userID, targetType, targetID})
+	return nil
+}
+
+// AdjustScore 只改分数；fake 也刻意不碰 LastReplyAt，
+// 这样任何误调 TouchThread 的投票实现都会在用例测试里暴露。
+func (x *fakeTx) AdjustScore(_ context.Context, threadID int64, delta int64) error {
+	if x.failAdjustScore != nil {
+		return x.failAdjustScore
+	}
+	t, ok := x.state.threads[threadID]
+	if !ok {
+		return ErrNotFound
+	}
+	t.Score += delta
+	x.state.threads[threadID] = t
+	return nil
+}
+
+func (x *fakeTx) PostThreadID(_ context.Context, postID int64) (int64, error) {
+	p, ok := x.state.posts[postID]
+	if !ok || p.Status != post.StatusNormal {
+		return 0, ErrNotFound
+	}
+	return p.ThreadID, nil
 }
 
 // ---------------------------------------------------------------------------

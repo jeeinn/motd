@@ -56,7 +56,7 @@ func TestMigrateCreatesExpectedTables(t *testing.T) {
 		"users", "identities", "local_credentials", "ssh_keys", "email_tokens",
 		"oauth_states", "device_auth_states", "sessions", "auth_events",
 		"nodes", "threads", "posts", "votes", "achievements",
-		"domain_event_outbox", "schema_migrations",
+		"domain_event_outbox", "posts_fts", "posts_fts_indexed", "schema_migrations",
 	}
 	for _, table := range want {
 		var name string
@@ -135,8 +135,8 @@ func TestThreadsStatusBackfillsHistoricalRows(t *testing.T) {
 	}
 }
 
-// TestFreshDatabaseReachesVersion6 锁定 P1-M1 三条迁移后的基线版本。
-func TestFreshDatabaseReachesVersion6(t *testing.T) {
+// TestFreshDatabaseReachesVersion7 锁定 P1-M3 FTS5 迁移后的基线版本。
+func TestFreshDatabaseReachesVersion7(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
 	if _, err := Migrate(ctx, pools); err != nil {
@@ -146,8 +146,8 @@ func TestFreshDatabaseReachesVersion6(t *testing.T) {
 	if err := pools.reader.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
-		t.Fatalf("fresh 库迁移后版本应为 6，实际 %d", version)
+	if version != 7 {
+		t.Fatalf("fresh 库迁移后版本应为 7，实际 %d", version)
 	}
 }
 

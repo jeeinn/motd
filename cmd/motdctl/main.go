@@ -5,9 +5,10 @@
 //
 // 用法：
 //
-//	motdctl backup  [--db <path>] [--dir <dir>]
-//	motdctl verify  <backup-file>
-//	motdctl restore <backup-file> --target <path>
+//	motdctl backup      [--db <path>] [--dir <dir>]
+//	motdctl verify      <backup-file>
+//	motdctl restore     <backup-file> --target <path>
+//	motdctl fts-rebuild [--db <path>]
 package main
 
 import (
@@ -36,6 +37,8 @@ func main() {
 		err = cmdVerify(ctx, os.Args[2:])
 	case "restore":
 		err = cmdRestore(ctx, os.Args[2:])
+	case "fts-rebuild":
+		err = cmdFTSRebuild(ctx, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -48,9 +51,10 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `用法:
-  motdctl backup  [--db <path>] [--dir <dir>]
-  motdctl verify  <backup-file>
-  motdctl restore <backup-file> --target <path>
+  motdctl backup      [--db <path>] [--dir <dir>]
+  motdctl verify      <backup-file>
+  motdctl restore     <backup-file> --target <path>
+  motdctl fts-rebuild [--db <path>]       从 posts 重建全文索引
 
 环境变量:
   MOTD_DB_PATH      默认 ./data/motd.db
@@ -126,6 +130,34 @@ func cmdRestore(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("restored=%s\n", *target)
+	return nil
+}
+
+// cmdFTSRebuild 从 posts 重建 FTS5 索引。恢复备份后倒排表可能与正文不一致，
+// 运维显式执行本命令，不做「每次启动自动重建」这种隐藏的昂贵写操作。
+func cmdFTSRebuild(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("fts-rebuild", flag.ContinueOnError)
+	dbPath := fs.String("db", env("MOTD_DB_PATH", "./data/motd.db"), "数据库路径")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("fts-rebuild 不接受位置参数")
+	}
+	if _, err := os.Stat(*dbPath); err != nil {
+		return fmt.Errorf("数据库不存在或不可读: %w", err)
+	}
+	pools, err := sqlite.Open(ctx, *dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = pools.Close() }()
+
+	n, err := sqlite.RebuildFTS(ctx, pools)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("indexed=%d\n", n)
 	return nil
 }
 
