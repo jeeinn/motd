@@ -153,6 +153,26 @@ motdctl restore <backup-file> --target <path>
 
 演练中还修掉一个真实缺陷：`flag` 包遇到首个位置参数即停止解析，导致 `restore <file> --target <path>` 把 `--target` 吞掉。已在 `cmd/motdctl` 做参数归一化并加回归测试。
 
+### 2026-11-19 13:57（P1-M0 带数据 kill-9 + WAL 恢复演练，隔离环境实际执行）
+
+> 关闭上方「带数据的恢复演练」待办。本节为**隔离环境**实测：`X:/motd/data/d6-drill-20261119/`，独立端口 18080/22222，**未触碰生产 `data/` 与生产实例**。原始输出与崩溃态三件套保留在同目录 `evidence/`。
+
+| 步骤 | 命令 | 实测结果 |
+| --- | --- | --- |
+| 基线 | 隔离 DataDir/端口启动，`/healthz` | `ok dev queue=0/256 online=0 active=0 commits=0`；`journal_mode=wal`、`integrity=ok`、`schema_migrations=3`、`nodes=5` |
+| 写基线数据 | Go 工具经 `Writer.Submit` 事务写 b1（无 SSH 密钥，写入路径与线上同构） | users=4 / threads=3 / posts=6；最新帖 `D6-MARK-b1-P06-ts=1795067820895680200` |
+| 备份 | `MOTD_DB_PATH/MOTD_BACKUP_DIR/MOTDCTL_BIN=隔离路径 scripts/backup.sh` | `motd-20261119-135707.db`，sha256 `934544a86ffda3822fb776c426ce9f95a4256d9005839c1e110f164ef7490412`，159744 B，548 ms |
+| 校验 | `scripts/restore.sh --verify <file>` | `integrity=ok`；五表行数与 b1 一致 |
+| 备份后写入 | 同工具写 b2（RPO 窗口内） | users+2 / threads+2 / posts+3；kill 前主库 4096 B、WAL **280192 B**（事务在 WAL 未 checkpoint） |
+| 硬杀 | `taskkill /PID <隔离PID> /F`（13:57:28.537） | PID 命令行二次校验为隔离实例、非生产 36604 |
+| WAL 恢复 | 直接打开 kill 后库 | `integrity=ok`；users=6 / threads=5 / posts=9、mark b2=3 —— **已提交事务全部重放**，硬杀不损坏库 |
+| 恢复 | `scripts/restore.sh <file> <新target>` | 577 ms；`integrity=ok`，精确回到 b1（users=4 / posts=6、mark b2=0、最新帖回到 b1 标记） |
+| 恢复库启动 | 以恢复库另起实例（端口 18081/18082） | `/healthz` ok（两次）；`migrations_applied=0`、`nodes=5`；启动到就绪 692 ms |
+
+**结论**：D6（kill-9 硬杀 + WAL 恢复 + 备份恢复）达成。RPO 口径 = 最后一次成功备份完成到故障时刻的写入：实测窗口 20.8 s，窗口内丢失 1 个已提交批次（2 用户 / 2 主题 / 3 帖）；**生产策略初值仍为每日备份（RPO ≤ 24h）**，本次证明的是「备份机制在 WAL 写入下可用且恢复精确」，不等于生产 RPO 已收紧。RTO 纯技术口径 = 恢复 577 ms + 启动就绪 692 ms ≈ **1.3 s**；端到端口径（kill→恢复库首次 `/healthz` ok，含取证开销）≈ **50.6 s**，均优于 §2 的 RTO ≤ 15 min 初值。小库结论，大数据量下 `VACUUM INTO` 耗时需按 §7 条件重测。
+
+> 是否把每日备份收紧到小时级以降低 RPO，属业务取舍，未替用户决定。
+
 ## 6. 保留与清理（不自动删除）
 
 脚本只生成备份，**不做任何自动删除**。列出过期候选：
