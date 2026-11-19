@@ -48,6 +48,46 @@ func TestLoadSSHDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadAuthSecurityDefaults(t *testing.T) {
+	for _, k := range []string{
+		"MOTD_AUTH_LIMIT_MAX_FAILURES", "MOTD_AUTH_LIMIT_WINDOW",
+		"MOTD_AUTH_LIMIT_LOCKOUT", "MOTD_AUTH_LIMIT_MAX_KEYS",
+		"MOTD_AUDIT_CAPACITY", "MOTD_AUDIT_FLUSH_INTERVAL",
+	} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthLimitMaxFailures != DefaultAuthLimitMaxFailures ||
+		cfg.AuthLimitWindow != DefaultAuthLimitWindow ||
+		cfg.AuthLimitLockout != DefaultAuthLimitLockout ||
+		cfg.AuthLimitMaxKeys != DefaultAuthLimitMaxKeys ||
+		cfg.AuditCapacity != DefaultAuditCapacity ||
+		cfg.AuditFlushInterval != DefaultAuditFlushInterval {
+		t.Fatalf("认证安全默认值不符: %+v", cfg)
+	}
+}
+
+func TestLoadAuthSecurityOverrides(t *testing.T) {
+	t.Setenv("MOTD_AUTH_LIMIT_MAX_FAILURES", "7")
+	t.Setenv("MOTD_AUTH_LIMIT_WINDOW", "2m")
+	t.Setenv("MOTD_AUTH_LIMIT_LOCKOUT", "30m")
+	t.Setenv("MOTD_AUTH_LIMIT_MAX_KEYS", "128")
+	t.Setenv("MOTD_AUDIT_CAPACITY", "64")
+	t.Setenv("MOTD_AUDIT_FLUSH_INTERVAL", "250ms")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthLimitMaxFailures != 7 || cfg.AuthLimitWindow != 2*time.Minute ||
+		cfg.AuthLimitLockout != 30*time.Minute || cfg.AuthLimitMaxKeys != 128 ||
+		cfg.AuditCapacity != 64 || cfg.AuditFlushInterval != 250*time.Millisecond {
+		t.Fatalf("环境变量未生效: %+v", cfg)
+	}
+}
+
 func TestLoadGitHubClientID(t *testing.T) {
 	t.Setenv("MOTD_GITHUB_CLIENT_ID", "")
 	cfg, err := Load()

@@ -28,26 +28,55 @@ type Config struct {
 	// GitHubClientID 是 Q7 的 OAuth App client_id，只从 MOTD_GITHUB_CLIENT_ID 读取。
 	// Device Flow 不需要 client_secret（§7 R1）；值不进仓库、不写 systemd unit（OPS §3）。
 	GitHubClientID string
+	// AuthLimitMaxFailures 是同一作用域在窗口内允许的最大认证尝试/失败次数。
+	AuthLimitMaxFailures int
+	// AuthLimitWindow 是认证限流的滑动窗口长度。
+	AuthLimitWindow time.Duration
+	// AuthLimitLockout 是超限后的锁定时长；锁定期内所有认证动作直接拒绝。
+	AuthLimitLockout time.Duration
+	// AuthLimitMaxKeys 是内存限流表保留的最大作用域数量，防止按随机 IP 打爆内存。
+	AuthLimitMaxKeys int
+	// AuditCapacity 是审计环形缓冲容量；写满后认证动作 fail-closed。
+	AuditCapacity int
+	// AuditFlushInterval 是异步批量落库周期。
+	AuditFlushInterval time.Duration
 	// LogLevel debug / info / warn / error。
 	LogLevel string
 	// LogFormat text / json。
 	LogFormat string
 }
 
+// 认证安全默认值的唯一事实来源。application/auth 侧有一份等价兜底，
+// 这里显式给出环境变量默认值，便于 OPS 直接抄进 systemd unit。
+const (
+	DefaultAuthLimitMaxFailures = 5
+	DefaultAuthLimitWindow      = 5 * time.Minute
+	DefaultAuthLimitLockout     = 15 * time.Minute
+	DefaultAuthLimitMaxKeys     = 4096
+	DefaultAuditCapacity        = 512
+	DefaultAuditFlushInterval   = time.Second
+)
+
 // Load 读取环境变量并修正默认值。
 // 约定：所有变量以 MOTD_ 前缀；空字符串视为未设置，回落到默认值。
 func Load() (Config, error) {
 	dataDir := env("MOTD_DATA_DIR", "./data")
 	cfg := Config{
-		DataDir:        dataDir,
-		DBPath:         env("MOTD_DB_PATH", filepath.Join(dataDir, "motd.db")),
-		HTTPAddr:       env("MOTD_HTTP_ADDR", "127.0.0.1:8080"),
-		SSHAddr:        env("MOTD_SSH_ADDR", ":2222"),
-		SSHMaxConns:    IntEnv("MOTD_SSH_MAX_CONNS", 100),
-		SSHIdleTimeout: DurationEnv("MOTD_SSH_IDLE_TIMEOUT", 10*time.Minute),
-		GitHubClientID: env("MOTD_GITHUB_CLIENT_ID", ""),
-		LogLevel:       strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
-		LogFormat:      strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
+		DataDir:              dataDir,
+		DBPath:               env("MOTD_DB_PATH", filepath.Join(dataDir, "motd.db")),
+		HTTPAddr:             env("MOTD_HTTP_ADDR", "127.0.0.1:8080"),
+		SSHAddr:              env("MOTD_SSH_ADDR", ":2222"),
+		SSHMaxConns:          IntEnv("MOTD_SSH_MAX_CONNS", 100),
+		SSHIdleTimeout:       DurationEnv("MOTD_SSH_IDLE_TIMEOUT", 10*time.Minute),
+		GitHubClientID:       env("MOTD_GITHUB_CLIENT_ID", ""),
+		AuthLimitMaxFailures: IntEnv("MOTD_AUTH_LIMIT_MAX_FAILURES", DefaultAuthLimitMaxFailures),
+		AuthLimitWindow:      DurationEnv("MOTD_AUTH_LIMIT_WINDOW", DefaultAuthLimitWindow),
+		AuthLimitLockout:     DurationEnv("MOTD_AUTH_LIMIT_LOCKOUT", DefaultAuthLimitLockout),
+		AuthLimitMaxKeys:     IntEnv("MOTD_AUTH_LIMIT_MAX_KEYS", DefaultAuthLimitMaxKeys),
+		AuditCapacity:        IntEnv("MOTD_AUDIT_CAPACITY", DefaultAuditCapacity),
+		AuditFlushInterval:   DurationEnv("MOTD_AUDIT_FLUSH_INTERVAL", DefaultAuditFlushInterval),
+		LogLevel:             strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
+		LogFormat:            strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
 	}
 
 	switch cfg.LogLevel {

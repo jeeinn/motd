@@ -15,19 +15,29 @@ package main
 // 独立替换点（DEVIATIONS.md R18/R20）。application/auth 与 transport/ssh 协议层零改动。
 
 import (
-	"fmt"
 	"io"
 	"strings"
 
 	"github.com/jeeinn/motd/internal/application/auth"
+	"github.com/jeeinn/motd/internal/application/viewmodel"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
 
-type loginPresenter struct{}
+type loginPresenter struct {
+	// status 是论坛同一份 StatusBar 语义投影（在线/活跃/身份/等级），
+	// 由装配层从 presence 快照注入，保证 /login 与四页论坛状态栏一致。
+	status viewmodel.StatusBar
+	// width 来自当前连接的 pty-req；0 时 Renderer 按 80 列降级。
+	width int
+	// screenLines 为上一屏占用行数；>0 才允许原地重绘。
+	screenLines int
+}
 
 // line 渲染一行服务端固定文本。text 必须是编译期常量或由本地数值拼成的
 // 可信文本；任何来自响应的字符串都不允许传进来。
-func (loginPresenter) line(out io.Writer, text string, style safe.Style) error {
+func (p *loginPresenter) line(out io.Writer, text string, style safe.Style) error {
+	// 非屏幕文本打断连续性：下一次 Screen 必须追加，不能用 CursorUp 覆盖。
+	p.screenLines = 0
 	rendered, err := safe.RenderSystem(text, style)
 	if err != nil {
 		return err
@@ -38,7 +48,8 @@ func (loginPresenter) line(out io.Writer, text string, style safe.Style) error {
 
 // external 渲染一行外部数据（GitHub 响应的 user_code / verification_uri、
 // 或派生出的 username）。先经 ProjectLoginView 的格式白名单，再走净化路径。
-func (loginPresenter) external(out io.Writer, text string) error {
+func (p *loginPresenter) external(out io.Writer, text string) error {
+	p.screenLines = 0
 	_, err := io.WriteString(out, toCRLF(safe.RenderUser(text, safe.Options{}))+"\r\n")
 	return err
 }
@@ -47,26 +58,20 @@ func toCRLF(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", "\r\n")
 }
 
-// showStart 输出 /login 发起屏：固定提示 + 外部字段 + 剩余时间 + 取消键。
-// user_code 与 verification_uri 分开两行走 external，不与固定文案拼接。
-func (p loginPresenter) showStart(out io.Writer, v auth.LoginView) error {
-	if err := p.line(out, auth.LoginTextStart, safe.StyleBold); err != nil {
-		return err
+// showStart 输出 /login 发起屏：复用论坛四页的 ViewModel + 共享渲染器，
+// 状态栏与论坛同源。固定文案与外部字段在 loginScreen 里已经分流到
+// RenderSystem / RenderUser 两条路径，这里只负责把渲染结果写进 PTY。
+//
+// 渲染失败时失败关闭：只输出一行服务端固定文案，绝不把可疑 ViewModel
+// 或外部原文原样写回终端。
+func (p *loginPresenter) showStart(out io.Writer, v auth.LoginView) error {
+	frame, lines, err := renderLoginScreen(p, v, p.screenLines)
+	if err != nil {
+		return p.line(out, auth.LoginTextDeviceCodeInvalidated, safe.StylePlain)
 	}
-	if err := p.line(out, auth.LoginTextOpenHint, safe.StylePlain); err != nil {
-		return err
-	}
-	if err := p.external(out, v.VerificationURI); err != nil {
-		return err
-	}
-	if err := p.external(out, "验证码："+v.UserCode); err != nil {
-		return err
-	}
-	// 秒数来自本地时间计算（int），不是响应原文，可以进 RenderSystem。
-	if err := p.line(out, fmt.Sprintf("有效期约 %d 秒", v.RemainingSeconds), safe.StyleDim); err != nil {
-		return err
-	}
-	return p.line(out, auth.LoginTextCancelHint, safe.StyleDim)
+	p.screenLines = lines
+	_, err = io.WriteString(out, frame)
+	return err
 }
 
 // showSuccess 输出成功屏。username 走 external；Notice 只允许是白名单常量

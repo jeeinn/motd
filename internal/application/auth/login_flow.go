@@ -82,6 +82,9 @@ const (
 	LoginTextUnsupportedProvider   = "仅支持 /login github。"
 	LoginTextNotReady              = "登录服务尚未就绪。"
 	LoginTextDeviceCodeInvalidated = "登录已中止（设备码响应不合法）。"
+	// LoginTextRateLimited 是命中认证限流时的固定文案；剩余秒数由本地数值拼出，
+	// 只走 RenderSystem / 固定输出路径，不回显 IP、邮箱或底层错误。
+	LoginTextRateLimited = "登录请求过于频繁，已暂时拒绝。"
 )
 
 // LoginView 是 /login 发起屏可呈现的白名单投影。

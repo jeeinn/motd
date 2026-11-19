@@ -58,6 +58,8 @@ var defaultCommands = []Command{
 	// P0-18：/key add 绑定「当前连接」的公钥，不接受任何公钥文本参数；
 	// /key rm <fingerprint> 只接指纹标识符（由 auth.ParseKeyCommand 严格收口）。
 	{Name: "key", Usage: "/key add | /key rm <fingerprint>", Summary: "绑定当前连接公钥 / 解绑指定指纹", MinArgs: 1, MaxArgs: 2},
+	// P1-M2：主动注销撤销该账号全部在线会话，无参数（不给「只注销某台」的假承诺）。
+	{Name: "logout", Usage: "/logout", Summary: "注销当前账号并撤销其全部在线会话", MaxArgs: 0},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 }

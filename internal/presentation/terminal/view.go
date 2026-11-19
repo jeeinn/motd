@@ -64,11 +64,18 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 		b.WriteByte('\n')
 	}
 
-	if len(s.Rows) == 0 {
+	// Device Flow 浮层自带内容，不需要「暂无内容」占位行。
+	if len(s.Rows) == 0 && s.Overlay.Kind != viewmodel.OverlayDeviceCode {
 		if err := sys(&b, emptyHint(s.Kind), safe.StyleDim); err != nil {
 			return "", err
 		}
 		b.WriteByte('\n')
+	}
+
+	// 浮层：固定标题/正文/标签/动作走 RenderSystem，
+	// 外部字段（user_code / verification_uri）走 RenderUser，两条路径不混用。
+	if err := renderOverlay(&b, s.Overlay, contentWidth); err != nil {
+		return "", err
 	}
 
 	for _, r := range s.Rows {
@@ -107,7 +114,7 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 	if err := renderStatusBar(&b, s, width); err != nil {
 		return "", err
 	}
-	if err := sys(&b, "j/k 移动 · Enter 打开 · h/q 返回 · r 回复 · n 下一页 · / 命令 · ? 帮助", safe.StyleDim); err != nil {
+	if err := sys(&b, screenFooter(s.Kind), safe.StyleDim); err != nil {
 		return "", err
 	}
 	b.WriteByte('\n')
@@ -118,6 +125,63 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 		b.WriteByte('\n')
 	}
 	return b.String(), nil
+}
+
+// renderOverlay 渲染登录浮层。信任域约定（写进函数契约，防止后续误用）：
+//   - Title / Body / Field.Label / Action.Key / Action.Label 是服务端权威文本，走 sys；
+//   - Field.Value / Progress.UserCode 是外部字段（GitHub 响应投影），走 ext；
+//   - 时间由服务端用本地数值预先格式化进 Body，Renderer 不自己读时钟。
+func renderOverlay(b *strings.Builder, o viewmodel.Overlay, contentWidth int) error {
+	if o.Kind != viewmodel.OverlayDeviceCode {
+		return nil
+	}
+	if o.Title != "" {
+		if err := sys(b, o.Title, safe.StyleBold); err != nil {
+			return err
+		}
+		b.WriteByte('\n')
+	}
+	if o.Body != "" {
+		if err := sys(b, o.Body, safe.StylePlain); err != nil {
+			return err
+		}
+		b.WriteByte('\n')
+	}
+	for _, f := range o.Fields {
+		if f.Label != "" {
+			if err := sys(b, f.Label, safe.StylePlain); err != nil {
+				return err
+			}
+		}
+		if err := ext(b, f.Value, contentWidth); err != nil {
+			return err
+		}
+		b.WriteByte('\n')
+	}
+	p := o.Progress
+	if p.State != viewmodel.DeviceFlowIdle && p.UserCode != "" {
+		if err := sys(b, "验证码：", safe.StylePlain); err != nil {
+			return err
+		}
+		if err := ext(b, p.UserCode, contentWidth); err != nil {
+			return err
+		}
+		b.WriteByte('\n')
+	}
+	for _, a := range o.Actions {
+		if err := sys(b, "["+a.Key+"] "+a.Label, safe.StyleDim); err != nil {
+			return err
+		}
+		b.WriteByte('\n')
+	}
+	return nil
+}
+
+func screenFooter(k viewmodel.ScreenKind) string {
+	if k == viewmodel.ScreenLogin {
+		return "Esc 取消登录 · 浏览器完成授权后自动继续"
+	}
+	return "j/k 移动 · Enter 打开 · h/q 返回 · r 回复 · n 下一页 · / 命令 · ? 帮助"
 }
 
 func renderStatusBar(b *strings.Builder, s viewmodel.Screen, width int) error {

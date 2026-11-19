@@ -23,19 +23,31 @@ const maxKeyBindingAttempts = 3
 type KeyBindingService struct {
 	store   KeyBindingStore
 	revoker SessionRevoker
+	gate    *SecurityGate // 可选；P0 既有装配不注入时行为完全不变
 	now     func() time.Time
+}
+
+// KeyBindingOption 注入 P1-M2 的安全门。保持无参可用于既有测试与部署。
+type KeyBindingOption func(*KeyBindingService)
+
+func WithKeyBindingGate(gate *SecurityGate) KeyBindingOption {
+	return func(s *KeyBindingService) { s.gate = gate }
 }
 
 // NewKeyBindingService 构造用例。依赖为空属于装配期错误，立即 panic，
 // 不能留到运行期退化成「查不到就放行」或「悄悄跳过会话撤销」。
-func NewKeyBindingService(store KeyBindingStore, revoker SessionRevoker) *KeyBindingService {
+func NewKeyBindingService(store KeyBindingStore, revoker SessionRevoker, opts ...KeyBindingOption) *KeyBindingService {
 	if store == nil {
 		panic("auth.NewKeyBindingService: KeyBindingStore 不能为空")
 	}
 	if revoker == nil {
 		panic("auth.NewKeyBindingService: SessionRevoker 不能为空")
 	}
-	return &KeyBindingService{store: store, revoker: revoker, now: time.Now}
+	s := &KeyBindingService{store: store, revoker: revoker, now: time.Now}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // List 返回当前账号所有未吊销的公钥绑定（读池，零写入）。
@@ -59,6 +71,10 @@ func (s *KeyBindingService) List(ctx context.Context, userID int64) ([]KeyBindin
 func (s *KeyBindingService) Bind(ctx context.Context, req BindRequest) (BindResult, error) {
 	if req.UserID <= 0 {
 		return BindResult{}, ErrBindingRequiresLogin
+	}
+	// 安全门先判定：审计环满或按用户限流命中时，连事务都不开（零写入）。
+	if err := s.gate.NoteKeyAttempt(AuditKeyBound, req.UserID, ""); err != nil {
+		return BindResult{}, err
 	}
 	fp, err := NormalizeFingerprint(req.Fingerprint)
 	if err != nil {
@@ -119,6 +135,9 @@ func (s *KeyBindingService) Unbind(ctx context.Context, req UnbindRequest) (Unbi
 	if req.UserID <= 0 {
 		return UnbindResult{}, ErrBindingRequiresLogin
 	}
+	if err := s.gate.NoteKeyAttempt(AuditKeyUnbound, req.UserID, ""); err != nil {
+		return UnbindResult{}, err
+	}
 	fp, err := NormalizeFingerprint(req.Fingerprint)
 	if err != nil {
 		return UnbindResult{}, err
@@ -157,5 +176,9 @@ func (s *KeyBindingService) Unbind(ctx context.Context, req UnbindRequest) (Unbi
 
 	// 事务已提交，才撤销在线会话（内存动作不可回滚，故绝不能放进 Write 闭包）。
 	closed := s.revoker.RevokeSessions(ctx, fp)
+	// 审计在撤销之后：撤销已生效，审计入队失败只上报，不回滚已关闭的会话。
+	if err := s.gate.NoteSessionRevoked(req.UserID, "", closed); err != nil {
+		return UnbindResult{Fingerprint: fp, Revoked: revoked, SessionsClosed: closed}, err
+	}
 	return UnbindResult{Fingerprint: fp, Revoked: revoked, SessionsClosed: closed}, nil
 }

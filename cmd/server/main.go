@@ -73,6 +73,41 @@ func run() error {
 	defer writer.Stop()
 	logger.Info("写入队列就绪", "capacity", writer.Cap(), "timeout", "3s")
 
+	// P1-M2 认证安全：限流器与审计器都是纯内存组件；落库端口由 SQLite 实现。
+	// 审计落库周期由本进程持有（application 层不起 ticker，P0-16 archtest 守卫）。
+	limiter := auth.NewRateLimiter(auth.WithRateLimitConfig(auth.RateLimitConfig{
+		MaxAttempts: cfg.AuthLimitMaxFailures,
+		Window:      cfg.AuthLimitWindow,
+		Lockout:     cfg.AuthLimitLockout,
+		MaxKeys:     cfg.AuthLimitMaxKeys,
+	}))
+	auditLogger := auth.NewAuditLogger(sqlite.NewAuthEventStore(writer),
+		auth.WithAuditCapacity(cfg.AuditCapacity),
+		auth.WithAuditFlushInterval(cfg.AuditFlushInterval))
+	auditDone := make(chan struct{})
+	go func() {
+		defer close(auditDone)
+		ticker := time.NewTicker(auditLogger.Interval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				auditLogger.Tick(ctx)
+			}
+		}
+	}()
+	// 停机顺序：先等 ticker goroutine 退出，再排空最后一批，最后才停写队列。
+	defer func() {
+		<-auditDone
+		auditLogger.Stop()
+	}()
+	gate := auth.NewSecurityGate(limiter, auditLogger, auth.ProviderGitHub)
+	logger.Info("认证安全就绪", "audit_capacity", cfg.AuditCapacity,
+		"audit_flush", cfg.AuditFlushInterval.String(),
+		"limit_max_failures", cfg.AuthLimitMaxFailures, "limit_window", cfg.AuthLimitWindow.String())
+
 	// 装配论坛用例 + 插件事件链，并读一次 DB 做启动自检：
 	// 「迁移 → 种子 → application 端口 → 读池」。/healthz 仍是纯运维探针（ADR-006）。
 	rt, err := newForumRuntime(pools, writer, func(e event.DomainEvent, err error) {
@@ -145,7 +180,8 @@ func run() error {
 	// Server 依赖 Handler、Handler 又要用 KeyBindingService，因此先建 handler、
 	// 再建 Server，最后用 setter 把用例回填，打破装配循环。
 	handler := newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login).
-		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence)
+		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
+		withSecurity(gate)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:        cfg.SSHAddr,
 		DataDir:     cfg.DataDir,
@@ -159,10 +195,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("初始化 SSH 服务失败: %w", err)
 	}
-	keyBinding := newKeyBindingService(pools, writer, sshSrv)
+	keyBinding := newKeyBindingService(pools, writer, sshSrv, gate)
 	handler.withKeyBinding(keyBinding)
+	// 注销边界复用同一 SSH Server 作 UserSessionRevoker：按 userID 关掉全部在线会话。
+	logoutSvc := auth.NewLogoutService(sshSrv, gate)
+	handler.withLogout(logoutSvc)
 	logger.Info("SSH host key 就绪", "fingerprint", sshSrv.HostKeyFingerprint())
 	logger.Info("公钥绑定就绪", "store", "ssh_keys", "revoker", "ssh_sessions", "modes", "keys|key add|key rm")
+	logger.Info("注销边界就绪", "command", "/logout", "revoker", "ssh_sessions_by_user")
 	// P0-19：/login github 走进程内 Device Flow（Q3，不开 HTTP 端点）；
 	// 呈现层是固定文本的最小交互层，P0-24 落地时替换（DEVIATIONS.md R18/R20）。
 	// 终端页面已落地，但 /login 的呈现仍是 P0-19 的固定文本（DEVIATIONS.md R18/R20）。
@@ -182,7 +222,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           probeMux(pools, writer, rt.Presence),
+		Handler:           probeMux(pools, writer, rt.Presence, auditLogger, limiter),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -232,7 +272,10 @@ func run() error {
 // probeMux 只提供运维探针，不承担业务流量。
 // Q3 已拍板：P0 的 Device Flow 由 SSH 会话在进程内调用 application 用例，
 // 不开任何业务 HTTP 端点；HTTP 端点留到 P1 浏览器接入时再评估。
-func probeMux(pools *sqlite.Pools, writer *sqlite.Writer, reg *presence.Registry) http.Handler {
+// probeMux 只提供运维探针，不承担业务流量。审计器 / 限流器可传 nil，
+// 此时 /healthz 只输出原有指标，便于不装配安全组件的本机开发场景。
+func probeMux(pools *sqlite.Pools, writer *sqlite.Writer, reg *presence.Registry,
+	audit *auth.AuditLogger, limiter *auth.RateLimiter) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -243,8 +286,17 @@ func probeMux(pools *sqlite.Pools, writer *sqlite.Writer, reg *presence.Registry
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "ok %s queue=%d/%d online=%d active=%d commits=%d\n",
+		_, _ = fmt.Fprintf(w, "ok %s queue=%d/%d online=%d active=%d commits=%d",
 			version, writer.Depth(), writer.Cap(), reg.Online(), reg.Active(), writer.Commits())
+		if audit != nil {
+			depth, dropped, flushed, failed := audit.Stats()
+			_, _ = fmt.Fprintf(w, " audit_depth=%d audit_cap=%d audit_dropped=%d audit_flushed=%d audit_failed=%d",
+				depth, audit.Capacity(), dropped, flushed, failed)
+		}
+		if limiter != nil {
+			_, _ = fmt.Fprintf(w, " limit_keys=%d", limiter.Keys())
+		}
+		_, _ = fmt.Fprint(w, "\n")
 	})
 	return mux
 }

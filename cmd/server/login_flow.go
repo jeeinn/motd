@@ -50,10 +50,12 @@ type loginFlow struct {
 	device *auth.DeviceFlowService
 	login  *auth.LoginService
 	keys   *auth.KeyBindingService
+	gate   *auth.SecurityGate // P1-M2：失败留痕 + 按 IP 限流；nil 时零影响
 	view   loginPresenter
 
 	active     bool
 	deviceCode string // 进程内唯一副本；绝不呈现、不落库
+	ipHash     string // 对端 IP 的 SHA-256；只作限流/审计键，不呈现
 	expiresAt  time.Time
 	retries    int
 	now        func() time.Time
@@ -80,6 +82,14 @@ func (f *loginFlow) begin(ctx context.Context, conn loginConn, out io.Writer) (t
 		_ = f.device.Cancel(ctx, st.DeviceCode)
 		_ = f.view.line(out, auth.LoginTextDeviceCodeInvalidated, safe.StylePlain)
 		return 0, false, err
+	}
+	// 终端宽度只来自连接自身的 pty-req；loginConn 不暴露 Window，
+	// 用可选接口适配，测试 fake 无需实现新方法（0 时 Renderer 按 80 列降级）。
+	if w, ok := conn.(interface {
+		Window() (uint32, uint32, string)
+	}); ok {
+		width, _, _ := w.Window()
+		f.view.width = int(width)
 	}
 	if err := f.view.showStart(out, v); err != nil {
 		_ = f.device.Cancel(ctx, st.DeviceCode)
@@ -137,6 +147,9 @@ func (f *loginFlow) applyPoll(ctx context.Context, conn loginConn, out io.Writer
 
 	case auth.DirectiveTerminal:
 		f.active = false
+		// 终止态（拒绝 / 过期）是一次安全相关事件：先留审计再渲染固定文案。
+		// 审计环满时返回错误，但终止态已经确定，仍要给用户明确提示。
+		_ = f.gate.NoteLoginFailure(f.ipHash, "")
 		_ = f.view.line(out, auth.TerminalLoginText(r.State.Status), safe.StylePlain)
 		return true, 0, nil
 
@@ -163,6 +176,11 @@ func (f *loginFlow) finish(ctx context.Context, conn loginConn, out io.Writer, t
 
 	res, err := f.login.Login(ctx, token)
 	if err != nil {
+		// 账号创建失败同样是登录失败：审计入队失败时以它的错误为准上报，
+		// 但终端只输出固定文案，不回显底层错误原文。
+		if gateErr := f.gate.NoteLoginFailure(f.ipHash, ""); gateErr != nil {
+			err = gateErr
+		}
 		_ = f.view.line(out, auth.LoginTextLoginFailed, safe.StylePlain)
 		return true, 0, err
 	}

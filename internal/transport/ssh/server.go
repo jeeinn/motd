@@ -333,6 +333,10 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 
 	p, fp := principalFromPermissions(sc.Permissions)
 	pk := publicKeyFromPermissions(sc.Permissions)
+	remoteIP := ""
+	if c.RemoteAddr() != nil {
+		remoteIP = c.RemoteAddr().String()
+	}
 	// 连接级关闭信号：chans 关闭即 SSH 连接已断，该连接上的所有 session 一起收掉。
 	// 不能用「channel 读到 EOF」代替——客户端只 CloseWrite 输入方向时，
 	// 服务端仍应继续输出，那是合法状态而非连接断开。
@@ -345,13 +349,13 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 		s.wg.Add(1)
 		go func(nch gossh.NewChannel) {
 			defer s.wg.Done()
-			s.handleSession(ctx, nch, p, fp, pk, connDone)
+			s.handleSession(ctx, nch, p, fp, pk, connDone, remoteIP)
 		}(nch)
 	}
 	close(connDone)
 }
 
-func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth.Principal, fp, pk string, connDone <-chan struct{}) {
+func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth.Principal, fp, pk string, connDone <-chan struct{}, remoteIP string) {
 	ch, reqs, err := nch.Accept()
 	if err != nil {
 		return
@@ -363,7 +367,7 @@ func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth
 	}
 	defer s.cfg.Presence.Disconnect(id)
 
-	sess := newSession(id, ch, fp, pk, p, s.cfg.Presence, s.cfg.IdleTimeout)
+	sess := newSession(id, ch, fp, pk, p, s.cfg.Presence, s.cfg.IdleTimeout, remoteIP)
 	s.trackSession(sess, true)
 	defer s.trackSession(sess, false)
 	defer sess.Close()

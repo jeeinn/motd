@@ -72,3 +72,12 @@ type KeyBindingStore interface {
 type SessionRevoker interface {
 	RevokeSessions(ctx context.Context, fingerprint string) int
 }
+
+// UserSessionRevoker 是注销边界的会话撤销端口（P1-M2）。
+//
+// 与 SessionRevoker 同构：端口在 application，实现在 transport/ssh。
+// 按 userID 关闭该账号的**所有**在线会话，包括触发注销的当前会话。
+// 同样是纯内存动作、不可回滚，因此绝不能放进写事务闭包。
+type UserSessionRevoker interface {
+	RevokeUserSessions(ctx context.Context, userID int64) int
+}

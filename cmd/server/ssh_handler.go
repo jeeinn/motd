@@ -14,6 +14,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/input"
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
+	"github.com/jeeinn/motd/internal/application/viewmodel"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
 
@@ -38,10 +39,26 @@ type inputHandler struct {
 	// 而 Server 又持有本 handler，因此用 setter 后填，避免装配循环。
 	keys *auth.KeyBindingService
 
+	// P1-M2 认证安全：安全门与注销用例都是进程级单例，每会话只引用不复制。
+	gate   *auth.SecurityGate
+	logout *auth.LogoutService
+
 	// MVP 页面控制器依赖：进程级共享，每会话只复制状态不复制依赖。
 	forum    *forum.Service
 	users    appuser.StatusReader
 	presence *presence.Registry
+}
+
+// withSecurity 注入认证安全门（限流 + 审计的 fail-closed 入口）。
+func (h *inputHandler) withSecurity(gate *auth.SecurityGate) *inputHandler {
+	h.gate = gate
+	return h
+}
+
+// withLogout 注入注销边界用例。
+func (h *inputHandler) withLogout(svc *auth.LogoutService) *inputHandler {
+	h.logout = svc
+	return h
 }
 
 // withForum 注入终端页面所需的用例与会话上下文。同样保持无参构造，
@@ -90,10 +107,19 @@ func (h *inputHandler) newLoginFlow() (*loginFlow, bool) {
 	if h.deviceAuth == nil || h.login == nil || h.keys == nil {
 		return nil, false
 	}
+	// /login 与论坛四页共用同一份 StatusBar 语义：在线/活跃取 presence 快照，
+	// 登录发起时用户必为访客，身份与等级固定。
+	status := viewmodel.StatusBar{Identity: viewmodel.Identity{Guest: true}, Level: 1}
+	if h.presence != nil {
+		status.Online = h.presence.Online()
+		status.Active = h.presence.Active()
+	}
 	return &loginFlow{
 		device: h.deviceAuth,
 		login:  h.login,
 		keys:   h.keys,
+		gate:   h.gate,
+		view:   loginPresenter{status: status},
 		now:    time.Now,
 	}, true
 }
@@ -238,6 +264,8 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			if err != nil || !active {
 				return false
 			}
+			// IP 摘要只作安全门键，绝不经 loginPresenter 呈现（ADR-021）。
+			f.ipHash = sess.RemoteIPHash()
 			flow = f
 			pollTimer = time.NewTimer(delay)
 			pollC = pollTimer.C
@@ -363,15 +391,52 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 			_, _ = io.WriteString(sess, h.runKey(ctx, sess, inv))
 		case "login":
 			if isGitHubLogin(inv) {
+				// 发起前先按 hash(ip) 限流；命中只给固定文案 + 本地算出的秒数，
+				// 不回显 IP、邮箱或底层错误原文（P0-22 零回显）。
+				if err := h.gate.AllowDeviceStart(sess.RemoteIPHash()); err != nil {
+					var rl *auth.RateLimitError
+					if errors.As(err, &rl) {
+						_, _ = fmt.Fprintf(sess, "%s（请 %d 秒后重试）\r\n",
+							auth.LoginTextRateLimited, rl.RetryAfterSeconds())
+					} else {
+						_, _ = io.WriteString(sess, auth.LoginTextRateLimited+"\r\n")
+					}
+					return outcomeContinue
+				}
 				return outcomeStartLogin // 发起屏由 loginFlow.begin 统一输出
 			}
 			_, _ = io.WriteString(sess, auth.LoginTextUnsupportedProvider+"\r\n")
+		case "logout":
+			_, _ = io.WriteString(sess, h.runLogout(ctx, sess))
 		default:
 			// top / open / new / reply 由页面控制器接管；命令表仍是唯一入口。
 			_ = pc.command(ctx, sess, inv)
 		}
 	}
 	return outcomeContinue
+}
+
+// runLogout 执行主动注销：撤销该账号全部在线会话并留审计。
+// 确认行在撤销之前写出，保证当前会话被关闭前用户能看到反馈；
+// 撤销之后的返回值是 best-effort（连接可能已被自己踢掉）。
+func (h *inputHandler) runLogout(ctx context.Context, sess *sshd.Session) string {
+	if h.logout == nil {
+		return "注销服务尚未就绪\r\n"
+	}
+	p := sess.Principal()
+	if !p.IsUser() {
+		return "访客无需注销\r\n"
+	}
+	_, _ = io.WriteString(sess, "正在注销，撤销该账号全部在线会话…\r\n")
+	res, err := h.logout.Logout(ctx, p.UserID, sess.RemoteIPHash())
+	switch {
+	case err != nil:
+		return fmt.Sprintf("注销已生效（关闭 %d 个会话），但审计记录失败，请联系运维\r\n", res.SessionsClosed)
+	case res.SessionsClosed > 0:
+		return fmt.Sprintf("已注销，撤销在线会话 %d 个\r\n", res.SessionsClosed)
+	default:
+		return "已注销当前账号\r\n"
+	}
 }
 
 // runKeys 列出当前账号未吊销的公钥。指纹来自 ssh_keys 表（服务端数据源），
