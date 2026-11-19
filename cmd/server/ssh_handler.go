@@ -15,6 +15,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/presentation/terminal"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
@@ -502,6 +503,20 @@ func (h *inputHandler) runKeys(ctx context.Context, p auth.Principal, inv comman
 	return b.String()
 }
 
+// formatKeyTime 按进程展示时区格式化公钥时间戳：绝对时间 + 该时刻的时区缩写。
+// 时区缩写取自时间戳自身所在时刻（而非 time.Now），因此跨 DST 的历史时间也正确；
+// 固定偏移制时区可能给出空缩写，此时回退到完整时区名，绝不硬编码 "UTC" 误导用户。
+// 展示时区的唯一来源是 terminal.DisplayLocation()，与论坛列表/详情完全一致。
+func formatKeyTime(sec int64) string {
+	loc := terminal.DisplayLocation()
+	t := time.Unix(sec, 0).In(loc)
+	zone := t.Format("MST")
+	if zone == "" {
+		zone = loc.String()
+	}
+	return t.Format("2006-01-02 15:04:05") + " " + zone
+}
+
 // runKeyDetail 输出单把钥匙的 label / created_at / last_used_at。
 // 输出全是服务端固定模板：指纹经白名单校验，label 经 SanitizeText 净化
 // （当前无输入口、恒为空；保留净化是为了将来加 label 时不产生渲染旁路）。
@@ -522,14 +537,13 @@ func (h *inputHandler) runKeyDetail(ctx context.Context, userID int64, rawFinger
 	if label == "" {
 		label = "（未设置）" // label 恒空：P1 不提供设置入口
 	}
-	const layout = "2006-01-02 15:04:05 UTC"
 	var b strings.Builder
 	b.WriteString("公钥详情：\r\n")
 	_, _ = fmt.Fprintf(&b, "  指纹：%s\r\n", k.Fingerprint)
 	_, _ = fmt.Fprintf(&b, "  标签：%s\r\n", label)
-	_, _ = fmt.Fprintf(&b, "  创建：%s\r\n", time.Unix(k.CreatedAtUnix, 0).UTC().Format(layout))
+	_, _ = fmt.Fprintf(&b, "  创建：%s\r\n", formatKeyTime(k.CreatedAtUnix))
 	if k.HasLastUsed {
-		_, _ = fmt.Fprintf(&b, "  最近使用：%s\r\n", time.Unix(k.LastUsedUnix, 0).UTC().Format(layout))
+		_, _ = fmt.Fprintf(&b, "  最近使用：%s\r\n", formatKeyTime(k.LastUsedUnix))
 	} else {
 		b.WriteString("  最近使用：从未\r\n")
 	}

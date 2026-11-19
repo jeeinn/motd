@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // 内嵌 IANA 时区库：默认 Asia/Shanghai 在 distroless/scratch 镜像里也能解析
 )
 
 // Config 是进程启动所需的全部外部输入。
@@ -47,6 +48,11 @@ type Config struct {
 	LogLevel string
 	// LogFormat text / json。
 	LogFormat string
+	// DisplayTimezone 是展示时区的原始配置名（IANA 名 / UTC / Local），供日志与运维核对。
+	DisplayTimezone string
+	// DisplayLocation 是 DisplayTimezone 在 Load 阶段解析出的 *time.Location。
+	// 展示层直接复用这一份解析结果，避免每屏重复解析、重复报错。
+	DisplayLocation *time.Location
 	// DotEnvDisabled 表示启动时是否关闭 .env 自动加载（逃生舱）。
 	// 只读展示用：真正的开关在进程入口 LoadDotEnv 里、在 Load 之前生效。
 	DotEnvDisabled bool
@@ -61,6 +67,9 @@ const (
 	DefaultAuthLimitMaxKeys     = 4096
 	DefaultAuditCapacity        = 512
 	DefaultAuditFlushInterval   = time.Second
+	// DefaultDisplayTimezone 是中国用户默认的展示时区；只影响呈现层，
+	// 存储层仍以 Unix 秒归一化（application/domain 的 .UTC() 不动）。
+	DefaultDisplayTimezone = "Asia/Shanghai"
 )
 
 // Load 读取环境变量并修正默认值。
@@ -85,6 +94,17 @@ func Load() (Config, error) {
 		LogFormat:            strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
 		DotEnvDisabled:       dotEnvDisabled(),
 	}
+
+	// 展示时区：启动期解析一次。env() 已经把空串/纯空白当作未设置并回落到默认；
+	// 非法 IANA 名在这里直接失败关闭，绝不静默回落成 UTC（那正是本次要修的体验 bug）。
+	// 错误信息只含配置名与标准库解析错误，不含任何凭据。
+	tzRaw := env("MOTD_DISPLAY_TIMEZONE", DefaultDisplayTimezone)
+	loc, err := time.LoadLocation(tzRaw)
+	if err != nil {
+		return Config{}, fmt.Errorf("MOTD_DISPLAY_TIMEZONE 取值非法: %q（需为 IANA 时区名、UTC 或 Local）: %w", tzRaw, err)
+	}
+	cfg.DisplayTimezone = tzRaw
+	cfg.DisplayLocation = loc
 
 	// 邮箱配置显式 resolve：启用时逐项校验、缺哪项报哪项，不做静默兜底；
 	// 未启用时零影响（不触碰任何 Sender）。授权码只在此处从环境读入内存。

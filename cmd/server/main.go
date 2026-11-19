@@ -24,6 +24,7 @@ import (
 	"github.com/jeeinn/motd/internal/domain/event"
 	emailinfra "github.com/jeeinn/motd/internal/infrastructure/email"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
+	"github.com/jeeinn/motd/internal/presentation/terminal"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
 
@@ -56,6 +57,12 @@ func run() error {
 	} else {
 		logger.Info("配置来源", "file", dotenvSource)
 	}
+
+	// 展示时区：启动期一次性注入 presentation 层，之后只读。
+	// 论坛列表/详情与 /keys 公钥详情共用这份解析结果，不会两处各读各的。
+	// 非法值已在 config.Load 阶段失败关闭，进不到这里。
+	terminal.SetDisplayLocation(cfg.DisplayLocation)
+	logger.Info("展示时区就绪", "timezone", cfg.DisplayTimezone)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

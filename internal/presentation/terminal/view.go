@@ -29,6 +29,10 @@ const (
 
 // RenderScreen 渲染一屏。width <= 0 时按 80 列降级（未收到 pty-req 的情况）。
 // 返回错误表示 ViewModel 或服务端固定文本不自洽，调用方应失败关闭而不是原样输出。
+//
+// 确定性边界：输出只由 (Screen, width) 与进程展示时区决定（见 display_location.go）。
+// 后者在启动期由 config.DisplayLocation 注入一次、之后只读；本函数不读时钟、
+// 不读 DB、不持有会话状态。时间字段按该时区格式化，格式串固定为 MM-DD HH:MM。
 func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 	if err := s.Validate(); err != nil {
 		return "", fmt.Errorf("ViewModel 非法: %w", err)
@@ -296,9 +300,12 @@ func metaFixed(r viewmodel.Row, k viewmodel.ScreenKind) string {
 	return strings.Join(parts, "")
 }
 
+// formatTime 按进程展示时区格式化 Unix 秒。格式串刻意保持 MM-DD HH:MM：
+// 不加年份、不加时区后缀，终端窄且 1 Mbps 约束下每一列都算数。
+// sec <= 0 视为「无有效时间」，继续返回空串（既有行为不变）。
 func formatTime(sec int64) string {
 	if sec <= 0 {
 		return ""
 	}
-	return time.Unix(sec, 0).UTC().Format("01-02 15:04")
+	return time.Unix(sec, 0).In(DisplayLocation()).Format("01-02 15:04")
 }
