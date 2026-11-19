@@ -146,7 +146,9 @@ func TestMVPRestartAndBackupWithRealData(t *testing.T) {
 	if got := mvpLatestBody(t, restored); got != wantBody {
 		t.Fatalf("恢复后最新正文 %q，期望 %q", got, wantBody)
 	}
-	if got := mvpCount(t, restored, "schema_migrations"); got != 3 {
-		t.Fatalf("迁移版本应随备份一起恢复，实际 %d", got)
+	// 版本数随迁移增长，不硬编码：恢复库必须与源库登记的版本完全一致。
+	wantVersions := mvpCount(t, reopened, "schema_migrations")
+	if got := mvpCount(t, restored, "schema_migrations"); got != wantVersions {
+		t.Fatalf("迁移版本应随备份一起恢复，实际 %d 期望 %d", got, wantVersions)
 	}
 }

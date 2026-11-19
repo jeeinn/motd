@@ -19,6 +19,7 @@ import (
 type forumRuntime struct {
 	Service  *forum.Service
 	Bus      *events.DomainBus
+	Outbox   *forum.Outbox
 	Store    *appuser.MemoryAchievementStore
 	Presence *presence.Registry
 	Plugins  []registry.Plugin
@@ -56,13 +57,21 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer, onPublishError 
 	if onPublishError != nil {
 		obs = func(e event.DomainEvent, err error) { onPublishError(e, err) }
 	}
+	// R12：事件先随业务写落 outbox，提交后由调度器投递给同一条总线。
+	// cmd 是唯一能同时看到 application / plugin / infrastructure 的装配点。
+	outbox, err := forum.NewOutbox(sqlite.NewOutboxStore(writer), bus, obs)
+	if err != nil {
+		return nil, fmt.Errorf("装配 outbox 调度器: %w", err)
+	}
 	svc := forum.NewService(repos,
 		forum.WithEventSink(bus),
 		forum.WithPublishObserver(obs),
+		forum.WithOutbox(outbox),
 	)
 	return &forumRuntime{
 		Service:  svc,
 		Bus:      bus,
+		Outbox:   outbox,
 		Store:    store,
 		Presence: presence.New(), // 纯内存；SSH 入口在 M3 才往里登记连接
 		Plugins:  plugins,

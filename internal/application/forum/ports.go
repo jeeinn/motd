@@ -10,6 +10,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/domain/post"
 	"github.com/jeeinn/motd/internal/domain/thread"
@@ -67,12 +68,15 @@ type NewThread struct {
 }
 
 // NewPost 是创建内容的写入参数。Status 由用例层给出（P0 恒为 normal）。
+// ParentPostID 非空表示这是一条回复：仓储必须在同一事务内确认父帖属于
+// 同一 thread_id，否则拒绝写入（0005_post_parent_thread 触发器为第二道防线）。
 type NewPost struct {
-	ThreadID  int64
-	UserID    int64
-	BodyMD    string
-	Status    post.Status
-	CreatedAt time.Time
+	ThreadID     int64
+	UserID       int64
+	BodyMD       string
+	Status       post.Status
+	ParentPostID *int64
+	CreatedAt    time.Time
 }
 
 // WriteStats 是限流判定所需的近一窗口写入统计。
@@ -117,6 +121,10 @@ type WriteTx interface {
 	// TouchThread 在同一条 UPDATE 里维护 last_reply_at 与 score。
 	// scoreDelta 由调用方给出：P0 无投票传 0，P1 投票可直接复用同一事务路径。
 	TouchThread(ctx context.Context, threadID int64, at time.Time, scoreDelta int64) error
+	// AppendOutbox 在业务写事务内追加一条领域事件（R12）。
+	// 必须与业务写同提交、同回滚；event_id 唯一，重复事件静默去重。
+	// 投递绝不在这里做——handler 只能在事务提交后由 Outbox 调度器调用。
+	AppendOutbox(ctx context.Context, e event.DomainEvent) error
 }
 
 // UnitOfWork 把「一个用例一个事务」变成结构性约束。

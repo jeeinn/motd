@@ -200,3 +200,27 @@ func TestChannelsAreIndependent(t *testing.T) {
 		t.Fatal("交互事件种类取值域错误")
 	}
 }
+
+// TestDomainBusDeduplicatesByEventID 覆盖 outbox 崩溃恢复后的重投场景：
+// 同一个 DomainEvent.ID 重复投递，订阅者只应被调用一次。
+func TestDomainBusDeduplicatesByEventID(t *testing.T) {
+	ctx := context.Background()
+	bus := NewDomainBus()
+	calls := 0
+	if err := bus.Subscribe(event.EventPostCreated, func(_ context.Context, _ event.DomainEvent) error {
+		calls++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	e := sampleDomainEvent()
+	for i := 0; i < 3; i++ {
+		if err := bus.Publish(ctx, e); err != nil {
+			t.Fatalf("重复投递不应报错: %v", err)
+		}
+	}
+	if calls != 1 || bus.Published() != 1 {
+		t.Fatalf("按 ID 去重后订阅者只应收到 1 次: calls=%d published=%d", calls, bus.Published())
+	}
+}

@@ -19,17 +19,26 @@ import (
 // plugin/registry 的受限上下文通过闭包绑定进去，events 包因此不必依赖 registry。
 type Handler func(ctx context.Context, e event.DomainEvent) error
 
+// seenEventCap 限制幂等去重的内存占用。触顶时整表清空：最坏情况是一次旧事件
+// 被重新投递，而订阅者本身仍应幂等；DB 侧 event_id UNIQUE 才是主防线。
+const seenEventCap = 4096
+
 // DomainBus 是领域事件总线：同步派发，进程内不丢事件。
-// P0 的「可靠」边界是单进程内；崩溃导致的丢失需 P1 补事务内 outbox 表（见 ADR-015）。
+// P1 起事件经事务性 outbox 投递：进程崩溃后重启可能重投同一事件（至少一次），
+// 因此总线按 DomainEvent.ID 去重，让订阅者看到至多一次（R12 幂等要求）。
 type DomainBus struct {
 	mu        sync.RWMutex
 	handlers  map[event.DomainEventType][]Handler
+	seen      map[string]struct{}
 	published atomic.Int64
 	failures  atomic.Int64
 }
 
 func NewDomainBus() *DomainBus {
-	return &DomainBus{handlers: make(map[event.DomainEventType][]Handler)}
+	return &DomainBus{
+		handlers: make(map[event.DomainEventType][]Handler),
+		seen:     make(map[string]struct{}),
+	}
 }
 
 // Subscribe 注册一个订阅者。非法事件种类与 nil handler 直接拒绝，避免运行时静默失效。
@@ -53,11 +62,20 @@ func (b *DomainBus) Publish(ctx context.Context, e event.DomainEvent) error {
 		b.failures.Add(1)
 		return err
 	}
-	b.published.Add(1)
 
-	b.mu.RLock()
+	b.mu.Lock()
+	if _, dup := b.seen[e.ID]; dup {
+		b.mu.Unlock()
+		return nil // 已投递过的事件，崩溃重投时直接吞掉
+	}
+	if len(b.seen) >= seenEventCap {
+		b.seen = make(map[string]struct{})
+	}
+	b.seen[e.ID] = struct{}{}
 	list := append([]Handler(nil), b.handlers[e.Type]...)
-	b.mu.RUnlock()
+	b.mu.Unlock()
+
+	b.published.Add(1)
 
 	var errs []error
 	for _, h := range list {

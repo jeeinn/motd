@@ -22,6 +22,7 @@ type forumEnv struct {
 	ctx    context.Context
 	repos  *ForumRepos
 	pools  *Pools
+	writer *Writer
 	nodeID int64
 	userID int64
 	clock  int64
@@ -56,7 +57,7 @@ func newForumEnv(t *testing.T) *forumEnv {
 	nodeID, _ := res.LastInsertId()
 
 	return &forumEnv{
-		ctx: ctx, pools: pools, repos: NewForumRepos(pools, writer),
+		ctx: ctx, pools: pools, writer: writer, repos: NewForumRepos(pools, writer),
 		nodeID: nodeID, userID: userID, clock: base,
 	}
 }
@@ -113,6 +114,46 @@ func TestForumReposNodes(t *testing.T) {
 	}
 	if _, err := e.repos.GetNodeBySlug(e.ctx, "/not/exist"); !errors.Is(err, forum.ErrNotFound) {
 		t.Fatalf("缺失版块应返回 ErrNotFound，实际 %v", err)
+	}
+}
+
+// TestThreadStatusFiltering 锁定 0004 引入的公开过滤口径：
+// GetThread / ListThreads 只读 active，deleted / hidden 主题不得泄漏。
+func TestThreadStatusFiltering(t *testing.T) {
+	e := newForumEnv(t)
+	activeID := e.insertThread(t, "可见", 0, e.clock)
+	deletedID := e.insertThread(t, "已删除", 0, e.clock)
+	hiddenID := e.insertThread(t, "已隐藏", 0, e.clock)
+	for _, id := range []int64{deletedID, hiddenID} {
+		status := "deleted"
+		if id == hiddenID {
+			status = "hidden"
+		}
+		if _, err := e.pools.writer.ExecContext(e.ctx,
+			`UPDATE threads SET status = ? WHERE id = ?`, status, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := e.repos.GetThread(e.ctx, activeID); err != nil {
+		t.Fatalf("active 主题应可读: %v", err)
+	}
+	for name, id := range map[string]int64{"deleted": deletedID, "hidden": hiddenID} {
+		if _, err := e.repos.GetThread(e.ctx, id); !errors.Is(err, forum.ErrNotFound) {
+			t.Fatalf("%s 主题应对公开读取不可见，实际 %v", name, err)
+		}
+	}
+
+	for _, sort := range []forum.ThreadSort{forum.SortLatest, forum.SortScore} {
+		rows, _, err := e.repos.ListThreads(e.ctx, forum.ThreadQuery{
+			NodeID: e.nodeID, Sort: sort, Limit: 20,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].ID != activeID {
+			t.Fatalf("排序 %d 的列表应只含 active 主题，实际 %+v", sort, rows)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	domainuser "github.com/jeeinn/motd/internal/domain/user"
 )
@@ -55,7 +56,7 @@ func TestMigrateCreatesExpectedTables(t *testing.T) {
 		"users", "identities", "local_credentials", "ssh_keys", "email_tokens",
 		"oauth_states", "device_auth_states", "sessions", "auth_events",
 		"nodes", "threads", "posts", "votes", "achievements",
-		"schema_migrations",
+		"domain_event_outbox", "schema_migrations",
 	}
 	for _, table := range want {
 		var name string
@@ -64,6 +65,89 @@ func TestMigrateCreatesExpectedTables(t *testing.T) {
 		if err != nil {
 			t.Fatalf("缺少表 %q: %v", table, err)
 		}
+	}
+}
+
+// TestThreadsStatusBackfillsHistoricalRows 复现「旧库升级」路径：
+// 先在只有 0001–0003 的库上写入历史主题（当时还没有 status 列），
+// 再应用 0004，确认 DEFAULT 常量把历史行回填为 active，且 CHECK 真的生效。
+func TestThreadsStatusBackfillsHistoricalRows(t *testing.T) {
+	ctx := context.Background()
+	pools := openTestPools(t)
+
+	all, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// applyOne 假设 Migrate 已建好版本登记表；这里手动补建，模拟旧库。
+	if _, err := pools.writer.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range all {
+		if m.Version <= 3 {
+			if err := applyOne(ctx, pools.writer, m); err != nil {
+				t.Fatalf("应用迁移 %04d: %v", m.Version, err)
+			}
+		}
+	}
+
+	now := time.Now().Unix()
+	res, err := pools.writer.ExecContext(ctx,
+		`INSERT INTO users (username, status, created_at, updated_at) VALUES (?, 'active', ?, ?)`,
+		"old_user", now, now)
+	if err != nil {
+		t.Fatalf("准备历史用户: %v", err)
+	}
+	userID, _ := res.LastInsertId()
+	res, err = pools.writer.ExecContext(ctx,
+		`INSERT INTO threads (node_id, user_id, title, score, last_reply_at, created_at) VALUES (1, ?, '历史主题', 0, ?, ?)`,
+		userID, now, now)
+	if err != nil {
+		t.Fatalf("写入历史主题: %v", err)
+	}
+	threadID, _ := res.LastInsertId()
+
+	var applied bool
+	for _, m := range all {
+		if m.Version == 4 {
+			if err := applyOne(ctx, pools.writer, m); err != nil {
+				t.Fatalf("应用 0004: %v", err)
+			}
+			applied = true
+		}
+	}
+	if !applied {
+		t.Fatal("未找到 0004_threads_status 迁移")
+	}
+
+	var status string
+	if err := pools.reader.QueryRowContext(ctx, `SELECT status FROM threads WHERE id = ?`, threadID).Scan(&status); err != nil {
+		t.Fatalf("读取历史主题 status: %v", err)
+	}
+	if status != "active" {
+		t.Fatalf("历史行应回填为 active，实际 %q", status)
+	}
+	if _, err := pools.writer.ExecContext(ctx, `UPDATE threads SET status = 'bogus' WHERE id = ?`, threadID); err == nil {
+		t.Fatal("0004 的 CHECK 应拒绝非法 status")
+	}
+}
+
+// TestFreshDatabaseReachesVersion6 锁定 P1-M1 三条迁移后的基线版本。
+func TestFreshDatabaseReachesVersion6(t *testing.T) {
+	ctx := context.Background()
+	pools := openTestPools(t)
+	if _, err := Migrate(ctx, pools); err != nil {
+		t.Fatalf("首次迁移失败: %v", err)
+	}
+	var version int64
+	if err := pools.reader.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 6 {
+		t.Fatalf("fresh 库迁移后版本应为 6，实际 %d", version)
 	}
 }
 

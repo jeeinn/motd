@@ -82,6 +82,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("装配论坛运行时失败: %w", err)
 	}
+	// R12 崩溃恢复：上次进程若在领取后、回写前被 kill-9，事件会卡在 dispatching。
+	// 此刻还没有在途投递，先把它们退回 pending，再重投所有残留事件。
+	requeued, redelivered, redeliveryFailed, err := rt.Outbox.RecoverPending(ctx)
+	if err != nil {
+		return fmt.Errorf("outbox 崩溃恢复失败: %w", err)
+	}
+	logger.Info("outbox 恢复就绪", "requeued", requeued,
+		"redelivered", redelivered, "failed", redeliveryFailed)
+
 	nodes, err := rt.Service.ListNodes(ctx)
 	if err != nil {
 		return fmt.Errorf("启动自检：读取版块失败: %w", err)

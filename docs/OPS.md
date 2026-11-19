@@ -173,6 +173,23 @@ motdctl restore <backup-file> --target <path>
 
 > 是否把每日备份收紧到小时级以降低 RPO，属业务取舍，未替用户决定。
 
+### 2026-11-19 14:32（P1-M1 迁移应用与回滚演练，隔离环境实际执行）
+
+> 目的：M1 三条前置债迁移（0004/0005/0006）在**带历史数据的 v3 库**上应用、验证、回滚。全程隔离 `X:/motd/data/m1-drill-20261119/`，独立端口 18090/22230、18091/22231，**未触碰生产 `data/`**（生产库 mtime 保持 13:57 不变）。v3 源码由 `git archive HEAD` 导出编译，不动工作区与 `.git`。
+
+| 步骤 | 命令 / 工具 | 实测结果 |
+| --- | --- | --- |
+| v3 基线库 | v3 二进制（`schema_migrations=3`）启动隔离 DataDir | `migrations_applied=3 applied_versions=[1 2 3]`、`nodes=5` |
+| 造历史数据 | `m1verify seed`（经 `sqlite.Open`→`Writer.Submit`→事务提交的生产同构写路径） | users=1 / threads=2 / posts=4；`threads.status` 列**不存在**、`domain_event_outbox` 表**不存在** |
+| 迁移前备份 | `motdctl backup`（回滚锚点） | `motd-20261119-143217.db`，sha256 `2cf5e9575b42667ed7887adc0e78899007a457e8861db5abdae1ba52c064c2d5`，159744 B |
+| 应用迁移 | M1 二进制启动同一库 | `migrations_applied=3 applied_versions=[4 5 6]`；`/healthz` ok；日志 `outbox 恢复就绪 requeued=0 redelivered=0 failed=0` |
+| R9 验证 | `m1verify inspect` | `schema_migrations=6`、`threads.status[active]=2`（**历史行自动回填**） |
+| R8 验证 | `SELECT name FROM sqlite_master WHERE type='trigger'` | `posts_parent_same_thread_insert` + `posts_parent_same_thread_update` 两条均建成；业务数据 threads=2/posts=4 完整 |
+| R12 验证 | `m1verify inspect` | `domain_event_outbox=0`（表已建、空表） |
+| 回滚 | `motdctl restore <迁移前备份> --target <新路径>` | 恢复成功；`schema_migrations=3`、`threads.status=<column absent>`、无 outbox 表、无触发器；users=1/threads=2/posts=4 数据完整 |
+
+**结论**：M1 三项迁移在带历史数据库上应用成功、效果符合 Spec、从迁移前备份回滚精确回到 v3（schema 与数据双一致）。全量 `go build`/`go vet`/`go test -count=1 ./...` 绿，测试函数 456→506。`ADR-028`（outbox）、`ADR-029`（数据完整性前置）已记录。崩溃态证据与中间产物保留在 `data/m1-drill-20261119/`。
+
 ## 6. 保留与清理（不自动删除）
 
 脚本只生成备份，**不做任何自动删除**。列出过期候选：

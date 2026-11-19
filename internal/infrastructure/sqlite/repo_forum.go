@@ -3,11 +3,14 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/forum"
+	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/domain/post"
 	"github.com/jeeinn/motd/internal/domain/thread"
@@ -109,7 +112,8 @@ func scanThread(s interface{ Scan(...any) error }) (thread.Thread, error) {
 }
 
 func (r *ForumRepos) GetThread(ctx context.Context, id int64) (thread.Thread, error) {
-	t, err := scanThread(r.pools.QueryRowContext(ctx, selectThreads+` WHERE id = ?`, id))
+	// 只返回 active 主题；deleted / hidden 对公开读取不可见（0004_threads_status）。
+	t, err := scanThread(r.pools.QueryRowContext(ctx, selectThreads+` WHERE id = ? AND status = 'active'`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return thread.Thread{}, forum.ErrNotFound
 	}
@@ -134,7 +138,7 @@ func (r *ForumRepos) ListThreads(ctx context.Context, q forum.ThreadQuery) ([]th
 	var args []any
 	switch q.Sort {
 	case forum.SortLatest:
-		query = selectThreads + ` WHERE node_id = ?`
+		query = selectThreads + ` WHERE node_id = ? AND status = 'active'`
 		args = append(args, q.NodeID)
 		if !q.After.IsZero() {
 			query += ` AND (last_reply_at < ? OR (last_reply_at = ? AND id < ?))`
@@ -142,7 +146,7 @@ func (r *ForumRepos) ListThreads(ctx context.Context, q forum.ThreadQuery) ([]th
 		}
 		query += ` ORDER BY last_reply_at DESC, id DESC LIMIT ?`
 	case forum.SortScore:
-		query = selectThreads + ` WHERE node_id = ?`
+		query = selectThreads + ` WHERE node_id = ? AND status = 'active'`
 		args = append(args, q.NodeID)
 		if !q.After.IsZero() {
 			query += ` AND (score < ? OR (score = ? AND id < ?))`
@@ -331,11 +335,36 @@ func (w *sqlWriteTx) InsertThread(ctx context.Context, n forum.NewThread) (int64
 	return id, nil
 }
 
+// validateParentThread 在写事务内先读父帖的 thread_id，再让 InsertPost 落库。
+// 应用层和 0005 触发器是两道独立防线：这里给出可读的领域错误，触发器兜住
+// 任何绕过 WriteTx 的裸 SQL 写入。
+func (w *sqlWriteTx) validateParentThread(ctx context.Context, parentPostID *int64, threadID int64) error {
+	if parentPostID == nil {
+		return nil
+	}
+	var parentThreadID int64
+	err := w.tx.QueryRowContext(ctx, `SELECT thread_id FROM posts WHERE id = ?`, *parentPostID).Scan(&parentThreadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: 父帖 %d 不存在", forum.ErrNotFound, *parentPostID)
+	}
+	if err != nil {
+		return fmt.Errorf("查询父帖所属主题: %w", err)
+	}
+	if parentThreadID != threadID {
+		return fmt.Errorf("%w: 父帖 %d 属于主题 %d，回复要写入主题 %d",
+			forum.ErrParentThreadMismatch, *parentPostID, parentThreadID, threadID)
+	}
+	return nil
+}
+
 func (w *sqlWriteTx) InsertPost(ctx context.Context, p forum.NewPost) (int64, error) {
+	if err := w.validateParentThread(ctx, p.ParentPostID, p.ThreadID); err != nil {
+		return 0, err
+	}
 	res, err := w.tx.ExecContext(ctx, `
-		INSERT INTO posts (thread_id, user_id, body_md, status, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		p.ThreadID, p.UserID, p.BodyMD, string(p.Status), toUnix(p.CreatedAt))
+		INSERT INTO posts (thread_id, user_id, body_md, status, parent_post_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		p.ThreadID, p.UserID, p.BodyMD, string(p.Status), p.ParentPostID, toUnix(p.CreatedAt))
 	if err != nil {
 		return 0, fmt.Errorf("插入内容: %w", err)
 	}
@@ -361,6 +390,27 @@ func (w *sqlWriteTx) TouchThread(ctx context.Context, threadID int64, at time.Ti
 	}
 	if affected == 0 {
 		return forum.ErrNotFound
+	}
+	return nil
+}
+
+// AppendOutbox 把领域事件写进 outbox，绑定在调用方的同一个 *sql.Tx 上。
+// 事件先校验再序列化，event_id 冲突（同幂等键重复投递）由 UNIQUE + DO NOTHING 吸收。
+func (w *sqlWriteTx) AppendOutbox(ctx context.Context, e event.DomainEvent) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("序列化领域事件: %w", err)
+	}
+	_, err = w.tx.ExecContext(ctx, `
+		INSERT INTO domain_event_outbox (event_id, type, payload, status, attempts, created_at)
+		VALUES (?, ?, ?, 'pending', 0, ?)
+		ON CONFLICT(event_id) DO NOTHING`,
+		e.ID, strconv.Itoa(int(e.Type)), string(payload), toUnix(e.OccurredAt))
+	if err != nil {
+		return fmt.Errorf("追加 outbox 事件: %w", err)
 	}
 	return nil
 }

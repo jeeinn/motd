@@ -437,3 +437,44 @@
   - `cmd/server` 补 `TestNavigationRedrawsInPlace` 与真实 SSH `TestMVPNavigationRedrawsInPlace`；`cmdOnlySGR` 升为 `cmdOnlyWhitelistedANSI`。
   - **真实 Windows OpenSSH 客户端实测**：连按 `jjj` → 3 次 `\x1b[8A`、24 次 `\x1b[K`（3×8 行）、清屏/OSC/备用屏 0 次；`go build` / `go vet` / `go test -count=1 ./...` 0 FAIL（479 测试函数）。
 - 关联：`DEVIATIONS.md` R22、`docs/MVP-DELIVERY.md §11`。
+
+## ADR-028 领域事件事务性发件箱（outbox）：写内落库、提交后投递
+
+- 状态：已采纳（2026-11-19，P1-M1）
+- 结论：
+  1. 新增 `domain_event_outbox` 表（迁移 `0006`）；`WriteTx.AppendOutbox` 把事件与业务写**在同一事务内**落库，`event_id` UNIQUE 做入库去重；
+  2. 投递在 `repos.Write` **提交成功后**由 `application/forum/outbox.go` 调度器执行：`status` CAS 领取（pending→dispatching）→ 调 `DomainEventSink.Publish` → delivered / failed；**写事务内绝不调 plugin handler**；
+  3. 语义为 at-least-once：崩溃残留 `pending` 由启动 `RecoverPending` 重扫（并退回 dispatching），订阅者侧 `events.DomainBus` 按 `DomainEvent.ID` 有界去重（cap 4096）达到至多一次；
+  4. `failed` 为终态、不自动重试（attempts 仍递增）；要"失败定时重投"属另开需求。
+- 理由：
+  - P0 事件仅进程内同步派发、崩溃丢事件（ADR-015）；outbox 让事件与业务写原子化，是"可靠投递"的最小实现。
+  - 网络调用（plugin handler）必须在写事务外：单写连接恒为 1，3s 超时，事务内调外部会拖垮队列。
+  - DB 侧 UNIQUE + 总线侧去重双防线，覆盖"投递后崩溃、重启重投"的重复风险。
+- 代价 / 边界：
+  - 每条事件额外 2 次 writer.Submit（CAS 领取 + 状态回写），单条发帖约 +2 次事务提交；MVP 量级可接受，压测时关注（P3）。
+  - `seen` map 有界，触顶清空最坏情况是一次旧事件重投，订阅者自身仍需幂等。
+  - outbox payload 正常由 `json.Marshal` 生成；若被外部篡改致反序列化失败，该行停 pending 并让投递报错（不可达路径）。
+- 验证：
+  - `archtest/outbox_test.go` AST 守卫 + 3 负向注入（AppendOutbox 在闭包外 / Publish 在闭包内 / 调用缺失）；`outbox_integration_test.go` 覆盖同事务写与回滚丢弃、event_id 去重、CAS 状态流转、崩溃恢复、端到端投递；`plugin/events` 去重单测。
+  - 隔离库迁移演练：v3（schema=3）→ v6 成功，`domain_event_outbox` 表建成，启动 `RecoverPending` requeued=0；从迁移前备份回滚精确回到 v3。
+- 关联：`docs/PHASE1-PLAN.md` R12、`P0-PLAN.md §7 R12`、`ADR-015`。
+
+## ADR-029 P1 数据完整性前置：threads.status 与回复父子同主题约束
+
+- 状态：已采纳（2026-11-19，P1-M1）
+- 结论：
+  1. R9：迁移 `0004` 给 `threads` 加 `status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted','hidden'))`，常量默认自动回填历史行；`ListThreads`/`GetThread` 只认 `active`，主题软删不物理删（与 `posts.status` 口径一致）；
+  2. R8：迁移 `0005` 建两条 `BEFORE` 触发器（INSERT / UPDATE 各一，SQLite 不支持 `INSERT, UPDATE` 连写），当 `parent_post_id` 非空时校验父帖 `thread_id = NEW.thread_id`，不等或父帖不存在即 `RAISE(ABORT)`；应用层 `InsertPost` 在同事务先查父 `thread_id` 再插（双保险，错误更可读）；
+  3. 只加触发器与列，不重建 `threads`/`posts` 表，历史数据零改写。
+- 理由：
+  - 主题软删是 P1 "有帖节点只归档不物理删" 与投票/审核状态的共同前置；`threads` 此前无 `status` 列，删除无处落地（`P0-PLAN §7 R9`）。
+  - 投票 score 要记到正确主题，必须先保证回复的父帖与子帖同属一个 thread（R8）；否则跨主题回复会让分数归属错乱。
+  - 触发器兜住裸 SQL/UPDATE 路径，应用层守卫兜住业务路径，两层都不依赖调用方自觉。
+- 代价 / 边界：
+  - `status='hidden'` 暂与 `deleted` 同样从公开视图过滤，二者区分留 P1 审核场景。
+  - 触发器对 `parent_post_id IS NULL` 的扁平回帖不生效（符合现状）。
+  - 迁移只向前，回退靠迁移前备份恢复（M0 已验证恢复能力）。
+- 验证：
+  - `migrate_test.go` 历史行回填与 fresh 版本=6；`repo_forum_parent_test.go` 覆盖跨主题写入被拒（应用层 + 裸 SQL 两条路径）；`archtest/parent_thread_test.go` 3 负向注入（缺校验调用 / 缺比较 / 触发器缺 RAISE）。
+  - 隔离库实测：2 条历史主题迁移后 `status=active=2`，触发器 `posts_parent_same_thread_insert/update` 均建成，回滚后列与触发器均消失、数据完整。
+- 关联：`docs/PHASE1-PLAN.md` R8/R9、`P0-PLAN.md §7 R8/R9`、`ADR-011`。

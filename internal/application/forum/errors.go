@@ -17,6 +17,8 @@ var (
 	ErrInvalidSort   = errors.New("排序方式不合法")
 	ErrInvalidCursor = errors.New("分页游标不合法")
 	ErrInvalidLimit  = errors.New("分页大小不合法")
+	// ErrParentThreadMismatch 表示回复的父帖不属于同一主题（R8）。
+	ErrParentThreadMismatch = errors.New("父帖与回复不在同一主题")
 )
 
 // RateLimitError 表示命中发帖限流（Q6：每人 60 秒 1 帖、每小时 10 帖）。

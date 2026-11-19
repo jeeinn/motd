@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/domain/post"
 	"github.com/jeeinn/motd/internal/domain/thread"
@@ -25,6 +26,7 @@ type fakeState struct {
 	threads      map[int64]thread.Thread
 	posts        map[int64]post.Post
 	users        map[int64]user.Status
+	outboxEvents []event.DomainEvent
 	nextThreadID int64
 	nextPostID   int64
 }
@@ -37,6 +39,7 @@ func (s fakeState) clone() fakeState {
 		users:        make(map[int64]user.Status, len(s.users)),
 		nextThreadID: s.nextThreadID,
 		nextPostID:   s.nextPostID,
+		outboxEvents: append([]event.DomainEvent(nil), s.outboxEvents...),
 	}
 	for k, v := range s.nodes {
 		out.nodes[k] = v
@@ -267,6 +270,11 @@ func (x *fakeTx) InsertPost(ctx context.Context, p NewPost) (int64, error) {
 		BodyMD: p.BodyMD, Status: p.Status, CreatedAt: p.CreatedAt,
 	}
 	return id, nil
+}
+
+func (x *fakeTx) AppendOutbox(ctx context.Context, e event.DomainEvent) error {
+	x.state.outboxEvents = append(x.state.outboxEvents, e)
+	return nil
 }
 
 func (x *fakeTx) TouchThread(ctx context.Context, threadID int64, at time.Time, scoreDelta int64) error {

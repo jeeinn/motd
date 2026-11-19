@@ -39,6 +39,7 @@ type Service struct {
 	repos           Repos
 	now             func() time.Time
 	sink            DomainEventSink
+	outbox          *Outbox
 	onPublishErr    PublishObserver
 	publishFailures atomic.Int64
 }
@@ -59,6 +60,12 @@ func WithEventSink(sink DomainEventSink) ServiceOption {
 	return func(s *Service) { s.sink = sink }
 }
 
+// WithOutbox 启用事务性发件箱（R12）：事件在写事务内 AppendOutbox，
+// 提交后才由调度器投递。未注入时保持 P0 的「提交后直接 publish」行为。
+func WithOutbox(o *Outbox) ServiceOption {
+	return func(s *Service) { s.outbox = o }
+}
+
 // WithPublishObserver 注入投递失败观察者，装配层通常接 slog。
 func WithPublishObserver(obs PublishObserver) ServiceOption {
 	return func(s *Service) { s.onPublishErr = obs }
@@ -73,6 +80,22 @@ func (s *Service) publish(ctx context.Context, e event.DomainEvent) {
 		return
 	}
 	if err := s.sink.Publish(ctx, e); err != nil {
+		s.publishFailures.Add(1)
+		if s.onPublishErr != nil {
+			s.onPublishErr(e, err)
+		}
+	}
+}
+
+// afterCommit 是写用例提交后的统一出口。
+// 启用 outbox 时，事件已在事务内落库，这里只触发提交后投递；
+// 投递失败不改变已提交的业务结果，但必须计数并上报。
+func (s *Service) afterCommit(ctx context.Context, e event.DomainEvent) {
+	if s.outbox == nil {
+		s.publish(ctx, e)
+		return
+	}
+	if _, _, err := s.outbox.DispatchPending(ctx); err != nil {
 		s.publishFailures.Add(1)
 		if s.onPublishErr != nil {
 			s.onPublishErr(e, err)
@@ -198,6 +221,7 @@ func (s *Service) CreateThread(ctx context.Context, actor Actor, in CreateThread
 
 	now := s.now().UTC()
 	var threadID, postID int64
+	var ev event.DomainEvent
 	err := s.repos.Write(ctx, func(tx WriteTx) error {
 		if err := s.checkWritePermission(ctx, tx, actor.UserID); err != nil {
 			return err
@@ -228,22 +252,30 @@ func (s *Service) CreateThread(ctx context.Context, actor Actor, in CreateThread
 			ThreadID: threadID, UserID: actor.UserID, BodyMD: in.Body,
 			Status: post.StatusNormal, CreatedAt: now,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		// 事件在写事务内构造并（若启用 outbox）随业务写一起落库。
+		ev = event.DomainEvent{
+			ID:         fmt.Sprintf("post:%d", postID),
+			Type:       event.EventPostCreated,
+			OccurredAt: now,
+			ActorID:    actor.UserID,
+			NodeID:     in.NodeID,
+			ThreadID:   threadID,
+			PostID:     postID,
+			FirstPost:  true,
+		}
+		if s.outbox != nil {
+			return tx.AppendOutbox(ctx, ev)
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
-	// 事务已提交才发布：订阅者（插件）看到的是确定状态，不会读到未提交数据。
-	s.publish(ctx, event.DomainEvent{
-		ID:         fmt.Sprintf("post:%d", postID),
-		Type:       event.EventPostCreated,
-		OccurredAt: now,
-		ActorID:    actor.UserID,
-		NodeID:     in.NodeID,
-		ThreadID:   threadID,
-		PostID:     postID,
-		FirstPost:  true,
-	})
+	// 事务已提交才触发出口：订阅者（插件）看到的是确定状态，不会读到未提交数据。
+	s.afterCommit(ctx, ev)
 	return threadID, nil
 }
 
@@ -266,6 +298,7 @@ func (s *Service) CreatePost(ctx context.Context, actor Actor, in CreatePostInpu
 
 	now := s.now().UTC()
 	var postID int64
+	var ev event.DomainEvent
 	err := s.repos.Write(ctx, func(tx WriteTx) error {
 		if err := s.checkWritePermission(ctx, tx, actor.UserID); err != nil {
 			return err
@@ -294,20 +327,27 @@ func (s *Service) CreatePost(ctx context.Context, actor Actor, in CreatePostInpu
 		}
 		// 一条 UPDATE 同时维护 last_reply_at 与 score。
 		// P0 无投票来源，scoreDelta 恒为 0；P1 的投票可直接复用这条事务路径。
-		return tx.TouchThread(ctx, in.ThreadID, now, 0)
+		if err := tx.TouchThread(ctx, in.ThreadID, now, 0); err != nil {
+			return err
+		}
+		ev = event.DomainEvent{
+			ID:         fmt.Sprintf("post:%d", postID),
+			Type:       event.EventPostCreated,
+			OccurredAt: now,
+			ActorID:    actor.UserID,
+			ThreadID:   in.ThreadID,
+			PostID:     postID,
+			FirstPost:  false,
+		}
+		if s.outbox != nil {
+			return tx.AppendOutbox(ctx, ev)
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
-	s.publish(ctx, event.DomainEvent{
-		ID:         fmt.Sprintf("post:%d", postID),
-		Type:       event.EventPostCreated,
-		OccurredAt: now,
-		ActorID:    actor.UserID,
-		ThreadID:   in.ThreadID,
-		PostID:     postID,
-		FirstPost:  false,
-	})
+	s.afterCommit(ctx, ev)
 	return postID, nil
 }
 
