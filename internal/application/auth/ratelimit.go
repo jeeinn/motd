@@ -252,6 +252,17 @@ func (r *RateLimiter) AllowVerify(emailHash string) error {
 	return r.check(LimitVerify, emailHash)
 }
 
+// AllowScope 按**本实例的配置**检查任意作用域字符串。邮箱流程需要三种不同
+// 窗口（60s 重发冷却 / 每小时 5 封 / 5 次尝试），各自构造一个带独立
+// WithRateLimitConfig 的 RateLimiter 即可复用同一套状态机，不必另起一套实现。
+// scope 由调用方编目的（如 "e:<hash>" / "i:<hash>"），本方法不接触明文。
+func (r *RateLimiter) AllowScope(scope string) error {
+	if scope == "" {
+		return ErrInvalidRateLimitScope
+	}
+	return r.check(LimitVerify, scope)
+}
+
 // Reset 清掉一个作用域的计数，供运维处置误锁与测试使用。
 func (r *RateLimiter) Reset(kind LimitKind, scope string) {
 	r.mu.Lock()

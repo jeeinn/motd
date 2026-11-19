@@ -22,6 +22,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/presence"
 	"github.com/jeeinn/motd/internal/config"
 	"github.com/jeeinn/motd/internal/domain/event"
+	emailinfra "github.com/jeeinn/motd/internal/infrastructure/email"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
@@ -214,6 +215,27 @@ func run() error {
 	logger.Info("SSH host key 就绪", "fingerprint", sshSrv.HostKeyFingerprint())
 	logger.Info("公钥绑定就绪", "store", "ssh_keys", "revoker", "ssh_sessions", "modes", "keys|key add|key rm")
 	logger.Info("注销边界就绪", "command", "/logout", "revoker", "ssh_sessions_by_user")
+
+	// P1-M5 邮箱认证：只有显式 MOTD_EMAIL_ENABLED=true 才构造投递通道。
+	// 日志只报「是否启用 / 主机 / 端口」，绝不打印账号与授权码（OPS §3）。
+	if cfg.Email.Enabled {
+		sender := emailinfra.NewSMTPSender(emailinfra.Config{
+			Host: cfg.Email.SMTPHost, Port: cfg.Email.SMTPPort,
+			User: cfg.Email.SMTPUser, Pass: cfg.Email.SMTPPass, From: cfg.Email.From,
+		})
+		defer sender.Close()
+		emailSvc := auth.NewEmailAuthService(
+			sqlite.NewEmailRepos(pools, writer), sender, sshSrv,
+			auth.WithEmailAudit(auditLogger),
+		)
+		handler.withEmail(emailSvc)
+		logger.Info("邮箱认证就绪",
+			"enabled", true, "smtp_host", cfg.Email.SMTPHost, "smtp_port", cfg.Email.SMTPPort,
+			"commands", "register|verify|resend|recover|login email")
+	} else {
+		logger.Info("邮箱认证未启用", "enabled", false)
+	}
+
 	// P0-19：/login github 走进程内 Device Flow（Q3，不开 HTTP 端点）。
 	// P1-M2：发起屏已替换为论坛同款 Screen（ScreenLogin + 共享 Renderer +
 	// 同源状态栏）；轮询中的 waiting/retry/终态仍是逐行固定文本（进度反馈，

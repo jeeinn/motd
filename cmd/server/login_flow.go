@@ -230,6 +230,12 @@ func isGitHubLogin(inv command.Invocation) bool {
 	return inv.Name == "login" && len(inv.Args) == 1 && inv.Args[0] == "github"
 }
 
+// isEmailLogin 是 /login 的第二个白名单 provider（P1-M5）。
+// 参数必须精确等于 email，其余一律落到 UnsupportedProvider，绝不回显原文。
+func isEmailLogin(inv command.Invocation) bool {
+	return inv.Name == "login" && len(inv.Args) == 1 && inv.Args[0] == "email"
+}
+
 // isLoginCancelKey 只把 Esc / Ctrl-C 当作取消；其余按键在登录态下一律忽略
 // 且零回显（P0-22 的用户文本不得写回终端）。
 func isLoginCancelKey(m input.KeyMsg) bool {

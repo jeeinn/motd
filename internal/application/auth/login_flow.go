@@ -79,7 +79,7 @@ const (
 	LoginTextWelcome               = "当前账号："
 	LoginTextWriteReady            = "已获得写权限（当前连接公钥已自动绑定）。"
 	LoginTextAlreadyUser           = "当前会话已登录，无需重复 /login。"
-	LoginTextUnsupportedProvider   = "仅支持 /login github。"
+	LoginTextUnsupportedProvider   = "仅支持 /login github 或 /login email。"
 	LoginTextNotReady              = "登录服务尚未就绪。"
 	LoginTextDeviceCodeInvalidated = "登录已中止（设备码响应不合法）。"
 	// LoginTextRateLimited 是命中认证限流时的固定文案；剩余秒数由本地数值拼出，

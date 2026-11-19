@@ -43,6 +43,8 @@ type inputHandler struct {
 	// P1-M2 认证安全：安全门与注销用例都是进程级单例，每会话只引用不复制。
 	gate   *auth.SecurityGate
 	logout *auth.LogoutService
+	// P1-M5 邮箱认证用例，进程级单例。
+	email *auth.EmailAuthService
 
 	// MVP 页面控制器依赖：进程级共享，每会话只复制状态不复制依赖。
 	forum    *forum.Service
@@ -59,6 +61,12 @@ func (h *inputHandler) withSecurity(gate *auth.SecurityGate) *inputHandler {
 // withLogout 注入注销边界用例。
 func (h *inputHandler) withLogout(svc *auth.LogoutService) *inputHandler {
 	h.logout = svc
+	return h
+}
+
+// withEmail 注入 P1-M5 邮箱认证用例；保持无参构造，既有会话层测试零改动。
+func (h *inputHandler) withEmail(svc *auth.EmailAuthService) *inputHandler {
+	h.email = svc
 	return h
 }
 
@@ -244,6 +252,16 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			}
 			return false
 		}
+		if pc.emailFlow != nil {
+			// 邮箱分步输入优先于编辑态与命令表；密码字段隐藏回显（ADR-026）。
+			pc.invalidateScreen()
+			done, cancelled := pc.emailFlow.step(ctx, pc, m)
+			if cancelled || done {
+				pc.emailFlow = nil
+				_ = pc.refresh(ctx, sess)
+			}
+			return false
+		}
 		if pc.editor != nil {
 			// 编辑态有逐字符回显与固定提示，属于非屏幕输出（ADR-027）。
 			pc.invalidateScreen()
@@ -406,7 +424,18 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 				}
 				return outcomeStartLogin // 发起屏由 loginFlow.begin 统一输出
 			}
+			if isEmailLogin(inv) {
+				if h.email == nil {
+					_, _ = io.WriteString(sess, emailTextNotReady+"\r\n")
+				} else {
+					pc.invalidateScreen()
+					pc.emailFlow = newEmailFlow(emailFlowLogin, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false)
+				}
+				return outcomeContinue
+			}
 			_, _ = io.WriteString(sess, auth.LoginTextUnsupportedProvider+"\r\n")
+		case "register", "recover", "verify", "resend":
+			h.handleEmailCommand(ctx, sess, pc, inv)
 		case "logout":
 			_, _ = io.WriteString(sess, h.runLogout(ctx, sess))
 		default:

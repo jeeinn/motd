@@ -28,6 +28,9 @@ type Config struct {
 	// GitHubClientID 是 Q7 的 OAuth App client_id，只从 MOTD_GITHUB_CLIENT_ID 读取。
 	// Device Flow 不需要 client_secret（§7 R1）；值不进仓库、不写 systemd unit（OPS §3）。
 	GitHubClientID string
+	// Email 是邮箱投递配置（P1-M5）。Enabled=false 时为零值，进程不构造 Sender。
+	// 授权码只在进程内存中流转，绝不进日志与任何持久化结构。
+	Email EmailConfig
 	// AuthLimitMaxFailures 是同一作用域在窗口内允许的最大认证尝试/失败次数。
 	AuthLimitMaxFailures int
 	// AuthLimitWindow 是认证限流的滑动窗口长度。
@@ -78,6 +81,21 @@ func Load() (Config, error) {
 		LogLevel:             strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
 		LogFormat:            strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
 	}
+
+	// 邮箱配置显式 resolve：启用时逐项校验、缺哪项报哪项，不做静默兜底；
+	// 未启用时零影响（不触碰任何 Sender）。授权码只在此处从环境读入内存。
+	emailCfg, err := resolveEmail(
+		os.Getenv("MOTD_EMAIL_ENABLED"),
+		os.Getenv("MOTD_SMTP_HOST"),
+		os.Getenv("MOTD_SMTP_PORT"),
+		os.Getenv("MOTD_SMTP_USER"),
+		os.Getenv("MOTD_SMTP_PASS"),
+		os.Getenv("MOTD_EMAIL_FROM"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Email = emailCfg
 
 	switch cfg.LogLevel {
 	case "debug", "info", "warn", "error":

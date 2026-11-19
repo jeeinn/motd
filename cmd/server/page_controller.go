@@ -72,6 +72,11 @@ type pageController struct {
 	// 上一屏占用的行数（ADR-027）。>0 表示屏幕连续、可原地重绘；
 	// 任何非屏幕输出（提示/回显/登录文本）都会把它清零退回追加模式。
 	screenLines int
+	// P1-M5 邮箱认证：pending 状态每会话一份，/register|/recover 后供
+	// /verify 使用；重连即失效（验证码 TTL 仅 10 分钟）。emailFlow 非空时优先吃按键。
+	pendingEmail   string
+	pendingPurpose string
+	emailFlow      *emailFlow
 }
 
 type editorStage uint8

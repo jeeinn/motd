@@ -54,8 +54,13 @@ var defaultCommands = []Command{
 	// v0.2.1：无参删当前主题，带一个 id 则删当前主题下的该条回复（仅作者）。
 	{Name: "delete", Usage: "/delete [id]", Summary: "删除当前主题 / 指定回复（仅作者）", MinArgs: 0, MaxArgs: 1},
 	// MinArgs=0 是刻意的：/login 不带参数时不落到通用「参数个数不符」，
-	// 而是进入 handle 的 provider 白名单分支，给出「仅支持 /login github」。
-	{Name: "login", Usage: "/login github", Summary: "GitHub Device Flow 登录", MinArgs: 0, MaxArgs: 1, Aliases: []string{"signin"}},
+	// 而是进入 handle 的 provider 白名单分支，给出支持的 provider 提示。
+	{Name: "login", Usage: "/login github | /login email", Summary: "GitHub Device Flow / 邮箱密码登录", MinArgs: 0, MaxArgs: 1, Aliases: []string{"signin"}},
+	// P1-M5 邮箱认证：交互输入邮箱/密码，验证码经 SMTP 发送；不做 HTTP 端点。
+	{Name: "register", Usage: "/register", Summary: "邮箱注册（交互输入邮箱，收验证码）", MaxArgs: 0},
+	{Name: "verify", Usage: "/verify <验证码>", Summary: "提交验证码并设置密码（完成注册 / 找回）", MinArgs: 1, MaxArgs: 1},
+	{Name: "resend", Usage: "/resend", Summary: "重发邮箱验证码（60 秒冷却）", MaxArgs: 0},
+	{Name: "recover", Usage: "/recover", Summary: "邮箱找回密码（交互输入邮箱）", MaxArgs: 0},
 	// P1-M4：/keys 带一个指纹参数时查单钥详情（label / created_at / last_used_at）。
 	{Name: "keys", Usage: "/keys [fingerprint]", Summary: "列出公钥 / 查看单钥详情", MinArgs: 0, MaxArgs: 1},
 	// P0-18：/key add 绑定「当前连接」的公钥，不接受任何公钥文本参数；
