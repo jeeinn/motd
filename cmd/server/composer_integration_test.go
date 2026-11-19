@@ -137,6 +137,48 @@ func TestPageControllerBodyPasteWithNewlinesDoesNotSubmit(t *testing.T) {
 	cmdOnlyWhitelistedANSI(t, sess.output())
 }
 
+func TestPageControllerBodyBackspaceMergesEmptyLineWithWhitelistedANSI(t *testing.T) {
+	ctx, pc, sess := enterBodyForNewThread(t)
+	typeInto(t, ctx, sess, pc, "第一行")
+	pressEnter(t, ctx, sess, pc) // 正文 Enter = 换行，光标到空行行首
+	sess.reset()
+
+	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyBackspace}); err != nil {
+		t.Fatalf("空行退格应成功: %v", err)
+	}
+	out := sess.output()
+	if !strings.Contains(out, "\x1b[1A") || !strings.Contains(out, "\x1b[K") {
+		t.Fatalf("跨行合并应发 CUU+EL: %q", out)
+	}
+	if !strings.Contains(out, "第一行") {
+		t.Fatalf("重绘应含合并后的上一行文本: %q", out)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
+	for _, banned := range []string{"\x1b[H", "\x1b[f", "\x1b[B", "\x1b[2J", "\x1b[J", "\x1b[?1049h"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("输出含禁用序列 %q: %q", banned, out)
+		}
+	}
+	if got, want := pc.editor.body.Text(), "第一行"; got != want {
+		t.Fatalf("合并后缓冲应只剩上一行: got=%q want=%q", got, want)
+	}
+
+	// 合并后继续输入接在末尾，提交落库仍是单行。
+	typeInto(t, ctx, sess, pc, "继续")
+	submitBody(t, ctx, sess, pc)
+	threads, err := pc.service.ListThreads(ctx, forum.ListThreadsQuery{NodeID: 1, Sort: forum.SortLatest})
+	if err != nil || len(threads.Rows) != 1 {
+		t.Fatalf("发帖未落库: rows=%d err=%v", len(threads.Rows), err)
+	}
+	detail, err := pc.service.GetThread(ctx, threads.Rows[0].ID)
+	if err != nil || len(detail.Posts) != 1 {
+		t.Fatalf("首帖正文缺失: posts=%d err=%v", len(detail.Posts), err)
+	}
+	if got, want := detail.Posts[0].BodyMD, "第一行继续"; got != want {
+		t.Fatalf("合并后正文落库不符: got=%q want=%q", got, want)
+	}
+}
+
 func TestPageControllerBodyLimitHintAndNoEcho(t *testing.T) {
 	ctx, pc, sess := enterBodyForNewThread(t)
 	// 收紧上限以低成本回归提示路径（生产仍用 forum.MaxBodyBytes）。

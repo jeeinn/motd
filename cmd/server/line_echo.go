@@ -13,7 +13,8 @@ package main
 //     内容，二者不共用同一条写入路径（§3.5 的信任域分离）。
 //  3. 导航键 j/k/Enter 在非编辑态是「命令」不是文本，不回显；只有行编辑态回显。
 //
-// 因此本文件不触碰 safe/ansi.go 的 SGR 白名单，既有 archtest 守卫全部保持。
+// 因此本文件不修改 safe/ansi.go 的白名单表，既有 archtest 守卫全部保持；
+// v0.3.0 的跨行退格重绘只是在服务端调用已获准的 CursorUp / ClearToEOL。
 
 import (
 	"io"
@@ -90,6 +91,24 @@ func (e *lineEcho) backspace(deleted bool) {
 	e.cols = e.cols[:len(e.cols)-1]
 	for i := 0; i < w; i++ {
 		_, _ = io.WriteString(e.out, "\b \b")
+	}
+}
+
+// mergeBackspace 回显"空行退格跨行合并"。调用时光标停在刚被删除的空行行首
+// （列 0）：先用白名单 CUU 上移一行回到上一行，\r 回车首，EL 清掉上一行旧内容，
+// 再把合并后的上一行文本逐 rune 经 SanitizeText 重写一遍。这样光标自然停在
+// 上一行末尾（两行拼接处），用户后续输入接在那里。
+//
+// 控制序列只由 safe 包的服务端白名单函数生成（CursorUp / ClearToEOL），
+// 绝不内联 ESC 字面量、绝不发 CUP/CUD/ED/DECSET；用户文本仍走 SanitizeText，
+// 与编辑控制分属两条写入路径（§3.5 信任域分离）。列宽栈重建为合并行各字符宽度。
+func (e *lineEcho) mergeBackspace(merged string) {
+	_, _ = io.WriteString(e.out, safe.CursorUp(1))
+	_, _ = io.WriteString(e.out, "\r")
+	_, _ = io.WriteString(e.out, safe.ClearToEOL())
+	e.cols = nil
+	for _, r := range merged {
+		e.rune(r)
 	}
 }
 

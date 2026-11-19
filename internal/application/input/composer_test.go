@@ -92,23 +92,113 @@ func TestComposerPasteWithNewlinesDoesNotSubmit(t *testing.T) {
 	}
 }
 
-func TestComposerBackspaceDoesNotCrossLines(t *testing.T) {
+func TestComposerBackspaceDeletesWithinCurrentLine(t *testing.T) {
 	c := NewComposer()
 	c.Start()
 	runesOf(c, "abc")
 	feed(t, c, KeyMsg{Kind: KeyEnter})
-	// 新行是空行，退格不得吞掉上一行的 'c'。
-	op := feed(t, c, KeyMsg{Kind: KeyBackspace})
-	if op.Deleted {
-		t.Fatal("空行退格应报告未删除")
-	}
-	if got := c.Lines(); len(got) != 2 || got[0] != "abc" || got[1] != "" {
-		t.Fatalf("退格跨行破坏了缓冲: %q", got)
-	}
 	runesOf(c, "xy")
-	feed(t, c, KeyMsg{Kind: KeyBackspace})
-	if got := c.Text(); got != "abc\nx" {
-		t.Fatalf("当前行退格应删掉本行末字符: %q", got)
+	op := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if op.Kind != OpBackspace || !op.Deleted || op.MergedLines {
+		t.Fatalf("本行非空时退格应只删本行末字符: %+v", op)
+	}
+	if got, want := c.Text(), "abc\nx"; got != want {
+		t.Fatalf("本行退格应删掉本行末字符: got=%q want=%q", got, want)
+	}
+}
+
+func TestComposerBackspaceMergesEmptyLineIntoPrevious(t *testing.T) {
+	c := NewComposer()
+	c.Start()
+	runesOf(c, "abc")
+	feed(t, c, KeyMsg{Kind: KeyEnter}) // 新行是空行
+	op := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if op.Kind != OpBackspace || !op.MergedLines || op.Deleted {
+		t.Fatalf("空行退格应报告跨行合并: %+v", op)
+	}
+	if op.MergedText != "abc" {
+		t.Fatalf("合并后的上一行文本不符: got=%q want=%q", op.MergedText, "abc")
+	}
+	if got := c.Lines(); len(got) != 1 || got[0] != "abc" {
+		t.Fatalf("跨行合并后缓冲应只剩上一行: %q", got)
+	}
+	if got, want := c.Text(), "abc"; got != want {
+		t.Fatalf("跨行合并后正文不符: got=%q want=%q", got, want)
+	}
+	// 合并后继续输入应接在上一行末尾（即两行拼接处）。
+	runesOf(c, "d")
+	if got, want := c.Text(), "abcd"; got != want {
+		t.Fatalf("合并后输入应接在末尾: got=%q want=%q", got, want)
+	}
+}
+
+func TestComposerBackspaceFirstEmptyLineNoAction(t *testing.T) {
+	c := NewComposer()
+	c.Start()
+	op := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if op.Kind != OpBackspace || op.Deleted || op.MergedLines || op.MergedText != "" {
+		t.Fatalf("首行空行退格应无动作: %+v", op)
+	}
+	if got := c.Lines(); len(got) != 1 || got[0] != "" {
+		t.Fatalf("首行空退格不得改动缓冲: %q", got)
+	}
+}
+
+func TestComposerBackspaceConsecutiveEmptyLinesMergeOneByOne(t *testing.T) {
+	c := NewComposer()
+	c.Start()
+	runesOf(c, "a")
+	feed(t, c, KeyMsg{Kind: KeyEnter}) // 第 2 行空
+	feed(t, c, KeyMsg{Kind: KeyEnter}) // 第 3 行空
+	if got := len(c.Lines()); got != 3 {
+		t.Fatalf("应有 3 行，实际 %d", got)
+	}
+
+	op1 := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if !op1.MergedLines || op1.MergedText != "" {
+		t.Fatalf("第一次应并入空的上一行: %+v", op1)
+	}
+	if got := len(c.Lines()); got != 2 {
+		t.Fatalf("第一次合并后应剩 2 行，实际 %d", got)
+	}
+
+	op2 := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if !op2.MergedLines || op2.MergedText != "a" {
+		t.Fatalf("第二次应并入含 'a' 的上一行: %+v", op2)
+	}
+	if got, want := c.Text(), "a"; got != want {
+		t.Fatalf("连续合并后正文不符: got=%q want=%q", got, want)
+	}
+
+	op3 := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if !op3.Deleted || op3.MergedLines {
+		t.Fatalf("并入首行后应退回单行删字: %+v", op3)
+	}
+	if got := c.Text(); got != "" {
+		t.Fatalf("首行字符应被删掉: %q", got)
+	}
+
+	op4 := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if op4.Deleted || op4.MergedLines {
+		t.Fatalf("首行空退格应无动作: %+v", op4)
+	}
+}
+
+func TestComposerBackspaceMergeWideChars(t *testing.T) {
+	c := NewComposer()
+	c.Start()
+	runesOf(c, "中文")
+	feed(t, c, KeyMsg{Kind: KeyEnter})
+	op := feed(t, c, KeyMsg{Kind: KeyBackspace})
+	if !op.MergedLines || op.MergedText != "中文" {
+		t.Fatalf("宽字符行合并文本不符: %+v", op)
+	}
+	if got, want := c.Text(), "中文"; got != want {
+		t.Fatalf("宽字符合并后正文不符: got=%q want=%q", got, want)
+	}
+	runesOf(c, "字")
+	if got, want := c.Text(), "中文字"; got != want {
+		t.Fatalf("宽字符合并后输入应接在末尾: got=%q want=%q", got, want)
 	}
 }
 

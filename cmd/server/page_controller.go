@@ -582,7 +582,11 @@ func (p *pageController) bodyKey(ctx context.Context, sess pageSession, m input.
 	case input.OpPaste:
 		p.echo.pasteBlock(op.Text)
 	case input.OpBackspace:
-		p.echo.backspace(op.Deleted)
+		if op.MergedLines {
+			p.echo.mergeBackspace(op.MergedText)
+		} else {
+			p.echo.backspace(op.Deleted)
+		}
 	case input.OpNewline, input.OpSubmit:
 		p.echo.newline()
 		if op.Kind == input.OpSubmit {

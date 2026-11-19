@@ -94,6 +94,59 @@ func TestLineEchoPasteAndNewlineReset(t *testing.T) {
 	}
 }
 
+// 跨行退格重绘只允许 ADR-027 白名单：CUU(\x1b[nA) + EL(\x1b[K) + SGR，
+// 绝不发 CUP(H/f)/CUD(B)/ED/DECSET；重绘文本逐 rune 经 SanitizeText。
+func TestLineEchoMergeBackspaceWhitelistedOnly(t *testing.T) {
+	var buf bytes.Buffer
+	e := newLineEcho(&buf)
+	e.mergeBackspace("合并后")
+	got := buf.String()
+
+	if !strings.Contains(got, "\x1b[1A") {
+		t.Fatalf("跨行合并应先 CUU 上移一行: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[K") {
+		t.Fatalf("跨行合并应发 EL 清行: %q", got)
+	}
+	if !strings.Contains(got, "合并后") {
+		t.Fatalf("重绘文本应是合并后的内容: %q", got)
+	}
+	cmdOnlyWhitelistedANSI(t, got)
+	for _, banned := range []string{"\x1b[H", "\x1b[f", "\x1b[B", "\x1b[2J", "\x1b[J", "\x1b[?1049h"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("跨行合并不得发出禁用序列 %q: %q", banned, got)
+		}
+	}
+	if len(e.cols) != 3 || e.cols[0] != 2 || e.cols[1] != 2 || e.cols[2] != 2 {
+		t.Fatalf("重绘后列宽栈应记录 3 个汉字各 2 列: %v", e.cols)
+	}
+}
+
+func TestLineEchoMergeBackspaceSanitizesMergedText(t *testing.T) {
+	var buf bytes.Buffer
+	e := newLineEcho(&buf)
+	e.mergeBackspace("a\x1b[2Jb") // 合并文本里夹带清屏注入
+	got := buf.String()
+	if !strings.Contains(got, "␛") {
+		t.Fatalf("合并文本里的 ESC 应转可见控制图示: %q", got)
+	}
+	cmdOnlyWhitelistedANSI(t, got) // 注入的 2J 不得变成真正的清屏序列
+}
+
+func TestLineEchoMergeBackspaceWideCharColumns(t *testing.T) {
+	var buf bytes.Buffer
+	e := newLineEcho(&buf)
+	e.mergeBackspace("中文")
+	if len(e.cols) != 2 || e.cols[0] != 2 || e.cols[1] != 2 {
+		t.Fatalf("宽字符合并后列宽栈不符: %v", e.cols)
+	}
+	before := buf.String()
+	e.backspace(true)
+	if got := buf.String(); !strings.HasSuffix(got, before+"\b \b\b \b") {
+		t.Fatalf("合并后续接的退格应按 2 列擦除: %q", got)
+	}
+}
+
 func TestEchoCommandKeyGuardsPreloadedSlash(t *testing.T) {
 	var buf bytes.Buffer
 	e := newLineEcho(&buf)

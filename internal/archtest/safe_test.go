@@ -204,6 +204,79 @@ func TestCursorControlsOnlyUsedByFrame(t *testing.T) {
 }
 
 // TestRenderSystemHasNoSanitizeCall 证明服务端路径与用户路径不共用 sanitize（§3.5）。
+// ---------------------------------------------------------------------------
+// v0.3.0 跨行退格合并：composer 与 line_echo 不得内联 ESC 字面量（ADR-027）
+// ---------------------------------------------------------------------------
+
+// collectFileANSILiterals 与 collectANSILiterals 同判定，粒度到单文件，
+// 便于对跨行实现的两个文件与负向注入样本逐条检查。
+func collectFileANSILiterals(path string) ([]string, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		val, err := strconv.Unquote(lit.Value)
+		if err == nil && strings.Contains(val, "\x1b") {
+			out = append(out, val)
+		}
+		return true
+	})
+	return out, nil
+}
+
+// TestCrossLineMergeNoRawANSI 守住跨行合并的单一 ANSI 来源：composer 是纯应用
+// 逻辑、line_echo 只能调用 safe 包的服务端白名单函数（CursorUp / ClearToEOL）。
+// 两处出现任何 ESC 字面量即判违规——即便字面量本身属于白名单也不许内联，
+// 否则就从「白名单物理隔离」退化成「靠纪律约束」。
+func TestCrossLineMergeNoRawANSI(t *testing.T) {
+	root := findModuleRoot(t)
+	for _, rel := range []string{
+		filepath.Join("cmd", "server", "line_echo.go"),
+		filepath.Join("internal", "application", "input", "composer.go"),
+	} {
+		lits, err := collectFileANSILiterals(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lits) > 0 {
+			t.Errorf("%s 不得内联 ESC 字面量，须经 safe 包白名单函数生成: %q", rel, lits)
+		}
+	}
+}
+
+// TestCrossLineMergeRejectsInjectedForbiddenANSI 是负向注入：把 CUP/CUD/ED/
+// DECSET/带参 EL 塞进跨行回显样本，守卫与 allowedANSI 都必须拒绝。
+func TestCrossLineMergeRejectsInjectedForbiddenANSI(t *testing.T) {
+	for _, seq := range []string{"\x1b[H", "\x1b[f", "\x1b[B", "\x1b[2J", "\x1b[J", "\x1b[?1049h"} {
+		src := "package main\nconst bad = " + strconv.Quote(seq) + "\n"
+		tmp := filepath.Join(t.TempDir(), "line_echo.go")
+		if err := os.WriteFile(tmp, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lits, err := collectFileANSILiterals(tmp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lits) == 0 {
+			t.Errorf("注入的禁用序列 %q 未被守卫检出", seq)
+		}
+		if allowedANSI(seq) {
+			t.Errorf("禁用序列 %q 被 allowedANSI 误判为合法", seq)
+		}
+	}
+}
+
 func TestRenderSystemHasNoSanitizeCall(t *testing.T) {
 	root := findModuleRoot(t)
 	path := filepath.Join(root, "internal", "presentation", "terminal", "safe", "render.go")

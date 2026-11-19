@@ -16,8 +16,11 @@ package input
 // 为什么不把「Ctrl 与 Enter 的组合键」当提交键：通用 SSH 终端在字节流层面
 // 无法可靠区分该组合与普通 Enter，P1 不做主提交键（写进提示文案的负向断言）。
 //
-// 已知限制：KeyBackspace 只删当前行的最后一个 rune，**不跨行回到上一行**。
-// 这是刻意的范围收敛：跨行退格需要光标定位序列，违反 §3.5 的信任域边界。
+// 跨行退格合并（v0.3.0）：当前行非空时退格删本行最后一个 rune；当前行为空且
+// 不是第一行时，删除当前空行并把它并入上一行末尾——ComposerOp.MergedLines=true，
+// MergedText 携带合并后的上一行文本供 cmd 层整行重绘。合并只删行、不增字节，
+// 故不触发字节/行数上限校验；第一行空行退格无上一行可并，报 Deleted=false。
+// 光标定位不做在这层（纯应用逻辑），由回显层用 ADR-027 白名单序列实现。
 
 import (
 	"errors"
@@ -50,17 +53,21 @@ const (
 	OpNone      OpKind = iota
 	OpRune             // 追加了一个可打印字符
 	OpNewline          // 插入了一个换行（正文新增一行）
-	OpBackspace        // 当前行退格，Deleted 表示是否真的删到了字符
+	OpBackspace        // 退格：Deleted=删到本行字符；MergedLines=空行并入上一行
 	OpPaste            // 整块粘贴已收下（Text 为净化换行后的实际入正文文本）
 	OpSubmit           // 提交：缓冲区已是最终正文
 )
 
 // ComposerOp 是一次 Feed 的结果。Rune/Text/Deleted 只在对应 Kind 下有意义。
+// MergedLines/MergedText 只在 OpBackspace 且发生跨行合并时有意义：
+// MergedLines 表示当前空行已并入上一行，MergedText 是合并后的上一行文本（供回显重绘）。
 type ComposerOp struct {
-	Kind    OpKind
-	Rune    rune
-	Text    string
-	Deleted bool
+	Kind        OpKind
+	Rune        rune
+	Text        string
+	Deleted     bool
+	MergedLines bool
+	MergedText  string
 }
 
 // Composer 是单会话一份的多行正文缓冲。零值不可用，必须经 NewComposer + Start。
@@ -169,8 +176,15 @@ func (c *Composer) Feed(m KeyMsg) (ComposerOp, error) {
 	case KeyBackspace:
 		cur := &c.lines[len(c.lines)-1]
 		if len(*cur) == 0 {
-			// 已知限制：空行退格不跨到上一行（见文件头注释）。
-			return ComposerOp{Kind: OpBackspace, Deleted: false}, nil
+			// 当前行为空：第一行没有上一行可并，保持原状并报未删除。
+			if len(c.lines) == 1 {
+				return ComposerOp{Kind: OpBackspace, Deleted: false}, nil
+			}
+			// 非首行：删掉当前空行并入上一行末尾。当前行为空，故合并后的
+			// 上一行内容不变；只删行不增字节，无需重做上限校验。
+			merged := string(c.lines[len(c.lines)-2])
+			c.lines = c.lines[:len(c.lines)-1]
+			return ComposerOp{Kind: OpBackspace, MergedLines: true, MergedText: merged}, nil
 		}
 		*cur = (*cur)[:len(*cur)-1]
 		return ComposerOp{Kind: OpBackspace, Deleted: true}, nil
