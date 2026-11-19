@@ -1,0 +1,56 @@
+name: Bug 报告
+description: 报告一个复现的问题
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。安全问题请勿用公开 Issue，按 SECURITY.md 的方式私下报告。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 简明描述问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 启动 `./motd`
+        2. `ssh -p 2222 localhost`
+        3. 输入 `/...`
+        4. 看到异常
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / commit
+      placeholder: "v0.1.0 或 commit hash"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: "OS / Go 版本 / 终端类型"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      render: shell
