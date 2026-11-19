@@ -671,3 +671,16 @@
 - 代价 / 边界：进程重启清空限流计数（M2 已知限制）；163 单账号发信量受服务商限制，5 封/小时是保守值。
 - 验证：`infrastructure/email/sender_test.go`、`config/email_test.go`（缺项报错）、限流用例；命令白名单测试。
 - 关联：`ADR-030`、`docs/PHASE1-PLAN.md §2.9`。
+
+## ADR-043 邮箱交互实测修复：掩码复位、密码二次确认、SSH 登录引导
+
+- 状态：已采纳（2026-11-19，v0.3.0 实测后修复）
+- 背景：用户真实测试 v0.3.0-email 时报告三点——① `/verify` 输入密码后，下一条命令的 `/` 被 `*` 掩码覆盖，之后进 composer 才恢复；② 注册设密码建议二次确认；③ root / 密码登录被拒时只见通用 `Permission denied (publickey)`，不知道正确登录姿势。
+- 结论：
+  1. **掩码复位收口**：`emailFlow.finish()` 统一 `setSecret(false)`，`step()` 用 `defer` 保证 done / cancelled 立即复位；新增 `clearEmailFlow()` 在"新命令取代未结束的旧流程"三类出口（register/recover 新建、verify 新建、login email 新建）也先复位。全仓 `setSecret(true)` 生产调用点仅 email_flow.go 一处，已穷尽。
+  2. **密码二次确认**：`/verify` 密码阶段（注册/找回）输入两遍，一致才提交 service（此时才消费验证码）；不一致回退首次输入，**不消费验证码、不计尝试次数**，两遍均掩码。`/login email` 保持单次——登录失败可重试，确认徒增步骤。
+  3. **SSH banner 始终下发引导**：`bannerCallback` 由"仅满员提示"改为无条件下发两行固定文本（非 root 用户名 + 公钥登录、未绑定则访客可 `/register`、禁 root 禁密码），满员时叠加满员提示（抽出 `fullLine()` 与 rejectFull 共用）。banner 是服务端固定文案（ADR-019），不含用户数据或凭据；wire-level 测试用真实 gossh 客户端以 root 连接，确认被拒同时收到引导。
+- 理由：三点都是真实用户卡点——掩码泄漏是可用性 bug，密码确认防手抖输错，banner 解决"被拒却无提示"的入口死路。
+- 代价 / 边界：二次确认多一次输入（仅注册/找回，一次操作）；banner 增加两行固定文本（1 Mbps 下可忽略）；弱密码仍由 service 校验（两次一致后返回 ErrWeakPassword，结束流程提示重新 `/verify`）。
+- 验证：717 测试全绿（705 → +8 邮箱确认 → +4 banner）；`banner_test.go` 4 测试含 root 被拒 wire-level 验证、banner 无凭据负向断言；`email_flow_confirm_test.go` 8 测试覆盖三种掩码复位出口、两次一致/不一致、不一致不消费验证码、login 无确认、Esc 取消。
+- 关联：`ADR-019`、`ADR-026`、`ADR-042`。

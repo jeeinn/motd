@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `/login` 无参提示改为「仅支持 /login github 或 /login email」。
+- `/verify` 的密码阶段（注册设密码 / 找回新密码）改为两次输入确认；两次不一致时回退重输、不消费验证码、不计尝试次数。`/login email` 仍单次输入密码。
+
+### Fixed
+
+- 修复邮箱流程结束后密码掩码（`setSecret(true)`）未复位、泄漏到后续命令输入的问题；done / cancelled / 新命令取代旧流程三类出口全部复位。
+- SSH banner 现在始终下发登录引导（非 root 用户名 + 公钥、未绑定则访客、禁 root 禁密码），解决 root / 密码登录被拒时只见 `Permission denied (publickey)`、不知如何操作的问题；满员时叠加满员提示。
 
 ### Notes
 

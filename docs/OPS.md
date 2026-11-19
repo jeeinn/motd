@@ -79,6 +79,8 @@ chmod 600 .env
 ### SSH 入口（P0-21）
 
 - `MOTD_SSH_ADDR`（默认 `:2222`，Q4 已拍板）、`MOTD_SSH_MAX_CONNS`（默认 100）、`MOTD_SSH_IDLE_TIMEOUT`（默认 `10m`）。
+- **登录引导 banner**：连接时服务端**始终**下发两行固定提示——「请用任意非 root 用户名 + 本机 SSH 公钥登录（禁 root、禁密码认证）」与「未绑定公钥将以访客进入；访客可浏览并使用 /register 完成注册」。满员时前面叠加一行「连接数已满（N/M）」。这解决 root / 密码登录被拒时客户端只显示通用 `Permission denied (publickey)`、用户不知如何操作的问题。banner 是服务端固定文案（ADR-019），不含任何用户数据或凭据。
+- **正确连入方式**：`ssh-keygen -t ed25519` 生成本地密钥后，`ssh -i ~/.ssh/id_ed25519 -p 2222 <任意非 root 用户名>@127.0.0.1`。用户名只是客户端声明，任意非 root 均可；**未绑定的公钥以访客身份放行**（可浏览、可 `/register`），登录后才绑定为登录态。禁 root、禁密码、禁匿名。
 - host key 落 `<MOTD_DATA_DIR>/ssh_host_ed25519_key`，首次启动生成、权限 0600；**重启必须复用同一把**，否则客户端报 host key changed。备份时应一并纳入该文件的保护范围。
 - 仅公钥认证，禁密码、禁 root。对外 22 → 本机 2222 的转发与防火墙放行由部署方完成（目标为 Linux/systemd，用户已确认放行）。
 - 满员时新连接在握手前收到明文拒绝提示；`/healthz` 的 `online` / `active` 反映内存注册表（ADR-016），重启归零。
@@ -192,7 +194,9 @@ chmod 600 .env
 
 - **凭据纪律**：163 用**授权码**（不是邮箱登录密码）；只从 `.env`（0600 root:root）读，不进仓库、不进 systemd unit、不进日志。启动日志只打 `enabled/host/port`，不打 user/pass。开启时六项缺任一即报错、明确点名缺哪项，不静默兜底。
 - **通道**：465 隐式 TLS + PLAIN AUTH（163 已实测连通）；发信有界并发 4、独立 10s 超时；单一 Sender 实现，不接第三方邮件 API。IMAP 993 未接入（找回走发码 + SSH 输入，不读邮箱）。
-- **终端命令**：`/register`（交互输邮箱 → 发码）、`/verify <验证码>`（交互输密码，只回显 `*`）、`/resend`、`/recover`（统一响应"若邮箱已注册则已发送"防枚举）、`/login email`。`/login` 无参提示改为「仅支持 /login github 或 /login email」。
+- **终端命令**：`/register`（交互输邮箱 → 发码）、`/verify <验证码>`（见下方密码确认流程）、`/resend`、`/recover`（统一响应"若邮箱已注册则已发送"防枚举）、`/login email`。`/login` 无参提示改为「仅支持 /login github 或 /login email」。
+- **密码二次确认（用户实测反馈后新增）**：`/verify` 的密码阶段（注册设密码 / 找回新密码）输入两遍——第一遍后提示「请再次输入密码确认（Esc 取消）」，两遍一致才提交 service（**此时才消费验证码**）。不一致时提示「两次密码不一致，请重新输入 /verify <验证码>。」并回到首次输入，验证码不消费、不计尝试次数。两遍均掩码回显 `*`；`/login email` 仍是单次密码输入（登录可重试，不做确认）。
+- **掩码复位（用户实测 bug 修复）**：邮箱流程在 done / cancelled / Esc / 新命令取代旧流程三类出口都会复位 `setSecret(false)`，不会把 `*` 掩码泄漏到后续命令输入（如 `/login`）。
 - **验证码**：TTL 10min、只存 HMAC 散列不存明文；60s 重发冷却、每小时 5 封、5 次尝试（错码 5 次锁 15min），叠加 IP 维度。`HMAC pepper 为进程随机`——**服务重启会使在途验证码失效**，用户重新 `/resend` 即可；这是为"库泄漏无法离线爆破 6 位码"接受的代价。
 - **账号口径**：同一邮箱不会自动合并到已有账号（`primary_email` 无 UNIQUE 是结构性保证）；占用时提示「不会自动合并；如需变更归属请联系管理员处理」——当前无 `/unlink` 命令，变更归属只能从数据层处理。`/recover` 成功后该用户**全部 SSH 会话立即失效**，需用 `/login email` 重新登录。
 - **无新迁移**：`email_tokens` / `users` / `identities` / `local_credentials` 均已在 0001 建好，迁移仍止于 0007。发信在写事务**提交之后**执行（3s 写超时扛不住 SMTP），失败则 token 自然过期、不补偿删除。
