@@ -110,6 +110,10 @@ func (panicKeyBindingStore) ListActive(context.Context, int64) ([]KeyBinding, er
 	return nil, nil
 }
 
+func (panicKeyBindingStore) GetByFingerprint(context.Context, int64, string) (KeyBinding, error) {
+	return KeyBinding{}, ErrKeyNotFound
+}
+
 func (panicKeyBindingStore) Write(context.Context, func(KeyBindingWriteTx) error) error {
 	panic("安全门拒绝后不应进入写事务")
 }

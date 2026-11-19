@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -80,13 +81,30 @@ const (
 	stageBody
 )
 
-// pageEditor 是发帖 / 回复的行编辑态（ADR-026）：
-// 输入经 lineEcho 净化后回显，提交时由 forum.Service 校验；
+// 编辑态提示文案（服务端编译期常量，走 RenderSystem / 固定文本路径）。
+//
+// P1-M4 硬约束：正文是**多行**——Enter 换行、单独一行 "." 或 Ctrl-D 提交。
+// 绝不能把「Ctrl 与 Enter 的组合键」写进主提示：通用 SSH 终端字节流层无法
+// 可靠区分该组合与普通 Enter，P1 不做主提交键（二轮拍板，ADR-034）；
+// archtest + 单测双重断言。
+const (
+	composerTitleHint          = "新建主题：输入标题后按 Enter 确认（Esc 取消）"
+	composerBodyHint           = "回复：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
+	composerBodyAfterTitleHint = "标题已接收：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
+	composerLimitHint          = "正文已达长度上限，请精简后继续（Esc 取消）"
+)
+
+// pageEditor 是发帖 / 回复的编辑态（ADR-026 + P1-M4 多行）：
+//   - title 阶段：单行 runes 缓冲，Enter 确认（标题仍保持单行语义）；
+//   - body 阶段：正文交给纯应用逻辑 input.Composer，Enter 换行、哨兵/Ctrl-D 提交。
+//
+// 两阶段的输入都经 lineEcho 净化后回显，提交时由 forum.Service 校验；
 // 原始字节（KeyMsg.Raw / Text）永不直接进入输出流。
 type pageEditor struct {
 	stage    editorStage
-	creating bool // true=新主题（需标题+正文），false=回复（只需正文）
-	runes    []rune
+	creating bool            // true=新主题（需标题+正文），false=回复（只需正文）
+	runes    []rune          // 仅 stageTitle 使用：标题单行缓冲
+	body     *input.Composer // 仅 stageBody 使用：多行正文缓冲
 	title    string
 	nodeID   int64
 	threadID int64
@@ -415,19 +433,25 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 	if creating {
 		stage = stageTitle
 	}
-	p.editor = &pageEditor{
+	e := &pageEditor{
 		stage: stage, creating: creating, nodeID: p.nodeID, threadID: p.threadID,
+		body: input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes)),
 	}
+	if stage == stageBody {
+		e.body.Start()
+	}
+	p.editor = e
 	// 当前所有编辑字段都非敏感；P1 的邮箱登录密码字段改为 setSecret(true)，
 	// 对应 viewmodel.Field.Secret 的语义（回显字符由 Renderer 决定）。
 	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
 	if creating {
-		return p.writeFixed(sess, "新建主题：输入标题后按 Enter（Esc 取消）")
+		return p.writeFixed(sess, composerTitleHint)
 	}
-	return p.writeFixed(sess, "回复：输入正文后按 Enter（Esc 取消）")
+	return p.writeFixed(sess, composerBodyHint)
 }
 
+// editorKey 是编辑态的单入口：取消键两阶段共用，其余按键按阶段分流。
 func (p *pageController) editorKey(ctx context.Context, sess pageSession, m input.KeyMsg) error {
 	e := p.editor
 	if e == nil {
@@ -437,6 +461,17 @@ func (p *pageController) editorKey(ctx context.Context, sess pageSession, m inpu
 	case input.KeyEsc, input.KeyCtrlC:
 		p.echo.newline()
 		return p.cancelEditor(sess)
+	}
+	if e.stage == stageTitle {
+		return p.titleKey(ctx, sess, m)
+	}
+	return p.bodyKey(ctx, sess, m)
+}
+
+// titleKey 保持标题的单行语义：Enter 确认，不换行、不走 composer。
+func (p *pageController) titleKey(ctx context.Context, sess pageSession, m input.KeyMsg) error {
+	e := p.editor
+	switch m.Kind {
 	case input.KeyBackspace:
 		before := len(e.runes)
 		if before > 0 {
@@ -452,16 +487,52 @@ func (p *pageController) editorKey(ctx context.Context, sess pageSession, m inpu
 			p.echo.rune(m.Rune)
 		}
 	case input.KeyPaste:
-		// 粘贴块可含换行，因此多行正文可通过一次粘贴提交。
+		// 标题是单行字段：粘贴块里的换行在标题里压成一个空格，避免把
+		// 多行内容塞进标题（正文的多行粘贴由 composer 原样保留）。
+		text := strings.ReplaceAll(strings.ReplaceAll(m.Text, "\r\n", " "), "\n", " ")
 		before := len(e.runes)
-		e.runes = append(e.runes, []rune(m.Text)...)
+		e.runes = append(e.runes, []rune(text)...)
 		p.clampEditor(e)
 		p.echo.paste(string(e.runes[before:]))
 	case input.KeyEnter:
 		p.echo.newline()
 		return p.submitEditor(ctx, sess)
 	default:
-		// 其余按键不产生任何动作，也不回显。
+		// 其余按键不产生任何动作，也不回显。Ctrl-D 在标题阶段**不**提交，
+		// 保持「标题 Enter 确认」的单一语义。
+	}
+	return nil
+}
+
+// bodyKey 把正文按键交给 composer，再按返回的语义动作回显。
+// 上限类错误只输出一句固定提示，被拒的字符不回显、状态不变。
+func (p *pageController) bodyKey(ctx context.Context, sess pageSession, m input.KeyMsg) error {
+	e := p.editor
+	if e.body == nil {
+		e.body = input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes))
+	}
+	if !e.body.Active() {
+		e.body.Start()
+	}
+	op, err := e.body.Feed(m)
+	if err != nil {
+		if errors.Is(err, input.ErrTooManyLines) || errors.Is(err, input.ErrTooManyBytes) {
+			return p.writeFixed(sess, composerLimitHint)
+		}
+		return nil
+	}
+	switch op.Kind {
+	case input.OpRune:
+		p.echo.rune(op.Rune)
+	case input.OpPaste:
+		p.echo.pasteBlock(op.Text)
+	case input.OpBackspace:
+		p.echo.backspace(op.Deleted)
+	case input.OpNewline, input.OpSubmit:
+		p.echo.newline()
+		if op.Kind == input.OpSubmit {
+			return p.submitEditor(ctx, sess)
+		}
 	}
 	return nil
 }
@@ -491,7 +562,13 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 		return nil
 	}
 	text := string(e.runes)
+	if e.stage == stageBody && e.body != nil {
+		text = e.body.Text()
+	}
 	if strings.TrimSpace(text) == "" {
+		if e.stage == stageBody && e.body != nil {
+			e.body.Start() // 提交后已失活，空内容退回时重新开始，允许继续输入
+		}
 		e.runes = nil
 		return p.writeFixed(sess, "内容不能为空，请重新输入（Esc 取消）")
 	}
@@ -500,7 +577,11 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 		e.title = text
 		e.runes = nil
 		e.stage = stageBody
-		return p.writeFixed(sess, "标题已接收，输入正文后按 Enter")
+		if e.body == nil {
+			e.body = input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes))
+		}
+		e.body.Start()
+		return p.writeFixed(sess, composerBodyAfterTitleHint)
 	}
 
 	actor, err := p.actor(ctx, sess)

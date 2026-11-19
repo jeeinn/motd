@@ -58,6 +58,20 @@ func (s *KeyBindingService) List(ctx context.Context, userID int64) ([]KeyBindin
 	return s.store.ListActive(ctx, userID)
 }
 
+// Get 查询当前账号一把公钥的详情（/keys <fingerprint>，P1-M4）。
+// 指纹先过与认证同一把尺子的格式校验；归属过滤在仓储的 WHERE 里完成，
+// 用例层不做「查出来再判断」，避免跨用户指纹探测。
+func (s *KeyBindingService) Get(ctx context.Context, userID int64, fingerprint string) (KeyBinding, error) {
+	if userID <= 0 {
+		return KeyBinding{}, ErrBindingRequiresLogin
+	}
+	fp, err := NormalizeFingerprint(fingerprint)
+	if err != nil {
+		return KeyBinding{}, err
+	}
+	return s.store.GetByFingerprint(ctx, userID, fp)
+}
+
 // Bind 把「当前连接认证阶段服务端持有的公钥指纹」绑定到指定账号。
 //
 // 顺序固定：

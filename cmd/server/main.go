@@ -73,6 +73,13 @@ func run() error {
 	defer writer.Stop()
 	logger.Info("写入队列就绪", "capacity", writer.Cap(), "timeout", "3s")
 
+	// P1-M4 数据运维：device_auth_states 只清「自身已过期」的行（pending 未过期
+	// 绝不动，保护在途登录）。启动跑一次 + 每小时一次；停机时先等循环退出，
+	// 再停写队列（defer LIFO），避免 ticker 正卡在 Submit 上被关队列。
+	cleanupDone := startDeviceAuthCleanup(ctx, logger, sqlite.NewMaintenance(writer), deviceAuthCleanupInterval)
+	defer func() { <-cleanupDone }()
+	logger.Info("设备码清理就绪", "interval", deviceAuthCleanupInterval.String(), "scope", "expired_only")
+
 	// P1-M2 认证安全：限流器与审计器都是纯内存组件；落库端口由 SQLite 实现。
 	// 审计落库周期由本进程持有（application 层不起 ticker，P0-16 archtest 守卫）。
 	limiter := auth.NewRateLimiter(auth.WithRateLimitConfig(auth.RateLimitConfig{
@@ -153,8 +160,12 @@ func run() error {
 
 	// SSH 入口（Q4：默认 2222）。P0-14 起用查 ssh_keys 的真实身份解析器；
 	// transport/ssh 只依赖 application/auth.Resolver 端口，M2 后续换实现不改协议层（ADR-017/020）。
-	resolver := auth.NewResolver(sqlite.NewSSHKeyLookup(pools))
-	logger.Info("身份解析就绪", "mode", "ssh_keys")
+	// P1-M4：认证命中已绑定钥匙后，异步节流更新 ssh_keys.last_used_at。
+	// 装饰器只在解析成功且得到用户身份时打标记，节流 / 写库全在 sqlite 实现里。
+	usageRecorder := sqlite.NewKeyUsageRecorder(sqlite.NewKeyBindingRepos(pools, writer), sqlite.DefaultKeyUsageInterval)
+	defer usageRecorder.Wait() // 先等在途使用记录写完，再停写队列（defer LIFO）
+	resolver := auth.NewUsageRecordingResolver(auth.NewResolver(sqlite.NewSSHKeyLookup(pools)), usageRecorder)
+	logger.Info("身份解析就绪", "mode", "ssh_keys", "last_used_interval", sqlite.DefaultKeyUsageInterval.String())
 
 	// GitHub Device Flow 客户端（P0-15）。缺 client_id 时客户端仍可构造，
 	// 但两个需要 client_id 的 POST 端点会返回 auth.ErrClientIDMissing；
@@ -203,12 +214,12 @@ func run() error {
 	logger.Info("SSH host key 就绪", "fingerprint", sshSrv.HostKeyFingerprint())
 	logger.Info("公钥绑定就绪", "store", "ssh_keys", "revoker", "ssh_sessions", "modes", "keys|key add|key rm")
 	logger.Info("注销边界就绪", "command", "/logout", "revoker", "ssh_sessions_by_user")
-	// P0-19：/login github 走进程内 Device Flow（Q3，不开 HTTP 端点）；
-	// 呈现层是固定文本的最小交互层，P0-24 落地时替换（DEVIATIONS.md R18/R20）。
-	// 终端页面已落地，但 /login 的呈现仍是 P0-19 的固定文本（DEVIATIONS.md R18/R20）。
-	// 因此这里不再写 replace_at=P0-24，避免把一个已完成的编号当成未完成待办。
-	logger.Info("登录交互就绪", "mode", "minimal_in_process", "presentation", "fixed_text",
-		"provider", "github", "pending", "login_view_replacement")
+	// P0-19：/login github 走进程内 Device Flow（Q3，不开 HTTP 端点）。
+	// P1-M2：发起屏已替换为论坛同款 Screen（ScreenLogin + 共享 Renderer +
+	// 同源状态栏）；轮询中的 waiting/retry/终态仍是逐行固定文本（进度反馈，
+	// 不做整屏重绘）。device_code / access_token 始终不进 view（ADR-021）。
+	logger.Info("登录交互就绪", "mode", "minimal_in_process", "presentation", "forum_screen",
+		"progress", "fixed_text", "provider", "github")
 	logger.Info("终端页面就绪", "mode", "viewmodel_terminal_renderer",
 		"screens", "nodes|threads|detail|composer", "renderer", "safe_sgr_only")
 

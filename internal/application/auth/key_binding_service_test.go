@@ -64,6 +64,14 @@ func (s *fakeKeyBindingStore) ListActive(_ context.Context, userID int64) ([]Key
 	return out, nil
 }
 
+func (s *fakeKeyBindingStore) GetByFingerprint(_ context.Context, userID int64, fp string) (KeyBinding, error) {
+	r, ok := s.rows[fp]
+	if !ok || r.userID != userID || r.revoked {
+		return KeyBinding{}, ErrKeyNotFound
+	}
+	return KeyBinding{Fingerprint: fp, CreatedAtUnix: r.created}, nil
+}
+
 func (s *fakeKeyBindingStore) Write(_ context.Context, fn func(KeyBindingWriteTx) error) error {
 	s.writes++
 	if s.writeErr != nil {
@@ -439,5 +447,25 @@ func TestUnbindOnlyAffectsTargetKey(t *testing.T) {
 	list, _ := svc.List(context.Background(), 7)
 	if len(list) != 1 || list[0].Fingerprint != otherFP {
 		t.Fatalf("/keys 列表应只剩另一把: %+v", list)
+	}
+}
+
+func TestKeyDetailServiceGet(t *testing.T) {
+	store := newFakeKeyBindingStore()
+	store.rows[kbTestFingerprint] = fakeKeyRow{userID: 7, created: 1_700_000_000}
+	svc := newFakeKeyService(store, &fakeRevoker{})
+
+	got, err := svc.Get(context.Background(), 7, kbTestFingerprint)
+	if err != nil || got.Fingerprint != kbTestFingerprint || got.CreatedAtUnix != 1_700_000_000 {
+		t.Fatalf("详情查询失败: got=%+v err=%v", got, err)
+	}
+	if _, err := svc.Get(context.Background(), 8, kbTestFingerprint); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("跨用户应拒绝: %v", err)
+	}
+	if _, err := svc.Get(context.Background(), 7, "not-a-fingerprint"); !errors.Is(err, ErrInvalidFingerprint) {
+		t.Fatalf("非法指纹格式应拒绝: %v", err)
+	}
+	if _, err := svc.Get(context.Background(), 0, kbTestFingerprint); !errors.Is(err, ErrBindingRequiresLogin) {
+		t.Fatalf("访客应拒绝: %v", err)
 	}
 }

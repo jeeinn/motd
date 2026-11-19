@@ -102,7 +102,15 @@ func typeInto(t *testing.T, ctx context.Context, sess *fakePageSession, pc *page
 func pressEnter(t *testing.T, ctx context.Context, sess *fakePageSession, pc *pageController) {
 	t.Helper()
 	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyEnter}); err != nil {
-		t.Fatalf("提交失败: %v", err)
+		t.Fatalf("按键失败: %v", err)
+	}
+}
+
+// submitBody 用 Ctrl-D 提交正文（P1-M4 起正文 Enter 只换行，标题仍 Enter 确认）。
+func submitBody(t *testing.T, ctx context.Context, sess *fakePageSession, pc *pageController) {
+	t.Helper()
+	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyCtrlD}); err != nil {
+		t.Fatalf("提交正文失败: %v", err)
 	}
 }
 
@@ -265,7 +273,7 @@ func TestPageControllerD4TwoUsersSeeEachOthersPosts(t *testing.T) {
 		t.Fatal("提交标题后应进入正文编辑态")
 	}
 	typeInto(t, ctx, a, pa, "第一条正文")
-	pressEnter(t, ctx, a, pa)
+	submitBody(t, ctx, a, pa)
 	if pa.editor != nil {
 		t.Fatal("提交正文后应退出编辑态")
 	}
@@ -291,7 +299,7 @@ func TestPageControllerD4TwoUsersSeeEachOthersPosts(t *testing.T) {
 		t.Fatal("回复应直接进入正文编辑态")
 	}
 	typeInto(t, ctx, b, pb, "他人可见回复")
-	pressEnter(t, ctx, b, pb)
+	submitBody(t, ctx, b, pb)
 
 	detail, err := rt.Service.GetThread(ctx, threadID)
 	if err != nil || len(detail.Posts) != 2 || detail.Posts[1].BodyMD != "他人可见回复" {

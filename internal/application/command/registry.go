@@ -54,7 +54,8 @@ var defaultCommands = []Command{
 	// MinArgs=0 是刻意的：/login 不带参数时不落到通用「参数个数不符」，
 	// 而是进入 handle 的 provider 白名单分支，给出「仅支持 /login github」。
 	{Name: "login", Usage: "/login github", Summary: "GitHub Device Flow 登录", MinArgs: 0, MaxArgs: 1, Aliases: []string{"signin"}},
-	{Name: "keys", Usage: "/keys", Summary: "管理已绑定公钥", MaxArgs: 0},
+	// P1-M4：/keys 带一个指纹参数时查单钥详情（label / created_at / last_used_at）。
+	{Name: "keys", Usage: "/keys [fingerprint]", Summary: "列出公钥 / 查看单钥详情", MinArgs: 0, MaxArgs: 1},
 	// P0-18：/key add 绑定「当前连接」的公钥，不接受任何公钥文本参数；
 	// /key rm <fingerprint> 只接指纹标识符（由 auth.ParseKeyCommand 严格收口）。
 	{Name: "key", Usage: "/key add | /key rm <fingerprint>", Summary: "绑定当前连接公钥 / 解绑指定指纹", MinArgs: 1, MaxArgs: 2},

@@ -15,6 +15,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
 
@@ -386,7 +387,7 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 		case "help":
 			_, _ = io.WriteString(sess, h.reg.Help())
 		case "keys":
-			_, _ = io.WriteString(sess, h.runKeys(ctx, sess))
+			_, _ = io.WriteString(sess, h.runKeys(ctx, sess.Principal(), inv))
 		case "key":
 			_, _ = io.WriteString(sess, h.runKey(ctx, sess, inv))
 		case "login":
@@ -439,15 +440,18 @@ func (h *inputHandler) runLogout(ctx context.Context, sess *sshd.Session) string
 	}
 }
 
-// runKeys 列出当前账号未吊销的公钥。指纹来自 ssh_keys 表（服务端数据源），
-// 且逐条再过一次 ValidFingerprint 白名单，脏数据也不会把控制字符写进终端。
-func (h *inputHandler) runKeys(ctx context.Context, sess *sshd.Session) string {
+// runKeys 不带参数时列出当前账号未吊销的公钥；带一个指纹参数时查单钥详情
+// （P1-M4）。指纹来自 ssh_keys 表（服务端数据源），且逐条再过一次
+// ValidFingerprint 白名单，脏数据也不会把控制字符写进终端。
+func (h *inputHandler) runKeys(ctx context.Context, p auth.Principal, inv command.Invocation) string {
 	if h.keys == nil {
 		return "公钥管理尚未就绪\r\n"
 	}
-	p := sess.Principal()
 	if !p.IsUser() {
 		return "请先 /login github 登录后管理公钥\r\n"
+	}
+	if len(inv.Args) > 0 {
+		return h.runKeyDetail(ctx, p.UserID, inv.Args[0])
 	}
 	list, err := h.keys.List(ctx, p.UserID)
 	if err != nil {
@@ -463,6 +467,40 @@ func (h *inputHandler) runKeys(ctx context.Context, sess *sshd.Session) string {
 			continue
 		}
 		_, _ = fmt.Fprintf(&b, "  %s\r\n", k.Fingerprint)
+	}
+	return b.String()
+}
+
+// runKeyDetail 输出单把钥匙的 label / created_at / last_used_at。
+// 输出全是服务端固定模板：指纹经白名单校验，label 经 SanitizeText 净化
+// （当前无输入口、恒为空；保留净化是为了将来加 label 时不产生渲染旁路）。
+// 归属过滤在用例/仓储层完成，跨用户与不存在都返回同一句固定文案。
+func (h *inputHandler) runKeyDetail(ctx context.Context, userID int64, rawFingerprint string) string {
+	fp, err := auth.NormalizeFingerprint(rawFingerprint)
+	if err != nil {
+		return "指纹格式不合法（用法 /keys <fingerprint>）\r\n"
+	}
+	k, err := h.keys.Get(ctx, userID, fp)
+	if err != nil {
+		return "未找到该公钥绑定\r\n"
+	}
+	if !auth.ValidFingerprint(k.Fingerprint) {
+		return "公钥记录不合法，未展示\r\n"
+	}
+	label := safe.SanitizeText(k.Label)
+	if label == "" {
+		label = "（未设置）" // label 恒空：P1 不提供设置入口
+	}
+	const layout = "2006-01-02 15:04:05 UTC"
+	var b strings.Builder
+	b.WriteString("公钥详情：\r\n")
+	_, _ = fmt.Fprintf(&b, "  指纹：%s\r\n", k.Fingerprint)
+	_, _ = fmt.Fprintf(&b, "  标签：%s\r\n", label)
+	_, _ = fmt.Fprintf(&b, "  创建：%s\r\n", time.Unix(k.CreatedAtUnix, 0).UTC().Format(layout))
+	if k.HasLastUsed {
+		_, _ = fmt.Fprintf(&b, "  最近使用：%s\r\n", time.Unix(k.LastUsedUnix, 0).UTC().Format(layout))
+	} else {
+		b.WriteString("  最近使用：从未\r\n")
 	}
 	return b.String()
 }

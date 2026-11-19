@@ -52,9 +52,14 @@ type KeyBindingUnitOfWork interface {
 	Write(ctx context.Context, fn func(KeyBindingWriteTx) error) error
 }
 
-// KeyBindingReader 是 /keys 列表的只读端口，走读池，不占唯一写连接。
+// KeyBindingReader 是 /keys 的只读端口，走读池，不占唯一写连接。
 type KeyBindingReader interface {
 	ListActive(ctx context.Context, userID int64) ([]KeyBinding, error)
+
+	// GetByFingerprint 查询当前账号的一把未吊销公钥详情（P1-M4）。
+	// userID 必须写进查询条件：查不到（含属于别人的钥匙）一律返回
+	// ErrKeyNotFound，不区分「不存在」与「跨用户」，避免指纹枚举泄露。
+	GetByFingerprint(ctx context.Context, userID int64, fingerprint string) (KeyBinding, error)
 }
 
 // KeyBindingStore 是装配时注入给 KeyBindingService 的完整端口集合。

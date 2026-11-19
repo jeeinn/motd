@@ -222,7 +222,8 @@ func TestMVPSSHClosedLoop(t *testing.T) {
 	a.out.waitSince(t, mark, "标题已接收")
 
 	mark = a.out.mark()
-	a.send(t, "来自真实客户端的首帖\r")
+	// P1-M4：正文 Enter 只换行，Ctrl-D（0x04）才提交。
+	a.send(t, "来自真实客户端的首帖\x04")
 	a.out.waitSince(t, mark, "来自真实客户端的首帖")
 	a.out.waitSince(t, mark, "MVP 真实 SSH 发帖")
 
@@ -254,7 +255,7 @@ func TestMVPSSHClosedLoop(t *testing.T) {
 	b.send(t, "/reply\r")
 	b.out.waitSince(t, mark, "回复：")
 	mark = b.out.mark()
-	b.send(t, "第二个账号能看到\r")
+	b.send(t, "第二个账号能看到\x04")
 	b.out.waitSince(t, mark, "第二个账号能看到")
 
 	detail, err := rt.Service.GetThread(ctx, page.Rows[0].ID)

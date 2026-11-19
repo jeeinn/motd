@@ -67,6 +67,20 @@ func (e *lineEcho) paste(s string) {
 	}
 }
 
+// pasteBlock 回显多行正文粘贴块。换行走服务端生成的 CRLF 并清空列宽栈，
+// 其余字符逐 rune 经 SanitizeText 净化——与 composer 的正文行切分一一对应。
+// 注意：这是服务端编辑控制与用户字节分属不同信任域（§3.5），
+// 绝不把 KeyMsg.Text 的原始字节直接写回终端。
+func (e *lineEcho) pasteBlock(s string) {
+	for _, r := range s {
+		if r == '\n' {
+			e.newline()
+			continue
+		}
+		e.rune(r)
+	}
+}
+
 // backspace 只在编辑器确实删掉一个 rune 时调用；宽字符按显示列数擦除。
 func (e *lineEcho) backspace(deleted bool) {
 	if !deleted || len(e.cols) == 0 {

@@ -68,6 +68,53 @@ func (r *KeyBindingRepos) ListActive(ctx context.Context, userID int64) ([]auth.
 	return out, nil
 }
 
+// GetByFingerprint 是 /keys <fingerprint> 的单行只读查询（P1-M4，ADR-037）。
+// userID 写进 WHERE 是安全边界：别人的钥匙与本账号不存在的钥匙返回同一个
+// ErrKeyNotFound，调用方无法借此枚举他人指纹。
+// label 目前恒为空（P0 起就没有设置入口），仅作为展示字段读出来备用。
+func (r *KeyBindingRepos) GetByFingerprint(ctx context.Context, userID int64, fingerprint string) (auth.KeyBinding, error) {
+	var (
+		b     auth.KeyBinding
+		last  sql.NullInt64
+		label sql.NullString
+	)
+	err := r.pools.QueryRowContext(ctx, `
+		SELECT fingerprint, label, created_at, last_used_at
+		FROM ssh_keys
+		WHERE user_id = ? AND fingerprint = ? AND revoked_at IS NULL`,
+		userID, fingerprint).Scan(&b.Fingerprint, &label, &b.CreatedAtUnix, &last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return auth.KeyBinding{}, auth.ErrKeyNotFound
+	}
+	if err != nil {
+		return auth.KeyBinding{}, fmt.Errorf("查询公钥详情: %w", err)
+	}
+	if label.Valid {
+		b.Label = label.String
+	}
+	if last.Valid {
+		b.LastUsedUnix = last.Int64
+		b.HasLastUsed = true
+	}
+	return b, nil
+}
+
+// TouchLastUsed 记录一次成功认证的使用时间（P1-M4）。只改 last_used_at，
+// 且用 fingerprint + revoked_at IS NULL 钉住目标：已吊销的钥匙不再更新。
+// 0 行是合法结果（钥匙恰好被解绑），不当成错误——它只是运维痕迹，不影响认证。
+// 节流与异步由调用方 KeyUsageRecorder 负责，这里只做一次受限的写事务。
+func (r *KeyBindingRepos) TouchLastUsed(ctx context.Context, fingerprint string, at time.Time) error {
+	return r.writer.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			UPDATE ssh_keys SET last_used_at = ?
+			WHERE fingerprint = ? AND revoked_at IS NULL`, toUnix(at), fingerprint)
+		if err != nil {
+			return fmt.Errorf("更新公钥使用时间: %w", err)
+		}
+		return nil
+	})
+}
+
 // Write 把用例闭包包进 Writer.Submit 的单事务（ADR-010）。
 func (r *KeyBindingRepos) Write(ctx context.Context, fn func(auth.KeyBindingWriteTx) error) error {
 	if fn == nil {
