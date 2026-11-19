@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-19
+
+体验优化小版本，无 schema 迁移、无新依赖。
+
+### Added
+
+- **`.env` 自动加载**：启动时自动找当前工作目录、再找可执行文件目录的 `.env`（命中即停、不合并）；进程已有环境变量优先、文件只填空缺；`MOTD_DOTENV_DISABLED=true` 可关闭；启动日志只打来源路径，不打键值。
+- `archtest` 新增「验证码预检不写库」守卫与负向注入。
+
+### Changed
+
+- `/verify <码>` 在收密码前先做只读预检：无效 / 过期 / 已消费码立即报错，不再白输两遍 argon2 密码；预检有独立防爆破限流（邮箱跨 IP 20 次/小时）。
+- 命令输入提示改为每会话首次按 `/` 显示一次，重连重新显示，减少长会话滚动。
+
 ## [Unreleased]
 
 ### Added
@@ -106,7 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/jeeinn/motd/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jeeinn/motd/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jeeinn/motd/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jeeinn/motd/compare/v0.1.0...v0.2.0

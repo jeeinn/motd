@@ -65,7 +65,7 @@ ssh -p 2222 localhost
 | `MOTD_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App 的 `client_id`；未设置时 `/login` 返回明确提示，不 panic、日志不回显值 |
 | `MOTD_AUTH_LIMIT_*` / `MOTD_AUDIT_*` | 见示例 | 认证限流与审计参数（P1 新增），共 6 项 |
 
-全部 17 个环境变量（含脚本用的 `MOTDCTL_BIN`）及其默认值见 [`.env.sample`](.env.sample)。复制为 `.env` 后按需修改：`cp .env.sample .env && chmod 600 .env`。凭证通过环境变量注入，不要提交 `.env` 或密钥文件（`.gitignore` 已覆盖）。
+全部 17 个环境变量（含脚本用的 `MOTDCTL_BIN`）及其默认值见 [`.env.sample`](.env.sample)。复制为 `.env` 后按需修改：`cp .env.sample .env && chmod 600 .env`——**程序启动时会自动加载**（先当前目录、再可执行文件目录；进程已有环境变量优先、文件只填空缺），无需手动 source；可用 `MOTD_DOTENV_DISABLED=true` 关闭。凭证不要提交到仓库（`.gitignore` 已覆盖）。
 
 ## 开发
 

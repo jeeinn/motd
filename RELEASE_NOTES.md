@@ -1,44 +1,42 @@
-# Release Notes — v0.3.0
+# Release Notes — v0.3.1
 
 **发布日期**：2026-11-19
-**Git tag**：[`v0.3.0`](https://github.com/jeeinn/motd/releases/tag/v0.3.0)
+**Git tag**：[`v0.3.1`](https://github.com/jeeinn/motd/releases/tag/v0.3.1)
 **Module**：`github.com/jeeinn/motd`
 
-> 本版补齐账号自助能力与编辑手感：邮箱注册/登录/找回、正文跨行退格合并。无 schema 迁移，测试从 651 增至 717。
+> 体验优化小版本。`.env` 自动加载、`/verify` 先验码、命令提示去重。无 schema 迁移、无新依赖，测试从 717 增至 737。
 
-## 亮点
+## 本版变化
 
-- **邮箱注册 / 登录 / 找回**：`/register` / `/verify <码>` / `/resend` / `/recover` / `/login email`。自带 SMTP（163 隐式 TLS 465 + 授权码），验证码只存 HMAC 散列、单事务原子消费；发信在写事务提交后才触网；argon2id(19MiB, t=2, p=1) 口令；复用 v0.2.0 的双维限流 / 审计 / 会话撤销。`/verify` 设密码需**两次确认**，找回成功后该账号全部会话失效。
-- **正文跨行退格合并**：空行行首按退格会把上一行并入、光标停在拼接处；回显只用已有的 SGR+EL+CUU 白名单序列，未放宽 CUP/CUD/ED，安全边界零变化。
-- **SSH 登录引导**：连接时 banner 始终提示「非 root 用户名 + 公钥登录 / 未绑定公钥以访客进入 / 禁 root 禁密码」，解决 `Permission denied (publickey)` 无从下手的问题。
-- **实测修复**：邮箱流程结束后密码掩码不再泄漏到后续命令输入；`/verify` 两次密码不一致时回退重输、不消费验证码。
+- **`.env` 自动加载**：程序启动自动读 `.env`，查找顺序为**当前工作目录 → 可执行文件所在目录**（命中第一个即停、不合并）。**进程已有环境变量优先，文件只填空缺**——systemd `EnvironmentFile=` 注入的凭据不会被旁路 `.env` 覆盖。开关 `MOTD_DOTENV_DISABLED=true` 可关闭。启动日志只输出 `配置来源 file=<路径>` 或 `配置来源 env_only`，不打任何键值。不再需要手动 `source .env`。
+- **`/verify` 先验码**：无效 / 过期 / 已消费的验证码在收密码**之前**就报错，不再让用户白输两遍 19MiB argon2 密码。预检严格只读、不消费、不计数；正式 `Verify()` 仍独立校验。防爆破用独立限流（邮箱维度跨 IP 共享 20 次/小时）。
+- **命令输入提示去重**：每会话首次按 `/` 显示一次提示，后续静默；重连重新显示。长会话不再刷屏。
+
+## 升级提示
+
+从 v0.3.0 升级**无需迁移**（仍止于 0007），替换二进制即可。
+
+**注意**：本版起 `.env` 会被自动加载。若部署目录下有历史遗留 `.env`，请确认其中值不会意外补齐本该由 systemd / 容器注入的配置（进程已设环境变量优先级更高、不会被覆盖；只影响原本"没设置、回落默认值"的键）。完全不希望自动加载时设 `MOTD_DOTENV_DISABLED=true`。
 
 ## 安装与运行
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.3.0
+go install github.com/jeeinn/motd/cmd/server@v0.3.1
 # 或从源码构建
 go build -o motd ./cmd/server && ./motd
 ```
 
-配置见 [README](README.md) 与 [`.env.sample`](.env.sample)。
-
-**邮箱配置**：复制 `.env.sample` 为 `.env`（0600），填 `MOTD_EMAIL_ENABLED=true` 与 `MOTD_SMTP_HOST` / `PORT` / `USER` / `PASS` / `FROM`（163 用**授权码**，非登录密码；不进仓库、不进 systemd unit）。**程序不自动读 `.env` 文件**——systemd 用 `EnvironmentFile=`，手动运行先 `set -a; source .env; set +a` 再启动。
-
-**升级提示**：从 v0.2.x 升级**无需迁移**（仍止于 0007），替换二进制即可。
+配置见 [README](README.md) 与 [`.env.sample`](.env.sample)。复制 `.env.sample` 为 `.env`（0600）后**直接启动即可**，无需 source；systemd 仍可用 `EnvironmentFile=`。
 
 ## 变更明细
 
-见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.3.0]` 段落。
+见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.3.1]` 段落。
 
 ## 已知问题与限制
 
-- 限流计数纯内存：进程重启清零、多实例不共享。
-- 验证码 HMAC pepper 为进程随机：**重启会使在途验证码失效**，重新 `/resend` 即可（换取库泄漏无法离线爆破 6 位码）。
-- `/recover` 对未注册邮箱同样回"若邮箱已注册则已发送"（防枚举），但实际**不会发信**；因此可能出现"以为发了但没收到"的困惑——这是防账号存在性泄露的既定取舍。
-- 正文单逻辑行超终端宽度自动折行时，跨行退格的 CUU 只上移一个物理行；行内左右移动不做。
-- 访客只读；Ctrl+Enter 在通用终端不可靠，正文提交用 `.` 或 Ctrl-D。
-- `kill -9` + WAL 恢复演练已在隔离环境通过；`-race` 因本机无 CGO/gcc 未启用；1000 在线未压测。
+沿用 v0.3.0：限流计数纯内存；验证码 pepper 重启失效；`/recover` 对未注册邮箱回统一文案但实际不发信；正文超宽折行与行内左右移动不做；Ctrl+Enter 不可靠，正文提交用 `.` 或 Ctrl-D。
+
+预检通过后到两遍密码输完之间，验证码若因并发消费 / 超时失效，正式 `Verify()` 仍会拒绝——此时会白输密码，这是 TOCTOU 正确性优先的可接受残留。
 
 ## 破坏性变更
 

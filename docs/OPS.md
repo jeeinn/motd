@@ -74,7 +74,11 @@ cp .env.sample .env
 chmod 600 .env
 ```
 
-`.env` 含凭据、已被 `.gitignore` 排除；`.env.sample` 可安全提交。**空值 = 未设置 = 回落默认值**，想用默认值就留空或注释掉该行。systemd 用 `EnvironmentFile=/opt/motd/.env` 加载（unit 只引用文件、不写凭据）。脚本 `backup.sh` / `restore.sh` 只单独读 `MOTD_DB_PATH` / `MOTD_BACKUP_DIR` / `MOTDCTL_BIN` 三项，不加载整个 `.env`——cron 里要么显式 export，要么在脚本外层 source。
+`.env` 含凭据、已被 `.gitignore` 排除；`.env.sample` 可安全提交。**空值 = 未设置 = 回落默认值**，想用默认值就留空或注释掉该行。
+
+**`.env` 自动加载（v0.3.1 起，默认开启）**：程序启动时自动读 `.env`，查找顺序为**当前工作目录 → 可执行文件所在目录**（可执行文件软链会先解析），命中第一个即停、不合并；两处都没有则静默走纯环境变量，不报错。**进程已有环境变量优先**，`.env` 只填空缺——systemd `EnvironmentFile=` 注入的凭据不会被旁路文件覆盖。开关 `MOTD_DOTENV_DISABLED=true` 可完全关闭自动加载（systemd 全靠 EnvironmentFile 时用；该开关建议由 `Environment=` 外部注入，写进被加载的 `.env` 要下次启动才生效）。启动日志只输出 `配置来源 file=<路径>` 或 `配置来源 env_only`，**绝不输出任何键值**。解析口径：整行注释/空行忽略、可选 `export` 前缀、值可成对引号包裹、未加引号的 `#` 是普通字符（授权码可能含它）、非法行静默忽略、单行上限 1MiB。
+
+脚本 `backup.sh` / `restore.sh` 只单独读 `MOTD_DB_PATH` / `MOTD_BACKUP_DIR` / `MOTDCTL_BIN` 三项，**不加载整个 `.env`**——cron 里要么显式 export，要么在脚本外层 source。
 
 ### SSH 入口（P0-21）
 
