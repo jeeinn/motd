@@ -110,13 +110,40 @@ motdctl restore <backup-file> --target <path>
 
 ### 登录交互（P0-19，最小交互层）
 
-- 启动日志 `登录交互就绪 mode=minimal_in_process presentation=fixed_text provider=github replace_at=P0-24` 表示 `/login github` 已装配；`replace_at=P0-24` 明确提示**当前呈现层是临时的**，属于 `docs/DEVIATIONS.md` R18/R20，不是最终页面。
+- 启动日志 `登录交互就绪 mode=minimal_in_process presentation=forum_screen provider=github` 表示 `/login github` 已装配；发起屏在 P1-M2 已替换为论坛同款 Screen（见下方 M2 小节），整条链路仍在进程内（Q3）。
 - **整条链路在进程内**（Q3）：`SSH session → application/auth → infrastructure/github`，**没有任何业务 HTTP 端点**，`/healthz` 之外不要为登录放行端口。出站仍需 `github.com:443` / `api.github.com:443`。
 - 终端只展示 `user_code` / `verification_uri` / 剩余时间与固定状态行；**`device_code` 与 `access_token` 永不写终端、永不落库、永不进日志**。备份与 `device_auth_states` 里都不会出现 `gho_` 前缀令牌。
 - 轮询在服务端按 `interval`（钳制到 5–60 秒）进行，间隔由 GitHub 响应的 `interval` / `slow_down` 决定，**运维侧不要试图改小**。连续网络错误重试 3 次后自动终止并提示重新 `/login github`，不会无限占用连接。
 - `Esc` 取消会把该次 `device_auth_states` 迁为 `denied`；状态停在 `pending` 且 `expires_at` 已过时，下轮门禁自动迁 `expired`。**不要手工 DELETE 该表行**（在途登录会因 `ErrDeviceAuthNotFound` 中断）。
 - 登录成功后当前连接公钥自动绑定（D2）；断开重连由 `ssh_keys` 指纹直接解析为登录态（D3），无需再次 `/login`。
 - **已知边界（R19）**：若当前连接公钥已属于其他账号，账号会创建成功但**本次会话保持访客态**，终端给出固定提示；此时 `device_auth_states` 是 `authorized` 终态，不是失败。换一把未绑定的公钥重连后重新 `/login` 即可（UID 命中即登录）。详见 `DECISIONS.md ADR-025`。
+
+### 认证安全（P1-M2）
+
+**新增环境变量**（`MOTD_` 前缀，空值回落默认；见 `DECISIONS.md ADR-030`）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MOTD_AUTH_LIMIT_MAX_FAILURES` | `5` | 窗口内允许的最大失败/尝试次数 |
+| `MOTD_AUTH_LIMIT_WINDOW` | `5m` | 滑动窗口长度 |
+| `MOTD_AUTH_LIMIT_LOCKOUT` | `15m` | 超限锁定时长 |
+| `MOTD_AUTH_LIMIT_MAX_KEYS` | `4096` | 内存限流键上限（超限淘汰最旧） |
+| `MOTD_AUDIT_CAPACITY` | `512` | 审计环形缓冲容量 |
+| `MOTD_AUDIT_FLUSH_INTERVAL` | `1s` | 批量落库周期（仅 `cmd/server` 持有定时器） |
+
+**`/healthz` 新增指标**：`audit_depth` / `audit_cap` / `audit_dropped` / `audit_flushed` / `audit_failed` / `limit_keys`。
+
+- **`audit_dropped > 0` 或 `audit_failed` 持续增长应立即告警**：此时审计缓冲溢出、认证动作正被 fail-closed 拒绝（用户会看到"操作过于频繁"）。处理方向先查 SQLite 写队列是否堵塞，再考虑调大 `MOTD_AUDIT_CAPACITY`；不要靠调小 flush 间隔掩盖写通道饱和。
+- **限流计数纯内存**：进程重启清零、多实例不共享；SSH 对端 IP 在 application 层只以 `hash(ip)` 出现，明文 IP 只在 Session 内存里，不入库/终端/日志。M2 无邮箱流程，登录失败键实际只用 `hash(ip)`（emailHash 留接口待 M5）。
+- 四类场景共用一份额度：login_failure / device_start / key_binding / verify，默认 5 次/5m/锁 15m；同一用户 5 分钟内第 6 次登录或 key 操作会被锁，这是当前口径（是否放宽待真实数据支撑）。
+
+**`/logout` 命令**：撤销该账号**全部**在线会话（含当前连接），访客拒绝；先撤销后写审计，审计失败不回滚撤销（已踢下线的会话不恢复，见 `ADR-031`）。已吊销公钥的已有连接由 P0-18 的 `RevokeSessions` 覆盖。
+
+**`/login` 呈现（M2 替换）**：发起屏已改为论坛同款 Screen（`ScreenLogin` + 共享 `Renderer` + 同源状态栏），`RenderSystem` 固定文案与 `RenderUser` 外部字段严格分离；`device_code` / `access_token` 仍永不进 view（ADR-021）。轮询过程的 waiting/retry/终态仍是逐行固定文本（进度反馈，不做整屏重绘）。
+
+**审计落库**：`auth_events` 表复用 0001 已有 schema 与 `idx_auth_events_time`，无新迁移；application 只入队，落库走 `Writer.Submit` 批量 INSERT。
+
+**本地复现**：`./scripts/repro_auth_limit.sh`（隔离临时库，不碰 `data/`），实测输出 `accepted=3 rejected=2 retry_after=2m0s auth_events=5 dropped=1`。
 
 ## 4. 恢复流程
 

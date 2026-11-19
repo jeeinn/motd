@@ -154,7 +154,7 @@ P0 已占用 M0–M4 编号，本阶段用 **P1-M0…P1-M5** 避免混淆。二�
 | --- | --- | --- | --- |
 | **P1-M0 前置信心门**（✅ 2026-11-19 完成） | kill-9 + WAL 恢复演练、`backup.sh` + `restore --verify` + `integrity_check`，写清 RPO/RTO 与备份六类 | 无 | **已达成**：隔离环境带数据硬杀 + WAL 重放 + 恢复精确回到备份点；证据与 RPO/RTO 见 `OPS.md §5` 2026-11-19 条；零 schema 变更 |
 | **P1-M1 三项强制前置**（✅ 2026-11-19 完成） | 迁移 0004/0005/0006 + `WriteTx` 扩展 + outbox 调度器 + 守卫 | P1-M0 | **已达成**：v3 历史库迁移到 v6（status 回填 / 两条触发器 / outbox 表），回滚精确回 v3；全量测试 456→506 绿；证据见 `OPS.md §5` 2026-11-19 14:32 条、`ADR-028/029` |
-| **P1-M2 认证安全 + `/login` 屏** | 限流/审计/密码变更与公钥解绑后会话撤销（≤1 刷新周期，复用现有 `SessionRevoker` 提交后调用模式）/注销边界；搭车 `/login` 屏替换（保持 RenderSystem 固定 / RenderUser 外部分离，ADR-021「token/device_code 不进 view」不回退） | P1-M1 | 可复现脚本；旧会话失效断言；守卫通过；`/login` 屏在真实链路上呈现四页形态 |
+| **P1-M2 认证安全 + `/login` 屏**（✅ 2026-11-19 完成） | 限流/审计/密码变更与公钥解绑后会话撤销（≤1 刷新周期，复用现有 `SessionRevoker` 提交后调用模式）/注销边界；搭车 `/login` 屏替换（保持 RenderSystem 固定 / RenderUser 外部分离，ADR-021「token/device_code 不进 view」不回退） | P1-M1 | **已达成**：审计有界异步落库（溢出 fail-closed）+ 三类内存限流 + `/logout` 按 userID 撤销 + `/login` 发起屏论坛同款；550 测试全绿、`repro_auth_limit.sh` 实测通过；`ADR-030/031`、OPS §3 已记录 |
 | **P1-M3 投票 + 搜索** | 投票幂等与分数一致；FTS5 空结果/特殊字符/1 Mbps | P1-M1 | 并发确定性用例（无 `-race`）；注入用例绿 |
 | **P1-M4 编辑器 + 数据运维** | 多行粘贴、哨兵/Ctrl-D 提交、正文 Enter 换行、清理幂等、/keys 详情、1 Mbps 无超时 | P1-M2 / P1-M3 | 上述验收项全过；文案测试断言不含 Ctrl+Enter |
 | **P1-M5 邮箱（L，独立）** | SMTP 通道 + `/register /verify /resend /recover /login email` + 会话撤销联动 + 双限流 | P1-M2 | 163 `.env` 授权码接入；验证码 hash 存储 + 5 次 + 60s 冷却；发信在写事务外；公开注册双限流生效 |

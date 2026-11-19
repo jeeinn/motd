@@ -478,3 +478,43 @@
   - `migrate_test.go` 历史行回填与 fresh 版本=6；`repo_forum_parent_test.go` 覆盖跨主题写入被拒（应用层 + 裸 SQL 两条路径）；`archtest/parent_thread_test.go` 3 负向注入（缺校验调用 / 缺比较 / 触发器缺 RAISE）。
   - 隔离库实测：2 条历史主题迁移后 `status=active=2`，触发器 `posts_parent_same_thread_insert/update` 均建成，回滚后列与触发器均消失、数据完整。
 - 关联：`docs/PHASE1-PLAN.md` R8/R9、`P0-PLAN.md §7 R8/R9`、`ADR-011`。
+
+## ADR-030 认证审计与限流的纯内存边界：入队判定与落库分离
+
+- 状态：已采纳（2026-11-19，P1-M2）
+- 结论：
+  1. `application/auth` 只做两件事——审计事件**入队**（`audit.go` 有界环形缓冲 cap 512）、限流**判定**（`ratelimit.go` 纯内存滑动窗口）；二者都不 import `database/sql` 或 `infrastructure`，由 `archtest/auth_security_test.go` 守卫 + 负向注入强制；
+  2. 落库走 `AuditSink → infrastructure/sqlite/repo_auth_events.go → Writer.Submit` 批量 INSERT，复用 0001 已有 `auth_events` 表与 `idx_auth_events_time`，**无新迁移**；
+  3. 定时节奏由 `cmd/server` 持有（1s flush），application 层不起 ticker（沿用 ADR-022「状态机不持有轮询节奏」口径）；
+  4. 缓冲溢出 **fail-closed**（D-a 拍板）：`Record` 返回 `ErrAuditQueueFull`，安全门拒绝认证动作并递增 `dropped`；审计缺失期间不放行认证；
+  5. 限流键 = 场景前缀 + 已哈希标识（`hash(ip)` / userID / `hash(email)`）；application 层不接触明文 IP/邮箱，明文只在 SSH Session 内存里，不入库/终端/日志；M2 无邮箱流程，emailHash 留接口待 M5；
+  6. 默认参数 5 次 / 5m 窗口 / 锁定 15m，四类场景（login_failure / device_start / key_binding / verify）共用配置；计数进程重启清零、多实例不共享（已接受限制）。
+- 理由：
+  - 单写连接恒为 1、队列 256：把认证失败计数或审计逐条写进 SQLite，攻击者可用暴力尝试直接堵死发帖/投票；内存判定 + 批量落库是唯一能守住写通道的做法。
+  - fail-closed 而非 fail-open：审计是安全事件的可追溯性底线，缺审计时继续放行认证等于放弃追责能力。
+  - 与 presence.Registry 同构（纯内存 + archtest 禁 SQL import），模式一致、心智负担低。
+- 代价 / 边界：
+  - 进程重启计数清零，锁定状态丢失（已知限制，写进 OPS）。
+  - `audit_dropped>0` 意味着认证动作正在被拒绝，必须告警（OPS §3 已记）。
+  - key_binding 与登录共用 5 次额度：同一用户 5 分钟内第 6 次登录或 key 操作会被锁；是否单独放宽留待真实数据支撑。
+- 验证：
+  - 550 个测试函数全绿；新增审计有界溢出 fail-closed/dropped、批量 flush 顺序与失败保留、限流三类键独立/锁定恢复/RetryAfter 递减/容量淘汰、archtest 6 守卫（含 2 负向注入）。
+  - `scripts/repro_auth_limit.sh` 实测 `accepted=3 rejected=2 retry_after=2m0s auth_events=5 dropped=1`，隔离临时库、生产 data 未动。
+- 关联：`docs/PHASE1-PLAN.md` §2.5、`ADR-022`。
+
+## ADR-031 注销边界：按 userID 撤销会话，撤销不可回滚故先于审计
+
+- 状态：已采纳（2026-11-19，P1-M2）
+- 结论：
+  1. SSH 层新增 `RevokeUserSessions(ctx, userID) int`（照 P0-18 `RevokeSessions(ctx, fingerprint)` 模式），application 定义 `UserSessionRevoker` 端口；`/logout` 命令撤销该账号**全部**在线会话，含当前连接；访客拒绝；
+  2. `LogoutService` 顺序为**先撤销、后审计**；审计入队失败时撤销**不回滚**，只上报「注销已生效，但审计记录失败」；
+  3. 已吊销公钥的已有连接由 P0-18 的 `RevokeSessions` 覆盖，确认无遗漏、不重复实现；
+  4. 密码变更复用同一 `UserSessionRevoker`，M5 邮箱包接入时接线，本阶段只预留接口、不臆造密码流程。
+- 理由：
+  - 会话撤销是内存动作、不可回滚；把已踢下线的会话恢复以凑一条审计，比少一条审计危险得多——安全取舍明确。
+  - 「先撤销后审计」保证即使审计队列满（fail-closed 拒绝入队），注销本身仍然生效，用户不会被困在已决定退出的会话里。
+- 代价 / 边界：
+  - 审计失败时用户会看到部分成功提示，需明确文案（已实现）。
+  - 撤销只覆盖在线会话；已签发的外部凭据（如未来的 CLI token）不在本 ADR 范围（P2）。
+- 验证：`logout_test.go` 覆盖先撤销后审计、审计失败不回滚、访客拒绝；`revoke_user_test.go` 覆盖同账号 2 会话全撤、异账号/访客不误伤；archtest `TestLogoutRevokesBeforeAudit` 守卫。
+- 关联：`docs/PHASE1-PLAN.md` §2.5、`P0-PLAN.md §4.6`、`ADR-024`。
