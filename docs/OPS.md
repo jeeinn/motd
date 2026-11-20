@@ -382,7 +382,7 @@ find data/backups -name 'motd-*.db' -mtime +14 -print
 ## 9. 部署与上线清单（2026-11-20 实战验证版）
 
 > 单个二进制部署不变，但**运行形态有两种**：方式一 systemd 托管（§9.1–§9.5），方式二便携版自部署（§9.6）。先按 §9.0 选形态，再读对应步骤。
-> 本节按 **CentOS Stream 9 / 阿里云 ECS** 实机部署重新校准。国内 VPS 上 `github.com` 与 `proxy.golang.org` 可能超时，因此默认给出「目标机直接构建」路径，同时保留原「本地交叉编译 + 上传」路径。仓库当前**没有** `deploy/motd.service`，用 §9.3 的模板。下文 `<VERSION>` 取实际版本（实战值 `v0.4.2`）。
+> 本节按 **CentOS Stream 9 / 阿里云 ECS** 实机部署重新校准。国内 VPS 上 `github.com` 与 `proxy.golang.org` 可能超时，因此默认给出「目标机直接构建」路径，同时保留原「本地交叉编译 + 上传」路径。仓库当前**没有** `deploy/motd.service`，用 §9.3 的模板。下文 `<VERSION>` 取实际版本（首次实战基线 `v0.4.2`，当前版本见 `README.md`）。
 
 ### 9.0 形态选择：systemd 托管 vs 便携版自部署
 
@@ -655,7 +655,7 @@ ls -lh /var/lib/motd/backups
 | --- | --- | --- | --- |
 | 目标连接标识 | 是 | — | SSH 连接名 / ID 或 `user@host`；方式一须能取得 root 或等价 sudo |
 | 部署形态 | 是 | 有 root 时默认 systemd（方式一） | 便携版（方式二）须用户明确给出目录（如 `/data/motd`）与端口；无 root 时只能用方式二（§9.6） |
-| 部署版本 | 是 | 当前发布 tag | 写成完整 tag，如 `v0.4.2`；构建时必须 `-X main.version=<VERSION>` |
+| 部署版本 | 是 | 当前发布 tag | 写成完整 tag，如 `v0.4.3`；构建时必须 `-X main.version=<VERSION>` |
 | 对外方式 | 否 | 仅 `:2222` 监听 + firewalld 放行 | 22→2222 转发属用户决策；未授权不得改现有 sshd 配置 |
 | 探针地址 | 否 | 8080 被占用则用 `127.0.0.1:18080` | 先 `ss -tlnp` 判定，不得盲目 bind 默认端口 |
 | `MOTD_GITHUB_CLIENT_ID` | 否 | 留空 | 未提供就明说 Device Flow 不可用；不要编造或复用历史值 |

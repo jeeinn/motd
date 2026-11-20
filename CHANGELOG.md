@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-11-20
+
+文档与运维增强版本。无代码行为变更、无 schema 迁移、无新依赖；二进制功能与 v0.4.2 一致，测试仍为 905。重点是把首次 VPS 部署的实战经验固化为可复制的手册，并新增面向 AI 智能体的自动部署规程。
+
+### Added
+
+- `AGENTS.md`：智能体协作指南，记录架构依赖方向、CI 四门禁、发版硬约束（commit / tag / push / Release 均须当次显式确认）、文档索引与项目特有陷阱。
+- README 新增在线体验入口（`ssh -p 2222 guest@jeeinn.com`）与两张终端截图：版块列表首屏、GitHub Device Flow 登录到 `/new` 发帖。
+- `docs/OPS.md` §9.0 / §9.6：明确两种部署形态——systemd 托管（非 root + 0600 环境文件 + 单元模板 + 自检）与便携版自部署（自编译二进制 + 自有目录 `.env` + `screen`，端口错开、优雅停止、备份升级及 `.env` 查找顺序等特有坑）。
+- `docs/OPS.md` §10：AI AGENTS 自动部署指南——输入契约、只读前置探测与 STOP 条件、决策表、7 步幂等序列与验收门、失败模式速查、交付报告模板与不可协商护栏。
+
+### Changed
+
+- `docs/OPS.md` §9 按 CentOS Stream 9 实机校准：`goproxy.cn` 应对国内 VPS 网络超时、module cache 只读需复制到可写目录、`-p 2` / `GOMEMLIMIT` 适配小内存；版本注入以 `/healthz` 回显为判据。
+- 权限口径修正：`/opt/motd` 与二进制须 `0750 root:motd`，否则 systemd 以 `motd` 用户启动时 CHDIR 失败（`status=200/CHDIR`）并重启循环。
+- 环境文件路径发行版感知：`/etc/motd` 在 RHEL/CentOS 是普通文件，改用 `/etc/sysconfig/motd`（0600）；systemd 模式保持 `MOTD_DOTENV_DISABLED=true`，凭据只写环境文件、不写 unit。
+- 探针端口冲突处理：`127.0.0.1:8080` 被占用时改绑 `127.0.0.1:18080`；SSH 入口仍为 `:2222`。
+
+### Notes
+
+- 升级兼容：从 v0.4.2 起无需替换二进制或迁移；已部署实例不要双写 systemd 环境文件与 `.env`。
+- 便携版 `screen` 不提供开机自启，需 cron `@reboot` 或迁移到 systemd。
+
 ## [0.4.2] - 2026-11-20
 
 契约收敛版本。移除死配置 `MOTD_SSH_IDLE_TIMEOUT` 与整套 idle timer 机制；会话生存期只由 6 小时绝对上限约束。无 schema 迁移、无新依赖；测试 907 → 905（删 3 个 idle 测试、增 1 个反证测试）。
@@ -195,7 +218,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/jeeinn/motd/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jeeinn/motd/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jeeinn/motd/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jeeinn/motd/compare/v0.3.3...v0.4.0
