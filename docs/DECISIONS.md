@@ -842,3 +842,22 @@
 - 代价 / 边界：恢复不区分「谁隐藏的」，白名单管理员可恢复任何隐藏内容（与隐藏权同宽）；`deleted` 是作者自删，刻意不可通过 unhide 复活，避免把作者权与治理权混为一谈。`/unhide` 与 `/hide` 一样只在主题详情页可用：回复按 id 定位不校验是否属于当前主题（治理权覆盖全站内容），主题无参恢复依赖当前详情页——已隐藏的主题不在公开视图里，因此从列表无法再打开它；**这个缺口由 `/unthread <thread-id>` 从任意屏恢复主题来兜住**，它没有把隐藏主题变成可浏览对象，不触碰公开可见性边界。`/unthread` 成功后直接落到该主题详情（此时已可打开），不让用户停在旧屏幕。事件 ID 含纳秒时间戳与命令名，固定时钟单测需让时钟前进，否则 outbox 幂等键会合并两次调用。
 - 验证：全量测试全绿（871 → 903，+32：Esc 静默 3、帮助归组 2、应用用例 9、真实 SQLite 集成 5、cmd 接线 10、archtest 守卫与负向注入 3），`go build ./... && go vet ./... && go test -count=1 ./...` 通过。端到端证据：真实 SQLite 中隐藏回复 → `status='hidden'` 且检索 0 命中 → 恢复 → `status='normal'`、`ListPosts` 两条可见、检索重新命中该条；主题隐藏 → 恢复后 `GetThread` / `ListThreads` 重回可见、回复行未变；`auth_events` 落 `command="post unhide"` / `"thread unhide"` / `"thread unthread"`，访客恢复 `user_id` 为空而 `fingerprint` 落地。**`/unthread` 往返证据**：隐藏主题后回到 `/top` 版块列表屏执行 `/unthread <id>` → 主题 `status='active'`、屏幕直接落到该主题详情（可打开）、固定文案「已恢复主题」；重复执行幂等成功；非管理员登录 / 访客均得「仅管理员可执行」且数据零变更；审计落 `command="thread unthread"`、`target="thread:<id>"`。越权零变更、幂等不报错、已删目标 `ErrNotFound` 均有断言。P0 工程门禁对新增改动零新增命中。无新依赖、无新迁移、生产 `data/` 未触碰、未 commit。
 - 关联：`ADR-050`（隐藏语义与固定文案）、`ADR-049`（授权模型单点复用）、`ADR-015`（outbox 时序）、`ADR-010`/`ADR-032`（写事务稀缺）、`ADR-014`/`ADR-019`（帮助文本固定文案走可信渲染路径）。
+
+## ADR-054 会话保活：空闲语义改为「连接不存活」+ 绝对上限兜底
+
+- 状态：已采纳，v0.4.1 落地。
+- 背景：用户实测反馈「停止浏览论坛一会儿就显示 SSH connect closed」。核实 `Session` 的空闲计时器由 `time.AfterFunc(idle, Close)` 实现（默认 10m），但只在 `Session.Read` 读到**实际按键**时 `resetIdle()`——用户不操作就被服务端主动断开。连接级心跳（10s）虽在跑，却只刷新 presence 注册表、不重置空闲计时器，因此救不了这条连接。客户端看到裸 `Connection closed`、退出码 255，无从判断原因。
+
+- 决策：
+  1. **空闲语义从「无按键」改为「连接不存活」**：`heartbeat()` 同时调 `resetIdle()`。连接级心跳持续运行即证明 TCP/SSH 连接仍活，此时用户长时间不操作也不断开。这是对的说法——空闲的本意是「连接已死」，不是「用户没打字」。
+  2. **新增绝对存活上限 6 小时**：心跳是进程内 ticker，无法感知「客户端静默消失」（断电 / 网络中断 / SSH 层未感知断开）；这类连接心跳照跑、idle 被持续重置，会永久占用 `MaxConns` 槽位。增加一个**不被心跳重置**的 `sessionMaxLifetime`（6h，硬编码不开放配置）兜底收口。两个计时器职责正交：idle 管「连接无心跳」，lifetime 管「最长在线时长」。
+  3. **收口统一为单一幂等序列**：`closeWithReason(notice)` 用 `sync.Once` 包裹「固定提示文案 → `sendExitStatus(0)` → `ch.Close()` → `close(done)`」，三条触发路径（handler 结束 / 空闲超时 / 硬上限）都走它。停计时器与 `close(done)` 在同一临界区原子完成，`resetIdle()` 在临界区内检测 `done` 已关则不再 `Reset`，杜绝已停 timer 被心跳复活。
+  4. **超时下发固定文案**：空闲超时与硬上限分别下发两行服务端固定文本（ADR-019 可信路径，无用户数据 / 无 ANSI），退出码 0；正常退出传空文案、不下发提示。原实现超时直接 `Close()` 且与 `runHandler` 的 exit-status 竞争，后到的写因 channel 已关而失败，用户才只见裸断连。
+
+- 理由：不把 `MOTD_SSH_IDLE_TIMEOUT` 简单调大（如 1h）——那只是推迟问题，且用户仍在被动等待断连；也不引入客户端 keepalive 要求（额外配置负担、且 SSH 子通道 keepalive 不重置服务端的 `Session.Read` 计时器，治不了本）。「连接存活即保活」符合用户对「空闲」的直觉，硬上限单独兜住真正的资源泄漏面。
+
+- 代价 / 边界：`sessionMaxLifetime` 固定 6 小时不可配置，超长会话需求需后续版本评估；提示文案固定英文前缀 `motd:`，与登录 banner 同风格。`var sessionMaxLifetime` 用变量而非常量仅为测试注入短时长，生产代码不改。测试中的 `recordingChannel` 模拟「不按键但不 EOF」的连接，验证心跳保活与两条超时路径。
+
+- 验证：`go build ./... && go vet ./... && go test -count=1 ./...` 全绿，测试 903 → **907**（新增 4 个：心跳保活不被 idle 断、空闲超时提示与 exit-status、硬上限在心跳持续时仍收口、正常退出无文案且 exit-status 幂等）。archtest 全绿，transport 层未因固定文案引入 presentation 依赖。无新迁移、无新依赖、无新配置项。
+
+- 关联：`ADR-016`（presence 内存心跳与 Reap）、`ADR-019`（服务端固定文本可信路径）、`ADR-014`（展示与领域分层，本次未触碰 ViewModel）。

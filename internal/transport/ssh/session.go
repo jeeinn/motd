@@ -41,10 +41,11 @@ type Session struct {
 	width  uint32
 	height uint32
 
-	timer *time.Timer
-	hb    *time.Ticker
-	done  chan struct{}
-	once  sync.Once
+	timer    *time.Timer // 空闲计时器：Read 实际按键或心跳均重置
+	lifetime *time.Timer // 绝对存活上限：仅创建时启动，不被心跳重置
+	hb       *time.Ticker
+	done     chan struct{}
+	once     sync.Once // 幂等关闭序列：固定文案 → exit-status → 关闭 channel
 }
 
 // sessionHeartbeatInterval 是连接级心跳周期，取 presence 默认超时的一半。
@@ -54,7 +55,23 @@ type Session struct {
 // 单靠 Session.Read 刷新心跳会把仍活着的连接误删，进而导致
 // 「授权成功、账号已建、公钥已绑，但 UpgradeToUser 失败仍是访客」。
 // 心跳只在内存 Touch，不写 SQLite（§2.6 / ADR-016）。
+//
+// v0.4.1 起心跳同时重置空闲计时器（见 heartbeat）：空闲语义由「无按键」
+// 改为「连接不存活」。用户停止浏览但连接仍在时不再被 idle timer 断开。
 const sessionHeartbeatInterval = 10 * time.Second
+
+// sessionMaxLifetime 是会话绝对存活上限，兜底「客户端静默消失、SSH 层未感知
+// 断开」的连接——这类连接进程内心跳仍在跑、idle timer 会被持续重置，只有
+// 不被心跳重置的绝对上限能收掉，避免占用 MaxConns 槽位。
+// 用 var 而非 const 仅为测试可注入短时长；生产代码不修改它。
+var sessionMaxLifetime = 6 * time.Hour
+
+// 超时关闭前下发的固定文案：纯固定文本，无用户数据、无 ANSI，
+// 与 sshLoginBanner 同属服务端可信固定路径（ADR-019）。CRLF 收尾。
+const (
+	idleCloseNotice     = "motd: 会话空闲超时，连接已关闭\r\n"
+	lifetimeCloseNotice = "motd: 会话达到最长在线时长（6 小时），连接已关闭\r\n"
+)
 
 // reRegisterSession 把被 Reap 清掉、但连接仍然活着的会话放回注册表。
 // 注册表只保存内存状态，无法知道 TCP/SSH 连接是否还在；只有 Session 能判断，
@@ -86,10 +103,51 @@ func newSession(id string, ch gossh.Channel, fp, pk string, p auth.Principal, re
 		principal: p, reg: reg, idle: idle,
 		done: make(chan struct{}),
 	}
-	s.timer = time.AfterFunc(idle, func() { _ = s.Close() })
+	s.timer = time.AfterFunc(idle, func() { s.closeWithReason(idleCloseNotice) })
+	s.lifetime = time.AfterFunc(sessionMaxLifetime, func() { s.closeWithReason(lifetimeCloseNotice) })
 	s.hb = time.NewTicker(sessionHeartbeatInterval)
 	go s.heartbeatLoop()
 	return s
+}
+
+// closeWithReason 是唯一的会话收口路径，整段由 once 保护、幂等：
+// 下发固定提示文案 → 回 exit-status → 关闭 channel。
+//
+// 原实现超时路径直接 s.Close()，客户端只看到裸 "Connection closed" 且退出码 255，
+// 用户无从判断是空闲超时还是链路故障；且 runHandler 的 sendExitStatus 与超时
+// Close 存在竞争——后到的一次写会因 channel 已关而失败。v0.4.1 把三条收口
+// （handler 结束 / 空闲超时 / 硬上限）统一收进这里，顺序固定、只执行一次。
+//
+// notice 是服务端固定文本（ADR-019 可信路径），不含用户数据、不含 ANSI；
+// 正常退出传空串表示不下发提示。
+func (s *Session) closeWithReason(notice string) error {
+	var err error
+	s.once.Do(func() {
+		// 停计时器与 close(done) 在同一临界区原子完成：这样并发的 resetIdle
+		// 若已持锁进入，其 Reset 会被随后的 Stop 覆盖；若未进入，则拿锁时看到
+		// done 已关而直接返回——两条路径都不会复活计时器。
+		s.mu.Lock()
+		if s.timer != nil {
+			s.timer.Stop()
+		}
+		if s.lifetime != nil {
+			s.lifetime.Stop()
+		}
+		if s.hb != nil {
+			s.hb.Stop()
+		}
+		close(s.done)
+		s.mu.Unlock()
+		// 顺序关键：固定文案 → exit-status → 关闭 channel。
+		// 注意 close(done) 在前是为让 resetIdle/心跳能立即感知收口；文案与
+		// exit-status 在此之后、channel 关闭之前写出，客户端侧顺序不受影响。
+		if notice != "" {
+			_, _ = io.WriteString(s, notice)
+		}
+		s.sendExitStatus(0)
+		err = s.ch.Close()
+	})
+	return err
 }
 
 // heartbeatLoop 让活着的连接持续刷新注册表心跳；Close 关闭 done 后即退出。
@@ -104,8 +162,15 @@ func (s *Session) heartbeatLoop() {
 	}
 }
 
-// heartbeat 只刷新内存状态，抽成方法便于用注入时钟回归「长等待不误删」。
-func (s *Session) heartbeat() { _ = s.reg.Touch(s.id) }
+// heartbeat 刷新 presence 内存状态，并重置空闲计时器。
+//
+// v0.4.1 关键变更：空闲语义从「无按键」改为「连接不存活」。连接级心跳持续运行
+// 即证明 TCP/SSH 连接仍活，此时即便用户长时间不操作也不应断开。真正需要兜底的
+// 是进程内心跳无法感知的「静默消失」，由 sessionMaxLifetime 硬上限负责。
+func (s *Session) heartbeat() {
+	_ = s.reg.Touch(s.id)
+	s.resetIdle()
+}
 
 // Read 把每次输入视为一次心跳：刷新空闲计时器与 presence.LastSeenAt，
 // 但不产生任何持久化写入（§2.6 / ADR-016）。
@@ -137,28 +202,22 @@ func (s *Session) sendExitStatus(code uint32) {
 func (s *Session) resetIdle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 收口已开始就不再复活计时器：closeWithReason 停完 timer 到 close(done)
+	// 之间有极短窗口，心跳若选中该 tick 会调到这里；不拦住会 Reset 已停止的
+	// timer，造成无意义的再次触发（虽被 once 吞掉，仍是资源泄漏）。
+	select {
+	case <-s.done:
+		return
+	default:
+	}
 	if s.timer != nil {
 		s.timer.Reset(s.idle)
 	}
 }
 
-// Close 幂等：handler 结束、空闲超时、ctx 取消三条路径都会调它。
-func (s *Session) Close() error {
-	var err error
-	s.once.Do(func() {
-		close(s.done)
-		s.mu.Lock()
-		if s.timer != nil {
-			s.timer.Stop()
-		}
-		if s.hb != nil {
-			s.hb.Stop()
-		}
-		s.mu.Unlock()
-		err = s.ch.Close()
-	})
-	return err
-}
+// Close 幂等：handler 结束、空闲超时、硬上限、ctx 取消四条路径都会调它。
+// 正常退出无提示文案；超时关闭由 timer 直接调 closeWithReason 携带固定文案。
+func (s *Session) Close() error { return s.closeWithReason("") }
 
 func (s *Session) Done() <-chan struct{} { return s.done }
 

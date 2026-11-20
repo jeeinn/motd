@@ -1,52 +1,41 @@
-# Release Notes — v0.4.0
+# Release Notes — v0.4.1
 
 **发布日期**：2026-11-20
-**Git tag**：`v0.4.0`（待打，代码与文档已就绪）
+**Git tag**：`v0.4.1`（待打，代码与文档已就绪）
 **Module**：`github.com/jeeinn/motd`
 
-> 社区治理版本。P2 五个里程碑（M0/M1/M1b/M2/M3）合并一次发版：版块可管理、内容可修正、终端提交更可靠。迁移 0007 → 0009，ADR-048 → 053，测试 749 → 903（双口径实测一致）。无新依赖。
+> 体验优化版本。修复「停止浏览一会儿就被 SSH 断连」的问题：会话空闲语义由「用户无按键」改为「连接不存活」。无 schema 迁移、无新依赖、无新配置项；测试 903 → 907。
 
 ## 本版变化
 
-### 节点（版块）管理
+### 修复：停止浏览不再被断连
 
-管理员用 `/node list|create|rename|archive` 列出 / 创建 / 改名 / 归档版块。归档按软删处理——只改 `node.status`，不动 threads，历史帖详情页仍显示版块名，规避 `threads.node_id` 外键冲突。5 个 seed 节点可归档、不可改名（slug/name 保持稳定，0002 的 `INSERT OR IGNORE` 保证迁移重放不覆盖）。
+此前 `MOTD_SSH_IDLE_TIMEOUT`（默认 10m）的空闲计时器只由 `Session.Read` 读到的**实际按键**重置。用户停一会儿不操作，服务端就主动关闭会话，客户端只看到一句裸 `Connection closed`、退出码 255，无从判断是空闲超时还是链路故障。
 
-权限来自 `MOTD_ADMIN_FINGERPRINTS`（逗号分隔的 `SHA256:` 公钥指纹），比对的是 **SSH 认证阶段算出的会话指纹**，绝不是用户命令文本——公开邮箱注册无法自我提权。白名单留空 = 无人可管；变更需重启生效（热重载推 P3）。不引入 `users.role` / RBAC，不做 Web 管理页，CLI 仅作灾后恢复补充。治理动作经 outbox 异步写入 `auth_events` 审计（谁 / 何时 / 命令 / 目标 / 结果）。
+v0.4.1 起，服务端连接级心跳（每 10s）**同时重置空闲计时器**——只要 TCP/SSH 连接还在，即便用户长时间不操作也不会被断开。`MOTD_SSH_IDLE_TIMEOUT` 的语义随之更新为「连接无心跳超时」，默认值 10m 不变。
 
-### 内容治理
+### 新增：绝对存活上限兜底静默消失
 
-`/hide [id]` 隐藏他人主题或回复，`hidden ≠ deleted`——是可治理的隐藏状态，不物理删数据。用户实测反馈"担心误隐藏无法恢复"后补 `/unhide [id]`（恢复当前主题/回复）与 `/unthread <thread-id>`（从任意页面恢复隐藏主题，解决 `/unhide` 无参对已隐藏主题不可达的问题）。命令复用与节点治理同一套 `requireAdmin` 权限与审计通道。6 条管理员命令在帮助里单独归组展示。
+心跳是进程内计时器，无法感知「客户端机器断电 / 网络中断、SSH 层未感知断开」的连接——这类连接心跳照跑、空闲计时器被持续重置，会永久占用 `MaxConns` 槽位。新增不被心跳重置的**绝对存活上限 6 小时**兜底收口（无需配置，与空闲超时相互独立）。
 
-### 作者编辑
+### 改进：超时关闭有明确提示与正确退出码
 
-`/edit [id]` 或无参编辑首帖，仅作者本人可操作（复用 `canModify` 单点所有权判定，与治理权严格分离）。详情页显示「已编辑 MM-DD HH:MM」，走 `RenderSystem` 固定路径、复用 `MOTD_DISPLAY_TIMEZONE`，不进用户内容净化链、不做第二套时区逻辑。策略为「已编辑标记」而非版本历史：保留原投票与回复，接受"投票对象可能是改前内容"的语义代价；编辑**不推进 `last_reply_at`**，避免改内容把旧帖顶到最新。
+原实现的超时路径直接 `Close()`，且 `runHandler` 的 exit-status 与超时关闭存在竞争，后到的一次写常因 channel 已关而失败。v0.4.1 把会话收口统一为单一幂等序列：**固定提示文案 → exit-status → 关闭 channel**。
 
-### 回复数显示
+- 空闲超时：「motd: 会话空闲超时，连接已关闭」
+- 硬上限：「motd: 会话达到最长在线时长（6 小时），连接已关闭」
+- 退出码为 0（不再是不明所以的 255）；正常退出不下发任何提示文案。
 
-主题列表真实显示紧凑 `rN`（此前 v0.3.3 已就位格式，但 `RowMeta.Replies` 生产路径从未赋值、实际不显示）。本版读时批量聚合 `ReplyCountsByThreadIDs`，`COUNT-1` 去掉首帖得实际回复数；分页 20 行的 EXPLAIN 走 `idx_posts_thread`，无全表扫（可复现对照见 ADR-052）。选择读时聚合而非写时维护列，与项目"写事务稀缺"约束同向，零迁移、零写路径改动。
-
-### 用户实测反馈修复
-
-- 浏览态连按 `Esc` 不再向终端追加「（取消）」——改为静默 `actionNone`；编辑 / 命令 / 邮箱态的取消提示保留。
-- `/vote rm` "未生效"疑点经诊断确认非 bug：`/top` 后 `threadID` 清零，须先打开主题；守卫提示被吞属显示层，未改。
+提示为服务端固定文本（ADR-019 可信路径），不含用户数据、不含 ANSI。
 
 ## 升级说明
 
-从 v0.3.2 / v0.3.3 升级需执行两个新迁移（`0008_nodes_status`、`0009_edited_at`）：服务启动时自动应用，无需手工操作。建议先按 `OPS.md §2` 备份。v0.3.1 及更早版本同理，迁移会自动顺序补齐（0001 → 0009）。
-
-开启治理能力需在 `.env` 配置 `MOTD_ADMIN_FINGERPRINTS`（0600、不进仓库）：
-
-```bash
-ssh-keygen -lf ~/.ssh/id_rsa.pub
-# 把输出的 SHA256:... 指纹填入 .env，多个用逗号分隔
-MOTD_ADMIN_FINGERPRINTS=SHA256:<43 位 base64>
-```
+从 v0.4.0 升级无需迁移、无需改配置：替换二进制重启即可，`MOTD_SSH_IDLE_TIMEOUT` 默认值与写法均不变。升级后原有「停一会儿就断连」的行为即消失，无需客户端配合（不必设置 `ServerAliveInterval`）。
 
 ## 安装与运行
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.4.0
+go install github.com/jeeinn/motd/cmd/server@v0.4.1
 # 或从源码构建
 go build -o motd ./cmd/server && ./motd
 ```
@@ -55,21 +44,20 @@ go build -o motd ./cmd/server && ./motd
 
 ## 已知问题与限制
 
-- 白名单变更需重启才生效（SIGHUP 热重载推 P3）。
-- 审计缓冲 queue full 时，DomainBus 去重可能吞掉重投；`/healthz` 的 `audit_dropped > 0` 应立即告警。
-- 回复计数使用 `INDEXED BY` 锁计划，索引名硬绑定为技术债。
-- 沿用前版：限流计数纯内存；验证码 pepper 重启失效；`/recover` 对未注册邮箱回统一文案但实际不发信；正文超宽折行与行内左右移动不做；正文提交用 `.` 或 Ctrl-D；窄终端下元信息会折行。
+- 绝对上限固定为 6 小时、不可配置（后续若有长会话需求再评估开放配置）。
+- 沿用前版：审计缓冲 queue full 时 DomainBus 去重可能吞掉重投；回复计数 `INDEXED BY` 索引名硬绑定为技术债；白名单变更需重启生效。
+- 终端 VT 兼容、限流纯内存、验证码 pepper 重启失效等前版限制不变。
 
 ## 验证
 
 - `go build ./...` / `go vet ./...` 通过。
-- `go test -count=1 ./...` 全绿，0 FAIL；测试函数 **903**（`go test -list` 与 `grep '^func Test'` 双口径一致）。
-- 5 个里程碑 commit + 1 个实测修复 commit 共 7 个，隔离演练均用 `data/` 副本，生产库全程未触碰（见 `OPS.md §5`）。
+- `go test -count=1 ./...` 全绿，0 FAIL；测试函数 **907**（v0.4.0 为 903，本次新增 4 个会话保活回归测试：心跳保活、空闲超时提示与 exit-status、硬上限兜底、正常退出幂等）。
+- 新增 ADR-054 记录空闲语义变更与硬上限决策。
 
 ## 破坏性变更
 
-无。全部新增命令与字段向后兼容；旧客户端不受影响。
+无。会话保活行为改善与超时提示对客户端完全兼容；旧客户端无需改动。
 
 ## 变更明细
 
-见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.4.0]` 段落，技术决策见 [`DECISIONS.md`](docs/DECISIONS.md) 的 ADR-048 ~ 053。
+见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.4.1]` 段落，技术决策见 [`DECISIONS.md`](docs/DECISIONS.md) 的 ADR-054。

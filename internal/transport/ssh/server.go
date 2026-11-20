@@ -432,11 +432,12 @@ func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth
 }
 
 func (s *Server) runHandler(ctx context.Context, sess *Session) {
-	defer sess.Close()
+	// v0.4.1：exit-status 与 channel 关闭统一由 Session.closeWithReason 收口，
+	// 幂等且顺序固定（提示文案 → exit-status → Close）。此处不再单独发 exit-status，
+	// 避免与空闲超时 / 硬上限的关闭路径竞争导致重复发送或提示文案丢失。
 	err := s.cfg.Handler.Serve(ctx, sess)
-	// Close 之前回退出码，客户端才能以 0 结束而不是 255。
-	sess.sendExitStatus(0)
 	if err != nil && !errors.Is(err, io.EOF) {
 		s.cfg.Logger.Debug("会话 handler 退出", "session", sess.ID(), "err", err)
 	}
+	_ = sess.Close()
 }

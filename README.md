@@ -7,13 +7,13 @@
 
 SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览、发帖、回复；所有交互都在终端内完成，无需浏览器。
 
-- 版本：`v0.4.0`（2026-11-20）
+- 版本：`v0.4.1`（2026-11-20）
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
 ## 功能
 
-- SSH 入口：仅公钥认证，禁 root，默认端口 `:2222`
+- SSH 入口：仅公钥认证，禁 root，默认端口 `:2222`；连接级心跳保活，停止浏览但连接仍在时不会断连（绝对上限 6 小时兜底静默断线）
 - 论坛核心：5 个版块、keyset 分页、软删除过滤、访客只读、发帖与回复
 - 互动：投票（`/vote up|down|rm`，幂等）、全文搜索（`/search`，FTS5 + 中文短词回退）、作者软删自己的主题/回复（`/delete`）、作者编辑（`/edit`，详情页显示「已编辑」）、主题列表回复数（`rN`）
 - 社区治理（管理员）：版块管理（`/node list|create|rename|archive`）、隐藏 / 恢复他人内容（`/hide` / `/unhide` / `/unthread`）；权限来自公钥指纹白名单，治理动作写入审计日志
@@ -30,7 +30,7 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 安装（Go 1.26.3+）：
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.4.0   # 生成 server 二进制
+go install github.com/jeeinn/motd/cmd/server@v0.4.1   # 生成 server 二进制
 ```
 
 或从源码构建并启动（Windows 下把 `-o motd` 改为 `-o motd.exe`）：
@@ -62,7 +62,7 @@ ssh -p 2222 localhost
 | `MOTD_LOG_FORMAT` | `text` | `text` / `json` |
 | `MOTD_SSH_ADDR` | `:2222` | SSH 入口监听地址 |
 | `MOTD_SSH_MAX_CONNS` | `100` | SSH 最大并发连接数 |
-| `MOTD_SSH_IDLE_TIMEOUT` | `10m` | 会话空闲超时 |
+| `MOTD_SSH_IDLE_TIMEOUT` | `10m` | 会话空闲超时；v0.4.1 起按「连接无心跳」判定，停止浏览但连接仍在不会被断 |
 | `MOTD_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App 的 `client_id`；未设置时 `/login` 返回明确提示，不 panic、日志不回显值 |
 | `MOTD_AUTH_LIMIT_*` / `MOTD_AUDIT_*` | 见示例 | 认证限流与审计参数（P1 新增），共 6 项 |
 | `MOTD_ADMIN_FINGERPRINTS` | 空 | 管理员公钥指纹白名单（P2 新增），逗号分隔；留空 = 无人可管。比对已认证会话指纹，变更需重启生效 |

@@ -24,7 +24,9 @@ type Config struct {
 	SSHAddr string
 	// SSHMaxConns SSH 最大并发连接数（§1.2 P0 容量基线 100）。
 	SSHMaxConns int
-	// SSHIdleTimeout SSH 会话空闲超时。
+	// SSHIdleTimeout SSH 会话空闲超时（v0.4.1 起语义为"连接无心跳"，非"用户无按键"）。
+	// 连接级心跳持续运行即重置该计时器：用户停止浏览但连接仍在时不会被断开。
+	// 客户端静默消失由 transport 层的绝对上限（6h）兜底，不受此值影响。
 	SSHIdleTimeout time.Duration
 	// GitHubClientID 是 Q7 的 OAuth App client_id，只从 MOTD_GITHUB_CLIENT_ID 读取。
 	// Device Flow 不需要 client_secret（§7 R1）；值不进仓库、不写 systemd unit（OPS §3）。

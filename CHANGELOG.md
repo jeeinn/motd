@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-20
+
+体验优化版本。修复「停止浏览一会儿就被 SSH 断连」问题，会话空闲语义由「无按键」改为「连接不存活」。无 schema 迁移、无新依赖、无新配置项；测试 903 → 907。
+
+### Fixed
+
+- **会话空闲断连**：原空闲计时器只由用户按键重置，停止浏览约 10 分钟（默认 `MOTD_SSH_IDLE_TIMEOUT`）服务端就主动关闭会话，客户端只看到裸 `Connection closed`（退出码 255）。现由连接级心跳（10s）持续重置该计时器——只要连接还在，用户不操作也不会被断开。
+- **超时关闭无提示**：空闲超时与硬上限关闭前统一下发固定文案（「会话空闲超时，连接已关闭」/「会话达到最长在线时长（6 小时），连接已关闭」）并回 exit-status（退出码 0），不再让用户面对无解释断连。
+
+### Changed
+
+- 新增会话绝对存活上限 6 小时（无需配置）：兜底「客户端静默消失、SSH 层未感知断开」的连接，避免其永久占用 `MaxConns` 槽位。该计时器不被心跳重置，与空闲超时相互独立。
+- `MOTD_SSH_IDLE_TIMEOUT` 语义更新为「连接无心跳超时」，不再是「用户无按键超时」；默认值 10m 不变。
+- 会话收口统一为单一幂等序列（固定文案 → exit-status → 关闭 channel），消除正常退出与超时关闭之间的竞态。
+
 ## [0.4.0] - 2026-11-20
 
 社区治理版本。P2 五个里程碑（M0/M1/M1b/M2/M3）合并一次发版，新增节点管理、内容治理、编辑与回复计数；迁移 0007 → 0009，ADR-048 → 053，测试 749 → 903。
@@ -167,7 +182,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jeeinn/motd/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jeeinn/motd/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/jeeinn/motd/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/jeeinn/motd/compare/v0.3.1...v0.3.2
