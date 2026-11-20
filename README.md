@@ -72,11 +72,14 @@ ssh -p 2222 localhost
 ## 开发
 
 ```bash
-gofmt -w ./...          # 格式化
+git ls-files '*.go' | xargs gofmt -l  # 格式检查（必须零输出；对齐 CI 的 Verify formatting）
+git ls-files '*.go' | xargs gofmt -w  # 需要修复时执行
 go build ./...          # 构建
 go vet ./...            # 静态检查
 go test -count=1 ./...  # 全量测试
 ```
+
+> 注意：`gofmt` 不接受包模式 `./...`（会把 `...` 当目录打开而报错），请用上面的 `git ls-files | xargs` 写法；CI 在干净 checkout 上跑 `gofmt -l .`，本地用 `git ls-files` 只检查入库文件以避开 `data/` 演练副本的误报。发版前门禁见 [CONTRIBUTING.md](CONTRIBUTING.md)「提交前必跑」。
 
 开发约定、依赖方向、提交规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要开公开 Issue。
 

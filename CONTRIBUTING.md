@@ -8,14 +8,32 @@
 - 支持 VT 序列的终端（Windows Terminal / 现代 conhost / xterm）
 - 可选：`curl`（探活）、一个 SSH 客户端（连入验证）
 
-## 提交前必跑
+## 提交前必跑（与 CI 门禁逐项对齐）
+
+CI（`.github/workflows/ci.yml`）对 `main` 与所有 PR 依次执行 4 个门禁：**Verify formatting → Build → Vet → Test**。本地必须按同样口径全部跑通再提交 / 发版：
 
 ```bash
-gofmt -w ./...          # 格式化
-go build ./...          # 构建
-go vet ./...            # 静态检查
-go test -count=1 ./...  # 全量测试（禁用缓存）
+# ① Verify formatting —— 必须只列出【版本库内】未格式化的 .go 文件，正确输出为空
+git ls-files '*.go' | xargs gofmt -l
+#   等价修复：git ls-files '*.go' | xargs gofmt -w
+go build ./...          # ② Build，对应 CI 的 Build
+go vet ./...            # ③ Vet，对应 CI 的 Vet
+go test -count=1 ./...  # ④ Test，对应 CI 的 Test（禁用缓存）
 ```
+
+**为什么不用 `gofmt -l .` / `gofmt -w ./...`**（两条都踩过坑）：
+
+- CI 跑的是 `gofmt -l .`，但它作用于**干净 checkout**——不存在 `data/` 演练副本（v7/v8/m0/m1 的源码快照，被 `.gitignore` 排除）。本地直接跑 `gofmt -l .` 会把这 4 个历史快照一并列出而误报，因此本地改用 `git ls-files '*.go'`，只检查入库文件，**与 CI 的判定范围等价**。
+- `gofmt` 不接受 Go 的包模式 `./...`——它会把 `...` 当目录打开并报 `open ...: no such file`。要格式化全仓库请用上表的 `git ls-files | xargs gofmt -w`。
+
+**发版前额外门禁**（发版 commit / 打 tag 之前必做，v0.4.0 CI 失败的根因就是漏了 ①）：
+
+```bash
+git ls-files '*.go' | xargs gofmt -l   # 必须零输出
+git status --short                      # 确认无未提交变更、暂存区无多余文件
+```
+
+> 2026-11-20 复盘：v0.4.0 首次发版只跑了 build/vet/test，漏跑格式化检查，7 个 P2 新增文件未 gofmt，push 后 CI 在 Verify formatting 步骤失败（run `44711752405`）；补 `gofmt -w` 后重跑通过（run `44723878859`）。发版自检清单据此与 CI 对齐。
 
 涉及终端闭环 / 持久化的改动，额外跑：
 
@@ -23,8 +41,6 @@ go test -count=1 ./...  # 全量测试（禁用缓存）
 go test -count=1 ./cmd/server -run TestMVPSSHClosedLoop
 go test -count=1 ./cmd/server -run TestMVPRestartAndBackupWithRealData
 ```
-
-CI 会对 `main` 与所有 PR 执行构建、vet 与全量测试；请在本地跑通再提 PR。
 
 ## 代码约定
 
