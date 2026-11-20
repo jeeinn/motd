@@ -106,17 +106,19 @@ chmod 600 .env
 - **纪律**：`client_id` 不进仓库、不写进 systemd unit、不留在命令行历史。unit 是 world-readable，明文 `Environment=` 等同于泄露；用独立环境文件：
 
   ```bash
-  sudo install -d -m 0750 /etc/motd
-  sudo install -m 0600 -o root -g root /dev/null /etc/motd/motd.env
+  # /etc/motd 在 Debian/Ubuntu 常是目录，在 RHEL/CentOS 常是普通登录横幅文件——先判类型
+  if [ -d /etc/motd ]; then ENV_FILE=/etc/motd/motd.env; else ENV_FILE=/etc/sysconfig/motd; fi
+  sudo install -m 0600 -o root -g root /dev/null "$ENV_FILE"
   # 写入：MOTD_GITHUB_CLIENT_ID=<你的 client_id>
+  echo "$ENV_FILE"   # 记住实际路径，unit 的 EnvironmentFile= 必须指向它
   ```
 
-  unit 内只写 `EnvironmentFile=/etc/motd/motd.env`（`deploy/motd.service` 由 P0-28 产出）。
+  unit 内只写 `EnvironmentFile=<上面得到的路径>`；不要在 unit 里写明文 `Environment=MOTD_GITHUB_CLIENT_ID=...`（unit 是 world-readable）。仓库当前不提供 `deploy/motd.service`，单元模板见 §9.3。
 
 - **开发 / 测试不需要设置它**：`httptest` 假端点覆盖 Device Flow 全部分支，不依赖真实凭据与外网。未设置时 `/login github` 会返回专门的固定提示「未配置 MOTD_GITHUB_CLIENT_ID，无法发起 GitHub 登录…」（`auth.LoginTextClientIDMissing`），不 panic、不静默失败、不回显上游错误原文；`/healthz` 不回显该值。
 - **P0-15 落地事实**（ADR-021）：`config.Load` 读取该变量并注入 `infrastructure/github.Client`；两个需要 `client_id` 的 POST 在缺值时返回 `auth.ErrClientIDMissing`，不发出任何请求。启动日志只输出 `client_id_configured=true|false` 与 `scope`，**不打印凭据值**，也不会因缺值 panic。
 - 出站要求：VPS 需允许访问 `github.com:443`（Device Flow 两端点）与 `api.github.com:443`（`/user`、`/user/emails`）。本机 `httptest` 测试不需要外网。
-- 真实联调（D2 手工验收）与 P0-28 部署自检前必须就位。
+- 真实联调（D2 手工验收）前必须就位；若上线时暂不提供，保持留空并在交付报告中明确「GitHub 登录不可用」，不要谎称已配置（2026-11-20 首次 VPS 部署即按留空交付）。
 
 ### Device Flow 状态表（P0-16）
 
@@ -377,18 +379,379 @@ find data/backups -name 'motd-*.db' -mtime +14 -print
 - **终端 VT 兼容（ADR-027）**：终端页面用服务端白名单序列 `\x1b[K`（EL）与 `\x1b[nA`（CUU）做原地重绘，依赖客户端启用 VT 支持（Windows Terminal / 现代 conhost / xterm 均默认支持）。若用户反馈「导航仍刷屏」或看到字面 `\x1b[K`，优先确认终端 VT 设置，而不是服务端渲染；未启用 VT 时服务端会退化为追加输出，业务功能不受影响。清屏 / OSC / 备用屏等禁止序列由 `internal/archtest` 负向注入守卫持续校验。
 - 待接入告警：最近备份时间超过 26 h、`verify` 失败、队列深度持续接近容量。
 
-## 9. 部署与上线清单（P0 收尾交付）
+## 9. 部署与上线清单（2026-11-20 实战验证版）
 
-> 目标形态（V 先生 2026-11-18 13:43 确认）：**本地交叉编译出单个二进制 → 上传测试 VPS → Linux/systemd 托管 → 放行 `2222`**（对外 22→2222 转发由部署方完成）。**P0 全部完成后，按本节逐项交付可直接复制的命令与实测结果**；`deploy/motd.service` 与启动自检脚本由 P0-28 产出。本节是交付约定，不是已完成事实。
+> 单个二进制部署不变，但**运行形态有两种**：方式一 systemd 托管（§9.1–§9.5），方式二便携版自部署（§9.6）。先按 §9.0 选形态，再读对应步骤。
+> 本节按 **CentOS Stream 9 / 阿里云 ECS** 实机部署重新校准。国内 VPS 上 `github.com` 与 `proxy.golang.org` 可能超时，因此默认给出「目标机直接构建」路径，同时保留原「本地交叉编译 + 上传」路径。仓库当前**没有** `deploy/motd.service`，用 §9.3 的模板。下文 `<VERSION>` 取实际版本（实战值 `v0.4.2`）。
+
+### 9.0 形态选择：systemd 托管 vs 便携版自部署
+
+| 维度 | 方式一：systemd 托管（推荐生产） | 方式二：便携版自部署 |
+| --- | --- | --- |
+| 运行身份 | 系统用户 `motd`，非 root | 当前普通用户，无需 root |
+| 配置来源 | `/etc/sysconfig/motd`（0600 root:root），`MOTD_DOTENV_DISABLED=true`；`.env` **不生效** | 自部署目录 `.env`（0600，运行用户可读），默认自动加载；**不要**设 `MOTD_DOTENV_DISABLED=true` |
+| 目录 | 程序 `/opt/motd`，数据 `/var/lib/motd` 分离 | 同一目录（如 `/data/motd`）放二进制、`.env`、`data/` |
+| 端口 | SSH `:2222`，healthz `127.0.0.1:18080`（避让已有服务） | 自选并与方式一错开，如 SSH `:2223` + healthz `127.0.0.1:18081` |
+| 启停 / 日志 | `systemctl restart/stop motd`；`journalctl -u motd` | `screen -S motd ...`；`screen -L` 或重定向 `motd.log` |
+| 开机自启 | `systemctl enable motd` | screen 不提供；需 cron `@reboot` 或 systemd --user |
+| 适用 | 长期运行、公网服务 | 个人验证、多版本并存、无 root 权限 |
+
+**同机并存必须错开 SSH 与 healthz 端口**；两种方式的配置不要双写：systemd 模式以环境文件为唯一来源，便携版以 `.env` 为唯一来源。本次 Jeeinn 服务器采用方式一，用户新增 `/opt/motd/.env` 后必须把所需键迁入 `/etc/sysconfig/motd` 才生效（见 §9.3）。
 
 | # | 步骤 | 交付物 / 验收点 |
 | --- | --- | --- |
-| 1 | 交叉编译 `GOOS=linux GOARCH=amd64`，`-ldflags` 注入 version | `bin/motd-linux-amd64` + sha256，上传 VPS |
-| 2 | 目录与运行账号：`/opt/motd`（程序）、`/var/lib/motd`（数据），非 root 运行 | 目录 0750、数据目录属主正确；`data/` 不进仓库 |
-| 3 | `/etc/motd/motd.env`（0600 root:root）注入 `MOTD_GITHUB_CLIENT_ID` | 见 §3 凭据小节；unit 只引用 `EnvironmentFile=` |
-| 4 | 安装 `deploy/motd.service`（`GOMEMLIMIT=800MiB` / `GOGC=50` / `Restart=on-failure`） | `systemctl daemon-reload && systemctl enable --now motd` |
-| 5 | SSH host key 首次生成与**重启复用**检查 | 重启前后指纹一致，客户端无 `host key changed` |
-| 6 | 端口放行与 22→2222 转发（部署方执行） | `ssh -p 2222 <vps>` 进入访客会话 |
-| 7 | 启动自检 + `/healthz` | 迁移版本、host key、`ok <version> queue=... online=...` |
-| 8 | 备份 cron + 一次**带真实数据**的恢复演练 | 结案 D7；见 §5 待办 |
-| 9 | D1–D7 验收清单逐条记录实测结果 | 写回本手册 |
+| 1 | 构建并注入版本（§9.1），两个构建路径二选一 | `/opt/motd/bin/motd` + `motdctl`，`/healthz` 回显版本而非 `dev` |
+| 2 | 非 root 运行账号与目录权限（§9.2） | `0750 root:motd` 程序目录、`0750 motd:motd` 数据目录，`motd` 用户能 `cd` 且能执行二进制 |
+| 3 | 环境文件（§9.3） | `/etc/sysconfig/motd` 或 `/etc/motd/motd.env`，0600 root:root；凭据不进 unit、不进仓库 |
+| 4 | systemd 单元（§9.3） | `enabled`、`active (running)`、`Restart=on-failure` |
+| 5 | SSH host key 首次生成与**重启复用**检查（§9.4） | 重启前后指纹一致，客户端无 `host key changed` |
+| 6 | 端口放行：firewalld 加 `2222/tcp`；对外 22→2222 转发仍由部署方决定 | 外部 `ssh -p 2222 <vps>` 进入访客会话 |
+| 7 | 启动自检 + `/healthz`（§9.4） | 迁移版本 `[1..9]`、host key、`ok <version> queue=... online=...` |
+| 8 | 备份冒烟 + 每日备份策略（§9.5） | 至少一次 `motdctl backup` + sha256；定时策略由用户拍板后建立 |
+| 9 | 逐条记录实测结果与偏差 | 写回本手册；未配置项（client_id / 管理员指纹 / SMTP）必须显式列出 |
+
+以下 §9.1–§9.5 均为**方式一（systemd 托管）**的具体步骤；方式二见 §9.6。
+
+### 9.1 构建：两条路径，版本必须注入
+
+**路径 A（原约定）：本地交叉编译后上传。** 适合本地网络好、目标机不便装 Go 的场景。
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+  go build -p 2 -ldflags "-X main.version=<VERSION> -s -w" -o bin/motd-linux-amd64 ./cmd/server
+sha256sum bin/motd-linux-amd64            # 记录到交付报告
+# 再由 scp / SFTP 上传到目标机 /opt/motd/bin/motd
+```
+
+**路径 B（2026-11-20 实战）：目标机上构建。** 先探测网络：`curl -I -m 10 https://proxy.golang.org/` 若超时，改用国内代理。
+
+```bash
+dnf install -y --setopt=install_weak_deps=False golang   # 1.27.3，满足 go.mod 的 1.26.3
+export GOPROXY=https://goproxy.cn,direct GOSUMDB=off GOTOOLCHAIN=local
+
+mkdir -p /root/motd-build/src && cd /root/motd-build
+go mod init local/motdbuild 2>/dev/null || true
+go mod download github.com/jeeinn/motd@<VERSION>
+MODDIR="$(go env GOPATH)/pkg/mod/github.com/jeeinn/motd@<VERSION>"
+cp -a "$MODDIR/." /root/motd-build/src/ && chmod -R u+w /root/motd-build/src
+cd /root/motd-build/src
+# 小内存 VPS（实测 1.6 GiB）必须限制并行度；module cache 里的文件只读，故先复制到可写目录
+GOMEMLIMIT=900MiB GOGC=50 go build -p 2 -ldflags "-X main.version=<VERSION> -s -w" -o /opt/motd/bin/motd ./cmd/server
+GOMEMLIMIT=900MiB GOGC=50 go build -p 2 -ldflags "-s -w" -o /opt/motd/bin/motdctl ./cmd/motdctl
+sha256sum /opt/motd/bin/motd /opt/motd/bin/motdctl
+```
+
+**判据**：启动日志 `探针监听 ... version=<VERSION>` 或 `/healthz` 回显该版本。回显 `dev` 说明漏了 `-X main.version=`。
+
+### 9.2 目录、账号与权限（最易踩坑）
+
+```bash
+id motd >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin motd
+
+install -d -m 0750 -o root -g motd /opt/motd /opt/motd/bin
+install -d -m 0750 -o motd -g motd /var/lib/motd /var/lib/motd/backups
+install -m 0750 -o root -g motd /path/to/motd     /opt/motd/bin/motd
+install -m 0750 -o root -g motd /path/to/motdctl  /opt/motd/bin/motdctl
+
+# 验收：motd 用户既能进入工作目录，也能执行二进制
+su -s /bin/bash motd -c 'cd /opt/motd && /opt/motd/bin/motdctl --help' | head -5
+```
+
+**真实故障**：若把 `/opt/motd`、`bin/`、二进制建成 `0750 root:root`，systemd 以 `motd` 用户启动时会在 CHDIR 阶段失败，日志为 `Changing to the requested working directory failed: Permission denied` + `status=200/CHDIR`，并进入 `Restart=on-failure` 的重启循环。修法是赋值组为 `motd`（或放宽为 0755），不要靠改 `User=root` 绕过。
+
+### 9.3 环境文件与 systemd 单元模板
+
+**先判端口占用**：`ss -tlnp | grep ':8080'`。若已有服务占用（实测是 `matea-linux-amd`），把 `MOTD_HTTP_ADDR` 改为回环上的空闲端口（实战用 `127.0.0.1:18080`），不要改 SSH 入口。
+
+**环境文件路径**：`/etc/motd` 在 RHEL/CentOS 是**普通登录横幅文件**，不是目录，不能 `mkdir`；用下面的判定逻辑选路径。
+
+```bash
+if [ -d /etc/motd ]; then ENV_FILE=/etc/motd/motd.env; else ENV_FILE=/etc/sysconfig/motd; fi
+install -m 0600 -o root -g root /dev/null "$ENV_FILE"
+cat > "$ENV_FILE" <<'EOF'
+MOTD_DOTENV_DISABLED=true
+MOTD_DATA_DIR=/var/lib/motd
+MOTD_DB_PATH=/var/lib/motd/motd.db
+MOTD_BACKUP_DIR=/var/lib/motd/backups
+MOTDCTL_BIN=/opt/motd/bin/motdctl
+MOTD_HTTP_ADDR=127.0.0.1:18080
+MOTD_SSH_ADDR=:2222
+MOTD_SSH_MAX_CONNS=100
+MOTD_LOG_LEVEL=info
+MOTD_LOG_FORMAT=text
+MOTD_DISPLAY_TIMEZONE=Asia/Shanghai
+# 可选凭据：由用户提供后填入本文件（0600），改完需重启生效
+# MOTD_GITHUB_CLIENT_ID=
+# MOTD_ADMIN_FINGERPRINTS=
+# MOTD_EMAIL_ENABLED=false
+EOF
+chmod 600 "$ENV_FILE" && chown root:root "$ENV_FILE"
+```
+
+`MOTD_DOTENV_DISABLED=true` 让进程只认 systemd 注入的环境，避免工作目录或二进制目录里的 `.env` 旁路覆盖凭据。凭据只写这个文件，unit 只引用 `EnvironmentFile=<实际路径>`。
+
+**单元模板**（写入 `/etc/systemd/system/motd.service`，`0644 root:root`）：
+
+```ini
+[Unit]
+Description=motd - SSH-first terminal forum
+Documentation=https://github.com/jeeinn/motd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=motd
+Group=motd
+WorkingDirectory=/opt/motd
+EnvironmentFile=<实际路径>
+Environment=GOMEMLIMIT=800MiB
+Environment=GOGC=50
+ExecStart=/opt/motd/bin/motd
+Restart=on-failure
+RestartSec=3s
+KillMode=mixed
+TimeoutStopSec=20s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/motd
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
+```
+
+把模板里的 `<实际路径>` 替换为 §9.3 判定的真实值（实战为 `/etc/sysconfig/motd`）；占位符原样写入会让服务启动失败。
+
+```bash
+systemctl daemon-reload && systemctl enable --now motd
+systemctl status motd --no-pager -l | head -20
+```
+
+`ProtectSystem=full` 下只有 `ReadWritePaths=/var/lib/motd` 可写；不要把数据目录留在 `/opt/motd/data`，否则运行期写库会被只读挂载挡住。
+
+### 9.4 启动自检（逐条留证）
+
+```bash
+# ① 探针：版本、队列、迁移后的在线计数
+curl -sS http://127.0.0.1:18080/healthz
+# 期望：ok <VERSION> queue=0/256 online=0 active=0 commits=N audit_dropped=0 ...
+
+# ② 关键启动日志
+journalctl -u motd --no-pager -b | grep -E '配置来源|数据库就绪|host key|client_id_configured|探针监听|SSH 监听'
+# 期望：配置来源 env_only；数据库就绪 migrations_applied=9 applied_versions="[1 2 3 4 5 6 7 8 9]"
+
+# ③ host key 重启复用
+F1=$(journalctl -u motd --no-pager -b | grep -o 'fingerprint=SHA256:[^ ]*' | tail -1)
+systemctl restart motd && sleep 2
+F2=$(journalctl -u motd --no-pager -b | grep -o 'fingerprint=SHA256:[^ ]*' | tail -1)
+[ "$F1" = "$F2" ] && echo HOSTKEY_STABLE=yes || echo HOSTKEY_STABLE=no
+
+# ④ 防火墙与访客连入
+firewall-cmd --permanent --add-port=2222/tcp && firewall-cmd --reload
+printf '/quit\r' | timeout 12 ssh -tt -o BatchMode=yes -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -p 2222 guest@127.0.0.1
+```
+
+### 9.5 备份与未决项
+
+```bash
+# 冒烟（不依赖 scripts/*.sh，避免 cron 里 source .env 的坑）
+su -s /bin/bash motd -c \
+  '/opt/motd/bin/motdctl backup --db /var/lib/motd/motd.db --dir /var/lib/motd/backups'
+ls -lh /var/lib/motd/backups
+```
+
+- 首次部署**默认不建立**每日 cron/timer；是否启用、周期与保留策略由用户拍板（§2 初值为每日 03:00、保留 14 天且不自动删除）。
+- 若后续用 `scripts/backup.sh`：该脚本只单独读 `MOTD_DB_PATH` / `MOTD_BACKUP_DIR` / `MOTDCTL_BIN` 三项，**不加载** `.env`；cron 里必须显式 export 或用 systemd timer 的 `EnvironmentFile=`。
+- 交付报告必须明确列出未配置项：`MOTD_GITHUB_CLIENT_ID`（Device Flow 不可用）、`MOTD_ADMIN_FINGERPRINTS`（留空 = 无管理员）、邮箱 SMTP，以及与默认值的偏差（如探针端口、环境文件路径）。
+
+### 9.6 方式二：便携版自部署（二进制 + `.env` + `screen`）
+
+> 适用：用户在自己的目录（如 `/data/motd`）用自己编译的二进制运行，不装系统服务、不需要 root。
+> 与方式一最大的区别：**`.env` 是唯一配置入口**——不要设置 `MOTD_DOTENV_DISABLED=true`，否则 `.env` 自身失效。
+
+**目录布局**（属主为运行用户，不要 `root:root`）：
+
+```text
+/data/motd/
+├── motd          # 服务端二进制（带 -X main.version=...）
+├── motdctl       # 备份工具，可选
+├── .env          # 0600，运行用户可读
+├── data/         # 自动建库、host key、备份
+└── motd.log      # 日志（可选）
+```
+
+**步骤**：
+
+1. **构建**（版本必须注入，口径见 §9.1；本地交叉编译或目标机 `go build` 均可）：
+
+   ```bash
+   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -p 2 \
+     -ldflags "-X main.version=<VERSION> -s -w" -o /data/motd/motd ./cmd/server
+   # 需要备份能力时再构建 motdctl 到同目录
+   ```
+
+2. **写 `.env`**（从仓库 `.env.sample` 复制，逐项改）：
+
+   ```bash
+   cd /data/motd
+   cp /path/to/repo/.env.sample .env && chmod 600 .env
+   # 必改：MOTD_DATA_DIR=./data、MOTD_DB_PATH=./data/motd.db
+   # 端口错开 systemd 实例：MOTD_SSH_ADDR=:2223、MOTD_HTTP_ADDR=127.0.0.1:18081
+   # 不要写 MOTD_DOTENV_DISABLED=true
+   ```
+
+3. **用 screen 启动并验收**：
+
+   ```bash
+   cd /data/motd
+   screen -S motd -L -dm ./motd     # -L 写屏日志
+   screen -ls                       # 应有 motd 的 detached 会话
+   curl -sS http://127.0.0.1:18081/healthz
+   ```
+
+   不需要屏日志时：`screen -S motd -dm bash -c './motd >> /data/motd/motd.log 2>&1'`。
+
+4. **查看与优雅停止**：
+
+   ```bash
+   screen -r motd                    # 查看输出；Ctrl-a d 脱离，不要 Ctrl-a k
+   screen -S motd -X stuff $'\003'   # 发 Ctrl-C，触发程序优雅收口
+   # 确认进程退出后再按需 screen -S motd -X quit
+   ```
+
+   不要用 `kill -9`：虽然 WAL 恢复演练通过（§5），但正常停机应先让写队列收口。
+
+5. **备份与升级**：
+
+   ```bash
+   cd /data/motd
+   ./motdctl backup --db ./data/motd.db --dir ./data/backups
+   # 升级：优雅停止 → 替换 motd 二进制 → 重新启动；data/ 与 host key 原样保留
+   ```
+
+6. **开机自启**：screen 本身不提供；需要时加 cron `@reboot cd /data/motd && screen -S motd -L -dm ./motd`，或改用 systemd --user。若希望纳入完整生命周期管理，迁移到方式一。
+
+**便携版特有坑**：
+
+- `.env` 查找顺序为 **cwd → 可执行文件所在目录**，命中第一个即停、**不合并两份**。务必 `cd /data/motd` 再启动；两处都有 `.env` 时只认 cwd 那份。
+- **进程已有环境变量优先于 `.env`**：若 shell 里已 `export MOTD_*` 同名变量，`.env` 的值不会生效。
+- 非法行静默忽略；启动日志只输出 `配置来源 file=<path>`，绝不输出键值。排障先看这一行确认读到了哪份 `.env`。
+- 端口冲突：`:2222` / `:8080` 若被方式一占用，必须改端口，否则启动失败。
+- host key 在 `./data/ssh_host_ed25519_key`；换目录会重新生成并导致客户端报 `host key changed`，迁移时要连 `data/` 一起搬。
+
+## 10. 面向 AI AGENTS 的自动部署指南
+
+> 适用：智能体通过具备 SSH / SFTP 能力的工具（如 nyaterm MCP 会话）在目标机执行 §9。
+> 目标是把部署变成**可探测、可判定、可回退、可留证**的流程，而不是让智能体"照着 README 猜"。
+> **自动部署 ≠ 自动发版**：智能体不得 `commit` / `tag` / `push` / 建 GitHub Release，见 [`../AGENTS.md`](../AGENTS.md) §5。
+
+### 10.1 输入契约
+
+| 项 | 必填 | 默认 / 口径 | 说明 |
+| --- | --- | --- | --- |
+| 目标连接标识 | 是 | — | SSH 连接名 / ID 或 `user@host`；方式一须能取得 root 或等价 sudo |
+| 部署形态 | 是 | 有 root 时默认 systemd（方式一） | 便携版（方式二）须用户明确给出目录（如 `/data/motd`）与端口；无 root 时只能用方式二（§9.6） |
+| 部署版本 | 是 | 当前发布 tag | 写成完整 tag，如 `v0.4.2`；构建时必须 `-X main.version=<VERSION>` |
+| 对外方式 | 否 | 仅 `:2222` 监听 + firewalld 放行 | 22→2222 转发属用户决策；未授权不得改现有 sshd 配置 |
+| 探针地址 | 否 | 8080 被占用则用 `127.0.0.1:18080` | 先 `ss -tlnp` 判定，不得盲目 bind 默认端口 |
+| `MOTD_GITHUB_CLIENT_ID` | 否 | 留空 | 未提供就明说 Device Flow 不可用；不要编造或复用历史值 |
+| `MOTD_ADMIN_FINGERPRINTS` | 否 | 留空 | 留空 = 无人可管；指纹须由用户提供，不从公钥文件自行推断其管理意图 |
+| 邮箱 SMTP | 否 | 关闭 | 授权码属高敏凭据，只写 0600 环境文件 |
+
+用户未提供的项：按默认值推进，但在最终报告里逐项标注「未配置 / 未授权」，不得静默省略。
+
+### 10.2 前置探测（只读，先探测再动手）
+
+```bash
+echo '=== IDENTITY ===';  whoami; hostname; cat /etc/os-release | head -4; uname -m
+echo '=== TOOLS ===';     command -v go git curl systemctl ss firewall-cmd 2>&1
+echo '=== EXISTING ===';  systemctl status motd --no-pager 2>&1 | head -10
+echo '=== DIRS ===';      ls -ld /opt/motd /var/lib/motd /etc/motd /etc/motd/motd.env /etc/sysconfig/motd 2>&1
+echo '=== PORTS ===';     ss -tlnp | grep -E ':(2222|8080|18080)\b' || echo 'no listener'
+echo '=== FIREWALL ===';  firewall-cmd --list-ports 2>&1
+echo '=== RESOURCES ==='; df -h / | tail -1; free -h | head -2
+echo '=== NETWORK ===';   curl -sS -o /dev/null -w 'goproxy_cn=%{http_code}\n' -m 10 https://goproxy.cn/github.com/jeeinn/motd/@v/<VERSION>.info   # 换成目标 tag
+```
+
+**STOP 条件（命中即停，不继续写文件）**：
+
+| 观测 | 判定 | 处置 |
+| --- | --- | --- |
+| `motd.service` 已存在且 `active` | 这是升级，不是首装 | 先备份数据库与 host key，征询用户后走升级流程；**禁止覆盖** `/var/lib/motd/motd.db` 与 `ssh_host_ed25519_key` |
+| `2222` 被其他进程占用 | 端口冲突 | 报告占用者，请用户指定端口；不要 `kill` 他人进程 |
+| 无 root / 无 sudo | 无法建目录、装包、改 firewall | STOP 并回报所需权限 |
+| 磁盘可用 < 2 GiB 或内存可用 < 1 GiB | 构建/运行资源不足 | 降低 `-p 1` 并设 `GOMEMLIMIT`，或 STOP |
+| 用户只授权「检查」未授权「变更」 | 越界 | 只输出计划与 diff，不执行变更 |
+
+### 10.3 决策表
+
+| 观测 | 决策 |
+| --- | --- |
+| `github.com` / `proxy.golang.org` 超时、`goproxy.cn` 可达 | 目标机构建时设 `GOPROXY=https://goproxy.cn,direct GOSUMDB=off`（§9.1 路径 B） |
+| 工具只有**文本** SFTP 写入能力，没有二进制上传 | 走目标机构建；不要把 14 MiB 二进制 base64 分块塞进工具参数（实测不可行且污染上下文） |
+| `/etc/motd` 是目录 | `ENV_FILE=/etc/motd/motd.env` |
+| `/etc/motd` 是普通文件（CentOS/RHEL 常见） | `ENV_FILE=/etc/sysconfig/motd`（实战路径） |
+| `ss` 显示 `8080` 已被占用 | `MOTD_HTTP_ADDR=127.0.0.1:18080`；不要动占用方 |
+| module cache 源目录只读 | `cp -a` 到 `/root/motd-build/src` 后 `chmod -R u+w` 再构建 |
+| 用户无 root / 明确要求自有目录 + screen | 走便携版（§9.6）：`/data/motd` + `.env` 0600 + 错开端口；不要创建 systemd 单元 |
+| 同机已跑方式一，又要求便携版 | SSH 与 healthz 必须换端口（如 `:2223` / `127.0.0.1:18081`），并在报告里写明 |
+| 用户给了 `client_id` / 指纹 | 写入 `0600 root:root` 的 `$ENV_FILE` 注释位并 `systemctl restart motd`；不得写进 unit 或命令行历史 |
+
+### 10.4 幂等执行序列（每步带验收门）
+
+1. **工具链与源码**：按 §10.2 结果安装 Go / 设置代理，下载指定 tag 的源码（§9.1 路径 B）。
+   *门*：`go version` 满足 `go.mod`，`$MODDIR/go.mod` 存在。
+2. **账号与目录**：按 §9.2 创建用户、目录、权限，二进制就位。
+   *门*：`su -s /bin/bash motd -c 'cd /opt/motd && /opt/motd/bin/motdctl --help'` 有输出。权限错误在这里拦住，进入 systemd 就变成 `200/CHDIR` 重启循环。
+3. **环境文件与单元**：方式一按 §9.3 判端口、写 `$ENV_FILE`（0600）、写 `/etc/systemd/system/motd.service`，`daemon-reload && enable --now`；方式二按 §9.6 写 `/data/motd/.env` 并用 `screen` 启动。
+   *门*：方式一 `systemctl is-active motd` = `active`、日志 `配置来源 env_only`；方式二 `screen -ls` 有会话、日志 `配置来源 file=/data/motd/.env`。两者均须 `migrations_applied=9`。
+4. **网络放行**：仅在用户授权对外时 `firewall-cmd --permanent --add-port=2222/tcp && firewall-cmd --reload`。
+   *门*：`firewall-cmd --list-ports` 含 `2222/tcp`；外部 `Test-NetConnection` 或 `ssh -p 2222` 可达。
+5. **功能验收**：执行 §9.4 全部四项，特别是 host key 重启指纹一致与访客 `ssh` 进入。
+   *门*：`/healthz` 版本等于目标 tag；`HOSTKEY_STABLE=yes`；访客能看到版块列表。
+6. **备份冒烟**：执行 §9.5 的 `motdctl backup`，记录文件名与 sha256；定时策略另行征询。
+7. **输出报告**：按 §10.6 模板逐项填报，含偏差与未配置项。
+
+任何一步验收门失败：**停止后续步骤**，保留现场（日志、路径、命令），报告失败点与已尝试的修复，不做破坏性重试。
+
+### 10.5 失败模式速查
+
+| 现象 | 根因 | 修复 |
+| --- | --- | --- |
+| `status=200/CHDIR` + `Changing to the requested working directory failed` | `/opt/motd` 或二进制为 `0750 root:root`，`motd` 用户无执行/进入权 | `chgrp motd` 程序目录与二进制（或 0755），**不要**改 `User=root` |
+| `/healthz` 回显 `dev` | 构建漏了 `-X main.version=<VERSION>` | 用带 ldflags 的命令重建并替换二进制，重启 |
+| `bind: address already in use`（8080） | 已有探针/服务占用默认端口 | 改用 `127.0.0.1:18080`，更新 `$ENV_FILE` 后重启 |
+| 模块下载全超时 | `github.com` / `proxy.golang.org` 在国内 VPS 不可达 | `GOPROXY=https://goproxy.cn,direct GOSUMDB=off` |
+| `permission denied` 写 module cache | module cache 只读 | 复制到可写目录再 `go build` |
+| 客户端报 `host key changed` | host key 被重新生成（通常是数据目录被删/换目录） | 停止变更；从备份恢复 `ssh_host_ed25519_key`，确认 `MOTD_DATA_DIR` 未变 |
+| `audit_dropped > 0` 或 `audit_failed` 持续增长 | 审计缓冲溢出，认证动作 fail-closed | 先查 SQLite 写队列堵塞，不要盲目调小 flush 间隔（§3） |
+| 登录提示「未配置 MOTD_GITHUB_CLIENT_ID」 | 凭据留空 | 属预期降级；向用户索取 client_id 并写入 0600 环境文件后重启 |
+
+### 10.6 交付报告模板（智能体必须逐项填）
+
+```text
+形态：<systemd 托管 | 便携版自部署>（目录 / 端口）
+版本 / 构建：<VERSION>，<本地交叉编译 | 目标机构建>，sha256=<...>
+目标机：<hostname> / <os> / <arch>，公网入口 <host:2222>
+路径：程序 /opt/motd/bin/motd，数据 /var/lib/motd，环境文件 <$ENV_FILE>，单元 /etc/systemd/system/motd.service
+端口：SSH :2222（firewall 已放行 / 未授权放行）；healthz 127.0.0.1:<port>
+探针原文：ok <version> queue=... online=... active=... commits=...
+启动证据：migrations_applied=9；配置来源 env_only；client_id_configured=<true|false>
+host key：SHA256:<...>，重启前后一致 = yes/no
+验收：访客 SSH 进入 yes/no；备份冒烟 <文件名> + sha256；恢复演练 <未做/已做>
+偏差：探针端口、环境文件路径、unit 来源（仓库无模板）
+未配置：GitHub client_id / 管理员指纹 / 邮箱 SMTP / 每日备份策略
+```
+
+### 10.7 护栏清单（不可协商）
+
+- 不执行 `rm -rf` 或任何会清除 `/var/lib/motd`、`data/`、备份目录的操作；升级前先备份。
+- 不把凭据写进 systemd unit（`0644` world-readable）、命令行参数、日志或报告；只写 `0600` 环境文件。
+- 不启用 shell 的 `set -x` 处理含凭据的文件；报告里只写「已配置 / 未配置」。
+- 不修改现有 sshd 配置、不占用 22 端口；`2222/tcp` 放行仅在用户授权范围内执行。
+- 不做 `commit` / `tag` / `push` / Release；不在未授权情况下修改版本文件。
+- 每一步变更后立即验收；失败即停，保留现场并上报，不做"再试一次也许就好了"的循环。

@@ -92,7 +92,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | `README.md` | 用户入口：功能、安装、配置表、快速开始 | 改对外描述 / 配置 |
 | `CONTRIBUTING.md` | 开发约定、提交前门禁、PR 规范 | 任何提交前 |
 | `docs/DECISIONS.md` | ADR-001~055，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
-| `docs/OPS.md` | 部署、备份恢复、演练记录、监控告警 | 改运维相关 / 部署 |
+| `docs/OPS.md` | 部署、备份恢复、演练记录、监控告警；§9 实战部署清单、§10 AI 智能体自动部署指南 | 改运维相关 / 部署；智能体执行远程部署前**必读 §10** |
 | `docs/P0-PLAN.md` / `PHASE1-PLAN.md` / `PHASE2-PLAN.md` / `P2-PLAN.md` | 各阶段计划与完成状态（历史快照，不回改） | 追溯需求来源 |
 | `docs/MVP-DELIVERY.md` | MVP 交付复盘（D1~D7 判定） | 理解项目起点 |
 | `docs/DEVIATIONS.md` | 对设计评审稿的偏差登记 | 改设计相关 |
