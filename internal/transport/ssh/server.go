@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	DefaultAddr        = ":2222"
-	DefaultMaxConns    = 100
-	DefaultIdleTimeout = 10 * time.Minute
+	DefaultAddr     = ":2222"
+	DefaultMaxConns = 100
 )
 
 var (
@@ -39,14 +38,13 @@ const sshLoginBanner = "motd: 请用任意非 root 用户名 + 本机 SSH 公钥
 // Resolver / Presence / Handler 都由 cmd 装配注入：transport 不碰数据库、
 // 不碰渲染实现，也不自己决定身份策略（§2.2 禁止表）。
 type Config struct {
-	Addr        string
-	DataDir     string
-	MaxConns    int
-	IdleTimeout time.Duration
-	Resolver    auth.Resolver
-	Presence    *presence.Registry
-	Handler     Handler
-	Logger      *slog.Logger
+	Addr     string
+	DataDir  string
+	MaxConns int
+	Resolver auth.Resolver
+	Presence *presence.Registry
+	Handler  Handler
+	Logger   *slog.Logger
 }
 
 func (c Config) withDefaults() Config {
@@ -55,9 +53,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxConns <= 0 {
 		c.MaxConns = DefaultMaxConns
-	}
-	if c.IdleTimeout <= 0 {
-		c.IdleTimeout = DefaultIdleTimeout
 	}
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -383,7 +378,7 @@ func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth
 	}
 	defer s.cfg.Presence.Disconnect(id)
 
-	sess := newSession(id, ch, fp, pk, p, s.cfg.Presence, s.cfg.IdleTimeout, remoteIP)
+	sess := newSession(id, ch, fp, pk, p, s.cfg.Presence, remoteIP)
 	s.trackSession(sess, true)
 	defer s.trackSession(sess, false)
 	defer sess.Close()

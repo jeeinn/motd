@@ -131,9 +131,6 @@ func startServer(t *testing.T, cfg Config) (*Server, string) {
 	if cfg.Handler == nil {
 		cfg.Handler = newScriptedHandler()
 	}
-	if cfg.IdleTimeout == 0 {
-		cfg.IdleTimeout = 5 * time.Second
-	}
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -313,7 +310,7 @@ func TestEndToEndSessionRegistersPresence(t *testing.T) {
 	reg := presence.New()
 	h := newScriptedHandler()
 	_, addr := startServer(t, Config{
-		Presence: reg, Handler: h, IdleTimeout: 5 * time.Second,
+		Presence: reg, Handler: h,
 	})
 
 	cl, err := gossh.Dial("tcp", addr, clientConfig(t))
@@ -361,41 +358,6 @@ func TestEndToEndSessionRegistersPresence(t *testing.T) {
 	_ = cl.Close()
 	<-h.exited
 	waitUntil(t, func() bool { return reg.Online() == 0 })
-}
-
-func TestIdleTimeoutClosesSession(t *testing.T) {
-	reg := presence.New()
-	h := newScriptedHandler()
-	_, addr := startServer(t, Config{
-		Presence: reg, Handler: h, IdleTimeout: 150 * time.Millisecond,
-	})
-
-	cl, err := gossh.Dial("tcp", addr, clientConfig(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cl.Close()
-	sess, err := cl.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := sess.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sess.RequestPty("xterm", 24, 80, gossh.TerminalModes{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := sess.Shell(); err != nil {
-		t.Fatal(err)
-	}
-	_ = readLine(t, out)
-	<-h.started
-	waitUntil(t, func() bool { return reg.Online() == 1 })
-
-	// 不发任何输入，空闲计时器必须自行收掉会话并注销 presence。
-	waitUntil(t, func() bool { return reg.Online() == 0 })
-	<-h.exited
 }
 
 func TestServerRejectsWhenFull(t *testing.T) {

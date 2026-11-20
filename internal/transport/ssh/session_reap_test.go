@@ -34,7 +34,7 @@ func (*reapStubChannel) Stderr() io.ReadWriter                          { return
 func newReapSession(t *testing.T, reg *presence.Registry, id string, ch gossh.Channel) *Session {
 	t.Helper()
 	s := newSession(id, ch, upgradeTestFP, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample",
-		auth.Guest(upgradeTestFP), reg, time.Hour)
+		auth.Guest(upgradeTestFP), reg)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
@@ -81,7 +81,7 @@ func TestHeartbeatKeepsLongOAuthWaitUpgradable(t *testing.T) {
 	}
 	s := newSession("s-oauth", &reapStubChannel{}, upgradeTestFP,
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample",
-		auth.Guest(upgradeTestFP), reg, time.Hour)
+		auth.Guest(upgradeTestFP), reg)
 	t.Cleanup(func() { _ = s.Close() })
 
 	// 用户打开浏览器输验证码的 30 秒里，没有任何 Read，只有连接级心跳。

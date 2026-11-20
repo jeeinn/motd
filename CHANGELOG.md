@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-20
+
+契约收敛版本。移除死配置 `MOTD_SSH_IDLE_TIMEOUT` 与整套 idle timer 机制；会话生存期只由 6 小时绝对上限约束。无 schema 迁移、无新依赖；测试 907 → 905（删 3 个 idle 测试、增 1 个反证测试）。
+
+### Changed
+
+- **移除会话空闲超时配置 `MOTD_SSH_IDLE_TIMEOUT` 与整套 idle timer 机制**：该配置自 v0.4.1 起被连接级心跳持续重置、实际永不触发，是"看起来能配、改了没效果"的死配置（仅在误设成小于心跳周期 10s 时产生意外断连）。`Session` 的 `idle` 字段 / `timer` / `resetIdle()` / `idleCloseNotice` 一并删除；`heartbeat()` 回归只刷新 presence 注册表。会话生存期现在只由 6 小时绝对上限约束，关闭序列（固定文案 → exit-status → close channel）不变。详见 ADR-055（ADR-054 原文保留供追溯）。
+- 环境变量总数从 25 项减为 24 项。
+
+### Notes
+
+- 升级兼容：`.env` 里残留的 `MOTD_SSH_IDLE_TIMEOUT` 会被静默忽略（不报错、不影响启动），建议手动删除该行。从 v0.4.1 升级替换二进制重启即可，无需迁移。
+
 ## [0.4.1] - 2026-11-20
 
 体验优化版本。修复「停止浏览一会儿就被 SSH 断连」问题，会话空闲语义由「无按键」改为「连接不存活」。无 schema 迁移、无新依赖、无新配置项；测试 903 → 907。
@@ -182,7 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/jeeinn/motd/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jeeinn/motd/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jeeinn/motd/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/jeeinn/motd/compare/v0.3.2...v0.3.3

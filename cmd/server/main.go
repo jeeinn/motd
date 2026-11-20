@@ -213,14 +213,13 @@ func run() error {
 		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
 		withSecurity(gate)
 	sshSrv, err := sshd.New(sshd.Config{
-		Addr:        cfg.SSHAddr,
-		DataDir:     cfg.DataDir,
-		MaxConns:    cfg.SSHMaxConns,
-		IdleTimeout: cfg.SSHIdleTimeout,
-		Resolver:    resolver,
-		Presence:    rt.Presence,
-		Handler:     handler,
-		Logger:      logger,
+		Addr:     cfg.SSHAddr,
+		DataDir:  cfg.DataDir,
+		MaxConns: cfg.SSHMaxConns,
+		Resolver: resolver,
+		Presence: rt.Presence,
+		Handler:  handler,
+		Logger:   logger,
 	})
 	if err != nil {
 		return fmt.Errorf("初始化 SSH 服务失败: %w", err)

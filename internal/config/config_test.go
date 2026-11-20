@@ -28,7 +28,7 @@ func TestDurationEnvFallsBackOnInvalid(t *testing.T) {
 
 func TestLoadSSHDefaults(t *testing.T) {
 	for _, k := range []string{
-		"MOTD_SSH_ADDR", "MOTD_SSH_MAX_CONNS", "MOTD_SSH_IDLE_TIMEOUT",
+		"MOTD_SSH_ADDR", "MOTD_SSH_MAX_CONNS",
 		"MOTD_LOG_LEVEL", "MOTD_LOG_FORMAT",
 	} {
 		t.Setenv(k, "")
@@ -42,9 +42,6 @@ func TestLoadSSHDefaults(t *testing.T) {
 	}
 	if cfg.SSHMaxConns != 100 {
 		t.Errorf("SSH 默认最大连接数应为 100，实际 %d", cfg.SSHMaxConns)
-	}
-	if cfg.SSHIdleTimeout != 10*time.Minute {
-		t.Errorf("SSH 默认空闲超时应为 10m，实际 %v", cfg.SSHIdleTimeout)
 	}
 }
 

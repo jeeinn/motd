@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/presence"
@@ -33,7 +32,7 @@ var upgradeTestFP = "SHA256:" + strings.Repeat("B", 43)
 func newUpgradeSession(t *testing.T, reg *presence.Registry, id string) *Session {
 	t.Helper()
 	s := newSession(id, upgradeStubChannel{}, upgradeTestFP, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample",
-		auth.Guest(upgradeTestFP), reg, time.Hour)
+		auth.Guest(upgradeTestFP), reg)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }

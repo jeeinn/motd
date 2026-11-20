@@ -235,13 +235,12 @@ func TestMVPSSHClosedLoop(t *testing.T) {
 	}
 
 	srv, err := sshd.New(sshd.Config{
-		Addr:        "127.0.0.1:0",
-		DataDir:     t.TempDir(),
-		MaxConns:    10,
-		IdleTimeout: 30 * time.Second,
-		Resolver:    auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
-		Presence:    rt.Presence,
-		Handler:     h,
+		Addr:     "127.0.0.1:0",
+		DataDir:  t.TempDir(),
+		MaxConns: 10,
+		Resolver: auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
+		Presence: rt.Presence,
+		Handler:  h,
 	})
 	if err != nil {
 		t.Fatalf("启动 SSH 服务: %v", err)
@@ -356,13 +355,12 @@ func TestMVPSSHClosedLoop(t *testing.T) {
 func TestMVPLoginCommandHintOnRealSSH(t *testing.T) {
 	_, h, rt, pools, _ := setupMVPRuntime(t)
 	srv, err := sshd.New(sshd.Config{
-		Addr:        "127.0.0.1:0",
-		DataDir:     t.TempDir(),
-		MaxConns:    10,
-		IdleTimeout: 30 * time.Second,
-		Resolver:    auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
-		Presence:    rt.Presence,
-		Handler:     h,
+		Addr:     "127.0.0.1:0",
+		DataDir:  t.TempDir(),
+		MaxConns: 10,
+		Resolver: auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
+		Presence: rt.Presence,
+		Handler:  h,
 	})
 	if err != nil {
 		t.Fatalf("启动 SSH 服务: %v", err)
@@ -401,13 +399,12 @@ func TestMVPLoginCommandHintOnRealSSH(t *testing.T) {
 func TestMVPNavigationRedrawsInPlace(t *testing.T) {
 	_, h, rt, pools, _ := setupMVPRuntime(t)
 	srv, err := sshd.New(sshd.Config{
-		Addr:        "127.0.0.1:0",
-		DataDir:     t.TempDir(),
-		MaxConns:    10,
-		IdleTimeout: 30 * time.Second,
-		Resolver:    auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
-		Presence:    rt.Presence,
-		Handler:     h,
+		Addr:     "127.0.0.1:0",
+		DataDir:  t.TempDir(),
+		MaxConns: 10,
+		Resolver: auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
+		Presence: rt.Presence,
+		Handler:  h,
 	})
 	if err != nil {
 		t.Fatalf("启动 SSH 服务: %v", err)

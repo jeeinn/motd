@@ -93,7 +93,7 @@ func dialShell(t *testing.T, addr string, signer gossh.Signer) *gossh.Client {
 func TestRevokeSessionsByFingerprint(t *testing.T) {
 	reg := presence.New()
 	s, addr := startServer(t, Config{
-		Presence: reg, Handler: newScriptedHandler(), IdleTimeout: 10 * time.Second,
+		Presence: reg, Handler: newScriptedHandler(),
 	})
 
 	signerA := newClientSigner(t)

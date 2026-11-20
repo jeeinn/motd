@@ -861,3 +861,23 @@
 - 验证：`go build ./... && go vet ./... && go test -count=1 ./...` 全绿，测试 903 → **907**（新增 4 个：心跳保活不被 idle 断、空闲超时提示与 exit-status、硬上限在心跳持续时仍收口、正常退出无文案且 exit-status 幂等）。archtest 全绿，transport 层未因固定文案引入 presentation 依赖。无新迁移、无新依赖、无新配置项。
 
 - 关联：`ADR-016`（presence 内存心跳与 Reap）、`ADR-019`（服务端固定文本可信路径）、`ADR-014`（展示与领域分层，本次未触碰 ViewModel）。
+
+## ADR-055 移除 idle timer 与 MOTD_SSH_IDLE_TIMEOUT（ADR-054 的后续收敛）
+
+- 状态：已采纳，待发版（目标 v0.4.2）。
+- 背景：ADR-054（v0.4.1）把空闲计时器改为由连接级心跳每 10s 重置，语义从「无按键」变为「连接不存活」。落地后复查发现：心跳是进程内 ticker，只要会话未收口就一直运行，idle timer（默认 10m）因此**被持续重置、实际永不触发**——无论用户停多久都不会因它断开。真正兜住「客户端静默消失」的是不被心跳重置的 `sessionMaxLifetime`（6h）。于是 `MOTD_SSH_IDLE_TIMEOUT` 成了一个"看起来能配、改了没效果"的死配置：只有在被误设成小于心跳周期（10s）时才会偶尔触发，即「配小了才产生 bug」。
+
+- 决策：
+  1. **彻底移除 idle timer 机制**：删 `Session.idle`、`Session.timer`、`resetIdle()`、`heartbeat()` 与 `Read()` 里的 `resetIdle()` 调用、`idleCloseNotice` 常量；`newSession` 去掉 idle 参数。会话生存期只剩 `sessionMaxLifetime` 一条约束。
+  2. **从对外契约移除 `MOTD_SSH_IDLE_TIMEOUT`**：删 `config.Config.SSHIdleTimeout` 与 `DurationEnv` 读取、`sshd.Config.IdleTimeout` 与 `DefaultIdleTimeout`、`main.go` 传参、`.env.sample` 与 README 配置表条目。`DurationEnv` 函数保留（认证限流/审计仍用）。
+  3. **收口路径从三条减为两条**：handler 结束 / 硬上限，仍统一走 ADR-054 的幂等 `closeWithReason`（固定文案 → exit-status → close channel），该机制不变。
+  4. **测试跟进**：删 `TestIdleTimeoutClosesSession` / `TestIdleTimeoutSendsNoticeAndExitStatus` / `TestHeartbeatKeepsIdleSessionAlive`；新增 `TestNoIdlePathWithoutInputOrHeartbeat`（无输入且无心跳也不关闭，证明 idle 路径确实消失）；保留并适配硬上限与正常退出测试。测试 907 → 905。
+  5. **升级兼容**：`.env` 里残留的 `MOTD_SSH_IDLE_TIMEOUT` 被静默忽略（不报错、不影响启动），OPS 文档提示手动删除；视为配置项移除而非行为破坏。
+
+- 理由：死配置比没有配置更有害——它让用户以为能控制断连时机，实际不能，还埋着「误设小值导致意外断连」的坑。保留一个硬编码 idle 常量同样无意义（同样被心跳架空）。移除后语义单一清晰：会话只看 6 小时绝对上限，之外的"保活"由连接级心跳负责 presence 注册表的准确性（ADR-016），两者正交。
+
+- 代价 / 边界：这是对外配置契约的移除（0.x 阶段允许），已在 CHANGELOG 标注；不提供"自定义最长在线时长"配置——6h 固定，若未来有长会话需求再单独评估开放配置项，不与本次移除混。ADR-054 原文保留不回改，本条作为后续收敛记录。
+
+- 验证：`go build ./... && go vet ./... && go test -count=1 ./...` 全绿，测试 903 → 905（相对 v0.4.0），archtest 全绿。无新迁移、无新依赖、生产 `data/` 未触碰。CI 门禁待发版前确认。
+
+- 关联：`ADR-054`（会话保活——本条收敛其 idle 部分，保留硬上限部分）、`ADR-016`（presence 内存心跳与 Reap）、`ADR-019`（服务端固定文本可信路径）。

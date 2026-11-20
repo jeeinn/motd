@@ -3,7 +3,6 @@ package ssh
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/presence"
@@ -31,10 +30,9 @@ func TestRevokeUserSessionsByUserID(t *testing.T) {
 	fpC := gossh.FingerprintSHA256(signerC.PublicKey())
 
 	s, addr := startServer(t, Config{
-		Presence:    reg,
-		Resolver:    userByFingerprintResolver{fpA: 100, fpB: 100, fpC: 200},
-		Handler:     newScriptedHandler(),
-		IdleTimeout: 10 * time.Second,
+		Presence: reg,
+		Resolver: userByFingerprintResolver{fpA: 100, fpB: 100, fpC: 200},
+		Handler:  newScriptedHandler(),
 	})
 
 	c1 := dialShell(t, addr, signerA)
@@ -67,7 +65,7 @@ func TestRevokeUserSessionsByUserID(t *testing.T) {
 
 func TestSessionRemoteIPHashIsStableAndNeverPlaintext(t *testing.T) {
 	s := newSession("s-ip", &reapStubChannel{}, "fp", "pk", auth.Guest("fp"),
-		presence.New(), time.Second, "203.0.113.7:54321")
+		presence.New(), "203.0.113.7:54321")
 	defer s.Close()
 	h := s.RemoteIPHash()
 	if h == "" || len(h) != 64 {
@@ -81,7 +79,7 @@ func TestSessionRemoteIPHashIsStableAndNeverPlaintext(t *testing.T) {
 	}
 	// 无对端（单测 stub / 进程内连接）时返回空，调用方据此跳过限流。
 	none := newSession("s-none", &reapStubChannel{}, "fp", "pk", auth.Guest("fp"),
-		presence.New(), time.Second)
+		presence.New())
 	defer none.Close()
 	if got := none.RemoteIPHash(); got != "" {
 		t.Fatalf("空对端应返回空摘要，实际 %q", got)
