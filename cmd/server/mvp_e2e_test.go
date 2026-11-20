@@ -102,6 +102,63 @@ func (o *mvpOutput) waitSince(t *testing.T, from int, want string) {
 	}
 }
 
+// e2e 查库点的「回显 → 落库」时序窗口。终端可能在 writer.Submit 提交前就回显成功，
+// 因此「回显出现」不等于「数据可见」，必须用轮询把等待变成显式同步点。
+// sqlite.Writer 单次写超时为 3s；这里取 5s，额外 2s 覆盖回显已出、写事务尚未
+// 开始的调度延迟，避免 CI 慢机器恰好卡在 3s 边界上。
+const (
+	e2eDBSettleTimeout  = 5 * time.Second
+	e2eDBSettleInterval = 10 * time.Millisecond
+)
+
+// waitForThreadList 轮询 ListThreads，直到可见主题数达到 want。
+// 只负责「等落库」；条数与标题的精确断言仍由调用方做，断言强度不变。
+func waitForThreadList(t *testing.T, ctx context.Context, rt *forumRuntime, want int) *forum.ThreadPage {
+	t.Helper()
+	deadline := time.Now().Add(e2eDBSettleTimeout)
+	var page *forum.ThreadPage
+	var lastErr error
+	for {
+		page, lastErr = rt.Service.ListThreads(ctx, forum.ListThreadsQuery{NodeID: 1, Sort: forum.SortLatest})
+		if lastErr == nil && len(page.Rows) >= want {
+			return page
+		}
+		if time.Now().After(deadline) {
+			rows := -1
+			if page != nil {
+				rows = len(page.Rows)
+			}
+			t.Fatalf("等待主题落库超时（%s）：rows=%d want>=%d err=%v",
+				e2eDBSettleTimeout, rows, want, lastErr)
+		}
+		time.Sleep(e2eDBSettleInterval)
+	}
+}
+
+// waitForThreadPosts 轮询 GetThread，直到可见回复数达到 want。
+// 与 waitForThreadList 同理：回复的终端回显先于事务提交，查库必须等到可见。
+func waitForThreadPosts(t *testing.T, ctx context.Context, rt *forumRuntime, threadID int64, want int) *forum.ThreadDetail {
+	t.Helper()
+	deadline := time.Now().Add(e2eDBSettleTimeout)
+	var detail *forum.ThreadDetail
+	var lastErr error
+	for {
+		detail, lastErr = rt.Service.GetThread(ctx, threadID)
+		if lastErr == nil && len(detail.Posts) >= want {
+			return detail
+		}
+		if time.Now().After(deadline) {
+			posts := -1
+			if detail != nil {
+				posts = len(detail.Posts)
+			}
+			t.Fatalf("等待回复落库超时（%s）：thread=%d posts=%d want>=%d err=%v",
+				e2eDBSettleTimeout, threadID, posts, want, lastErr)
+		}
+		time.Sleep(e2eDBSettleInterval)
+	}
+}
+
 type mvpClient struct {
 	cl   *gossh.Client
 	sess *gossh.Session
@@ -231,9 +288,13 @@ func TestMVPSSHClosedLoop(t *testing.T) {
 	a.send(t, "\r")
 	a.out.waitSince(t, mark, "来自真实客户端的首帖")
 
-	page, err := rt.Service.ListThreads(ctx, forum.ListThreadsQuery{NodeID: 1, Sort: forum.SortLatest})
-	if err != nil || len(page.Rows) != 1 || page.Rows[0].Title != "MVP 真实 SSH 发帖" {
-		t.Fatalf("真实 SSH 发帖未落库: rows=%d err=%v", len(page.Rows), err)
+	// 回显先于写队列提交：显式等到主题在库里可见，再校验条数与标题（断言强度不变）。
+	page := waitForThreadList(t, ctx, rt, 1)
+	if len(page.Rows) != 1 {
+		t.Fatalf("真实 SSH 发帖条数不符: rows=%d", len(page.Rows))
+	}
+	if page.Rows[0].Title != "MVP 真实 SSH 发帖" {
+		t.Fatalf("真实 SSH 发帖标题不符: %q", page.Rows[0].Title)
 	}
 
 	// ---- 会话 B：另一把已绑定公钥（另一个账号）在他人主题下回复 ----
@@ -258,9 +319,13 @@ func TestMVPSSHClosedLoop(t *testing.T) {
 	b.send(t, "第二个账号能看到\x04")
 	b.out.waitSince(t, mark, "第二个账号能看到")
 
-	detail, err := rt.Service.GetThread(ctx, page.Rows[0].ID)
-	if err != nil || len(detail.Posts) != 2 || detail.Posts[1].BodyMD != "第二个账号能看到" {
-		t.Fatalf("真实 SSH 回复未落库: posts=%d err=%v", len(detail.Posts), err)
+	// 回复回显同样先于提交：等到落库再校验条数与正文（断言强度不变）。
+	detail := waitForThreadPosts(t, ctx, rt, page.Rows[0].ID, 2)
+	if len(detail.Posts) != 2 {
+		t.Fatalf("真实 SSH 回复条数不符: posts=%d", len(detail.Posts))
+	}
+	if detail.Posts[1].BodyMD != "第二个账号能看到" {
+		t.Fatalf("真实 SSH 回复正文不符: %q", detail.Posts[1].BodyMD)
 	}
 
 	// ---- A 重新进入详情：他人回复可见（D4 的「另一个账号可见」）----
