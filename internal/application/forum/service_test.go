@@ -73,6 +73,9 @@ type fakeRepos struct {
 	state           fakeState
 	failInsertPost  error // 注入失败，用于验证事务回滚
 	failAdjustScore error // 注入失败，用于验证投票分数回滚
+	usernames       map[int64]string
+	failUsernames   error
+	usernameCalls   [][]int64 // 每次投影查询收到的 ids 副本，供「一次批量」断言
 }
 
 func newFakeRepos() *fakeRepos {
@@ -87,7 +90,7 @@ func newFakeRepos() *fakeRepos {
 		votes:        map[voteKey]vote.Value{},
 		nextThreadID: 1,
 		nextPostID:   1,
-	}}
+	}, usernames: map[int64]string{1: "alice", 2: "bob"}}
 }
 
 func (r *fakeRepos) addThread(t thread.Thread) {
@@ -194,6 +197,21 @@ func (r *fakeRepos) ListPosts(ctx context.Context, q PostQuery) ([]post.Post, bo
 		out = out[:limit]
 	}
 	return out, hasMore, nil
+}
+
+// UsernamesByIDs 是只读投影端口的内存实现，同时记录调用次数以证明非 N+1。
+func (r *fakeRepos) UsernamesByIDs(_ context.Context, ids []int64) (map[int64]string, error) {
+	r.usernameCalls = append(r.usernameCalls, append([]int64(nil), ids...))
+	if r.failUsernames != nil {
+		return nil, r.failUsernames
+	}
+	out := make(map[int64]string, len(ids))
+	for _, id := range ids {
+		if name, ok := r.usernames[id]; ok {
+			out[id] = name
+		}
+	}
+	return out, nil
 }
 
 // SearchPosts 是 SearchReader 的内存实现：只做子串匹配，FTS/LIKE 的真实差异

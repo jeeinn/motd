@@ -185,10 +185,10 @@ func rowCommandID(line string) (int64, bool) {
 	return id, err == nil
 }
 
-// v0.3.2 格式契约（golden）：CreatedAt=0 去掉时间后输出完全确定。
-// 前缀形状、顺序或分隔符任一改动都会让本断言失败，防止后续改动悄悄破坏
-// 「帖子 ID 与作者 #ID、赞数 [N] 三者形态不同」的约定。
-func TestMetaFixedRowIDFormatContract(t *testing.T) {
+// v0.3.3 格式契约（golden）：CreatedAt=0 去掉时间后输出完全确定。
+// 三段按「id= → 作者 → 时间/回复数」拼接；顺序或分隔符任一改动都会让本断言失败，
+// 防止后续改动悄悄破坏「帖子 ID、作者、赞数三者形态不同」的约定。
+func TestMetaPartsFormatContract(t *testing.T) {
 	row := viewmodel.Row{Index: 1, ID: 123, Meta: viewmodel.RowMeta{AuthorID: 1}}
 	cases := []struct {
 		kind viewmodel.ScreenKind
@@ -200,8 +200,9 @@ func TestMetaFixedRowIDFormatContract(t *testing.T) {
 		{viewmodel.ScreenNodes, " #1"}, // node ID 不是 /delete 目标，刻意不展示
 	}
 	for _, c := range cases {
-		if got := metaFixed(row, c.kind); got != c.want {
-			t.Errorf("kind=%d: metaFixed=%q, want %q", c.kind, got, c.want)
+		got := metaID(row, c.kind) + authorSegment(row) + metaTail(row, c.kind)
+		if got != c.want {
+			t.Errorf("kind=%d: 元信息=%q, want %q", c.kind, got, c.want)
 		}
 	}
 }
@@ -213,7 +214,7 @@ func TestMetaFixedOmitsNonPositiveID(t *testing.T) {
 		for _, kind := range []viewmodel.ScreenKind{
 			viewmodel.ScreenThreads, viewmodel.ScreenThreadDetail, viewmodel.ScreenSearchResults,
 		} {
-			got := metaFixed(row, kind)
+			got := metaID(row, kind)
 			if strings.Contains(got, "id=") {
 				t.Errorf("kind=%d ID=%d 不应展示 id=，实际 %q", kind, id, got)
 			}
@@ -320,8 +321,8 @@ func TestRowIDIntroducesNoControlCharacters(t *testing.T) {
 	}
 	// 系统 ID 只由本地数值拼成、形状固定且经 RenderSystem；用户文本里的
 	// "id=666" 是惰性可见文本，不会被当成系统 ID（真正的 ID 是元信息里的 777）。
-	if got, want := metaFixed(row, viewmodel.ScreenThreads), " id=777 #9"; got != want {
-		t.Errorf("metaFixed=%q, want %q", got, want)
+	if got, want := metaID(row, viewmodel.ScreenThreads)+authorSegment(row)+metaTail(row, viewmodel.ScreenThreads), " id=777 #9"; got != want {
+		t.Errorf("元信息=%q, want %q", got, want)
 	}
 	if !strings.Contains(stripSGR(out), "id=777 #9") {
 		t.Errorf("系统 ID 应原样渲染进元信息: %q", stripSGR(out))

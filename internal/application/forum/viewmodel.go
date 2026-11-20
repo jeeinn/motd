@@ -3,6 +3,7 @@ package forum
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 
@@ -108,6 +109,9 @@ func (s *Service) ScreenThreads(ctx context.Context, q ListThreadsQuery, v ViewC
 	for i, t := range page.Rows {
 		rows = append(rows, threadRow(t, v.RowOffset+i+1))
 	}
+	if err := s.fillRowAuthors(ctx, rows, nil); err != nil {
+		return viewmodel.Screen{}, err
+	}
 	sc := screenOf(viewmodel.ScreenThreads, rows, v)
 	sc.Pagination.HasMore = page.HasMore
 	sc.Pagination.NextCursor = page.NextCursor
@@ -136,6 +140,9 @@ func (s *Service) ScreenThreadDetail(ctx context.Context, threadID int64, v View
 		detail.CreatedAt = first.CreatedAt.Unix()
 		rows = detailRows(d.Posts[1:], v.RowOffset)
 	}
+	if err := s.fillRowAuthors(ctx, rows, &detail); err != nil {
+		return viewmodel.Screen{}, err
+	}
 	sc := screenOf(viewmodel.ScreenThreadDetail, rows, v)
 	sc.Detail = detail
 	sc.Pagination.HasMore = d.HasMore
@@ -161,6 +168,39 @@ func (s *Service) ScreenSearchResults(ctx context.Context, in SearchInput, v Vie
 	sc := screenOf(viewmodel.ScreenSearchResults, rows, v)
 	sc.Pagination.HasMore = res.HasMore
 	return sc, nil
+}
+
+// fillRowAuthors 一次批量查询把 username 投影到本屏所有作者字段。
+// 这是 ADR-014「展示作者名时补仓储投影」的落点：Thread/Post 领域对象不含 username，
+// 用户文本只以语义字段进入 ViewModel，净化仍由 Renderer 的 RenderUser 负责。
+// 查询失败直接上抛，不静默丢弃——「查不到某个 id」由渲染层的 #ID 回退处理。
+func (s *Service) fillRowAuthors(ctx context.Context, rows []viewmodel.Row, detail *viewmodel.Detail) error {
+	ids := make([]int64, 0, len(rows)+1)
+	if detail != nil && detail.AuthorID > 0 {
+		ids = append(ids, detail.AuthorID)
+	}
+	for _, r := range rows {
+		if r.Meta.AuthorID > 0 {
+			ids = append(ids, r.Meta.AuthorID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	names, err := s.repos.UsernamesByIDs(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("投影作者用户名: %w", err)
+	}
+	for i := range rows {
+		if rows[i].Meta.AuthorID > 0 {
+			rows[i].Meta.Author = names[rows[i].Meta.AuthorID]
+		}
+	}
+	if detail != nil && detail.AuthorID > 0 {
+		detail.Author = names[detail.AuthorID]
+	}
+	return nil
 }
 
 func screenOf(kind viewmodel.ScreenKind, rows []viewmodel.Row, v ViewContext) viewmodel.Screen {

@@ -193,3 +193,83 @@ func TestWithNoticeKeepsScreen(t *testing.T) {
 		t.Fatalf("带提示的屏幕应仍自洽: %v", err)
 	}
 }
+
+// 作者名投影：一屏一次批量查询，id 查不到时留空交给渲染层回退。
+
+func TestScreenThreadsProjectsAuthorsInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	repos := newFakeRepos()
+	repos.addThread(thread.Thread{ID: 1, NodeID: 1, UserID: 1, Title: "作者 alice",
+		LastReplyAt: testBase, CreatedAt: testBase})
+	repos.addThread(thread.Thread{ID: 2, NodeID: 1, UserID: 2, Title: "作者 bob",
+		LastReplyAt: testBase.Add(time.Second), CreatedAt: testBase})
+	repos.addThread(thread.Thread{ID: 3, NodeID: 1, UserID: 99, Title: "无用户名",
+		LastReplyAt: testBase.Add(2 * time.Second), CreatedAt: testBase})
+	s := NewService(repos)
+
+	sc, err := s.ScreenThreads(ctx, ListThreadsQuery{
+		NodeID: 1, Sort: SortLatest, Limit: 10,
+	}, testViewContext())
+	if err != nil {
+		t.Fatalf("构造主题屏: %v", err)
+	}
+	got := make(map[string]string)
+	for _, r := range sc.Rows {
+		got[r.Title] = r.Meta.Author
+		if r.Meta.AuthorID <= 0 {
+			t.Errorf("作者 ID 语义字段丢失: %+v", r.Meta)
+		}
+	}
+	if got["作者 alice"] != "alice" || got["作者 bob"] != "bob" {
+		t.Fatalf("作者 username 投影错误: %+v", got)
+	}
+	if name, ok := got["无用户名"]; !ok || name != "" {
+		t.Fatalf("查不到的 id 应留空（渲染层回退 #ID），实际 %q ok=%v", name, ok)
+	}
+	if len(repos.usernameCalls) != 1 {
+		t.Fatalf("一屏应恰好一次批量查询（非 N+1），实际 %d 次: %v", len(repos.usernameCalls), repos.usernameCalls)
+	}
+}
+
+func TestScreenThreadDetailProjectsAuthorsInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	repos := newFakeRepos()
+	repos.addThread(thread.Thread{ID: 7, NodeID: 1, UserID: 1, Title: "标题",
+		LastReplyAt: testBase, CreatedAt: testBase})
+	repos.addPost(post.Post{ID: 1, ThreadID: 7, UserID: 1, BodyMD: "首帖", Status: post.StatusNormal, CreatedAt: testBase})
+	repos.addPost(post.Post{ID: 2, ThreadID: 7, UserID: 2, BodyMD: "回复 bob", Status: post.StatusNormal, CreatedAt: testBase.Add(time.Second)})
+	repos.addPost(post.Post{ID: 3, ThreadID: 7, UserID: 99, BodyMD: "回复无用户名", Status: post.StatusNormal, CreatedAt: testBase.Add(2 * time.Second)})
+	s := NewService(repos)
+
+	sc, err := s.ScreenThreadDetail(ctx, 7, testViewContext())
+	if err != nil {
+		t.Fatalf("构造详情屏: %v", err)
+	}
+	if sc.Detail.AuthorID != 1 || sc.Detail.Author != "alice" {
+		t.Fatalf("详情顶部作者应取首帖作者并投影 username: %+v", sc.Detail)
+	}
+	got := make(map[string]string)
+	for _, r := range sc.Rows {
+		got[r.Body] = r.Meta.Author
+	}
+	if got["回复 bob"] != "bob" || got["回复无用户名"] != "" {
+		t.Fatalf("回复行作者投影错误: %+v", got)
+	}
+	if len(repos.usernameCalls) != 1 {
+		t.Fatalf("详情屏应恰好一次批量查询（非 N+1），实际 %d 次", len(repos.usernameCalls))
+	}
+}
+
+func TestScreenThreadsAuthorProjectionError(t *testing.T) {
+	ctx := context.Background()
+	repos := newFakeRepos()
+	sentinel := errors.New("用户名查询失败")
+	repos.failUsernames = sentinel
+	repos.addThread(thread.Thread{ID: 1, NodeID: 1, UserID: 1, Title: "标题",
+		LastReplyAt: testBase, CreatedAt: testBase})
+	s := NewService(repos)
+
+	if _, err := s.ScreenThreads(ctx, ListThreadsQuery{NodeID: 1, Sort: SortLatest, Limit: 10}, testViewContext()); !errors.Is(err, sentinel) {
+		t.Fatalf("投影查询失败必须上抛，不得静默丢失作者: %v", err)
+	}
+}

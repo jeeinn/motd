@@ -132,8 +132,9 @@ type StatusBar struct {
 	Context  string
 }
 
-// RowMeta 是一行的元信息。全部是语义值：作者用 ID 而非拼好的字符串，
-// 时间存 Unix 秒而非格式化文本 —— 格式由 Renderer 决定。
+// RowMeta 是一行的元信息。全部是语义值：作者同时保留 ID 与未格式化的 username，
+// 时间存 Unix 秒而非格式化文本 —— 展示形态由 Renderer 决定。
+// Author 来自 users 表，是**外部文本**，Renderer 必须走用户内容净化链。
 type RowMeta struct {
 	AuthorID    int64
 	Author      string
@@ -174,11 +175,13 @@ type Pagination struct {
 }
 
 // Detail 是详情屏的主体内容（主题本身）。回复列表仍放在 Rows。
+// Author 与 RowMeta.Author 同源，均为未净化的 username 投影。
 type Detail struct {
 	ID        int64
 	Title     string
 	Body      string
 	AuthorID  int64
+	Author    string
 	Node      string
 	CreatedAt int64
 }

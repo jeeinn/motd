@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/forum"
@@ -232,6 +233,58 @@ func (r *ForumRepos) ListPosts(ctx context.Context, q forum.PostQuery) ([]post.P
 		out = out[:limit]
 	}
 	return out, hasMore, nil
+}
+
+// ---------------------------------------------------------------------------
+// UsernameReader
+// ---------------------------------------------------------------------------
+
+// UsernamesByIDs 一次查询投影一批作者名，供 Screen 组装使用（非 N+1）。
+// 参数全部走 ? 占位符：ids 只作为值绑定，绝不拼进 SQL 文本。
+// 不对 users.status 做过滤——历史帖作者注销后仍应显示其用户名。
+func (r *ForumRepos) UsernamesByIDs(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	// 去重、跳过非正 ID：同一屏里多个帖子作者相同是常态，不必重复绑定参数。
+	args := make([]any, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return out, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
+	query := `SELECT id, username FROM users WHERE id IN (` + placeholders + `)`
+	rows, err := r.pools.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("批量查询用户名: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var username string
+		if err := rows.Scan(&id, &username); err != nil {
+			return nil, fmt.Errorf("扫描用户名: %w", err)
+		}
+		out[id] = username
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历用户名: %w", err)
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

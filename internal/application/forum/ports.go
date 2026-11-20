@@ -130,6 +130,16 @@ type SearchReader interface {
 	SearchPosts(ctx context.Context, q SearchQuery) ([]SearchHit, bool, error)
 }
 
+// UsernameReader 是用户名投影的只读端口（ADR-014 / ADR-019 的边界补充）。
+// 领域对象 Thread/Post 只持有 UserID；展示层需要的 @username 是**外部文本**，
+// 因此在组装 Screen 时按 ID 批量投影进 RowMeta.Author，绝不污染领域模型。
+type UsernameReader interface {
+	// UsernamesByIDs 返回 id → username。ids 为空时必须返回空 map 且不查库；
+	// 查不到的 id 不出现在结果里（由渲染层回退到 #ID）。不按 status 过滤：
+	// 历史帖的作者即使已注销，用户名仍应可读。
+	UsernamesByIDs(ctx context.Context, ids []int64) (map[int64]string, error)
+}
+
 // WriteTx 是**单个事务内**的受限写入句柄。
 // 用例闭包只能拿到它，拿不到 *sql.Tx / *sql.DB；一个业务用例对应一次 UnitOfWork.Write。
 // 权限与限流查询也放在这里，保证「检查 + 写入」在同一事务快照内，不留 TOCTOU 窗口。
@@ -183,5 +193,6 @@ type Repos interface {
 	ThreadReader
 	PostReader
 	SearchReader
+	UsernameReader
 	UnitOfWork
 }

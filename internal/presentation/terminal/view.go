@@ -109,8 +109,21 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 		if err := ext(&b, text, contentWidth); err != nil {
 			return "", err
 		}
-		if err := sys(&b, metaFixed(r, s.Kind), safe.StyleDim); err != nil {
+		// 元信息分信任域渲染：id=/时间/回复数是本地数值与固定字符，走 sys()；
+		// 作者名来自 users 表，是用户数据，必须走 ext()（ADR-014/019）。
+		// 两段固定文本夹住作者段，保持「id= → 作者 → 时间/回复数」的既有顺序。
+		if fixed := metaID(r, s.Kind); fixed != "" {
+			if err := sys(&b, fixed, safe.StyleDim); err != nil {
+				return "", err
+			}
+		}
+		if err := ext(&b, authorSegment(r), contentWidth); err != nil {
 			return "", err
+		}
+		if fixed := metaTail(r, s.Kind); fixed != "" {
+			if err := sys(&b, fixed, safe.StyleDim); err != nil {
+				return "", err
+			}
 		}
 		// slug 来自 nodes 表，按外部数据处理，不进 RenderSystem。
 		if r.Meta.Node != "" {
@@ -282,32 +295,85 @@ func emptyHint(k viewmodel.ScreenKind) string {
 	}
 }
 
-// metaFixed 只拼本地数值与固定字符，绝不拼接任何外部文本。
+// 元信息被刻意拆成「固定前缀 + 用户文本 + 固定后缀」，在渲染循环里交错输出：
+//   - metaID / metaTail 只由本地数值与固定字符拼成，走 sys()（RenderSystem）；
+//   - authorSegment 含来自 users 表的 username，必须走 ext()（RenderUser）。
 //
-// v0.3.2：加入行实体 ID，格式固定为 " id=<十进制>"。选这个形状是为了与
-// 既有两类编号彻底区分——作者用 "#<ID>"（如 #1），主题列表赞数用 "[<分数>]"
-// （如 [0]）；"id=" 既不带 # 也不带方括号，用户可直接把等号后的数字当作
-// /open / /delete 的参数，不会与作者 ID 或分数混淆。
-// ID 来自 viewmodel.Row.ID 的本地 int64，经 sys() 走 RenderSystem，
-// 不进 RenderUser、不触碰任何外部数据路径，也不引入新控制序列（ADR-014/019）。
-func metaFixed(r viewmodel.Row, k viewmodel.ScreenKind) string {
-	var parts []string
+// v0.3.3：作者从 "#<ID>"（本地数值）改为 "@<username>"（用户数据），
+// 因此不能再整段塞进 RenderSystem——那既破坏信任域分离，也会让带控制字符的
+// 用户名被 RenderSystem 拒绝渲染。回退时仍显示 "#<ID>"，但同样经 ext() 路径。
+
+const maxAuthorCols = 10
+
+// metaID 返回行实体 ID 段（纯本地数值，RenderSystem 路径）。
+// 格式固定为 " id=<十进制>"：既不带 # 也不带方括号，可直接当 /open / /delete 参数。
+func metaID(r viewmodel.Row, k viewmodel.ScreenKind) string {
 	if showRowID(k) && r.ID > 0 {
-		parts = append(parts, fmt.Sprintf(" id=%d", r.ID))
+		return fmt.Sprintf(" id=%d", r.ID)
 	}
-	if r.Meta.AuthorID > 0 {
-		parts = append(parts, fmt.Sprintf(" #%d", r.Meta.AuthorID))
-	}
+	return ""
+}
+
+// metaTail 返回时间、回复数与 node 占位（纯本地数值与固定字符，RenderSystem 路径）。
+// v0.3.3：回复数由 " N回复" 改为紧凑的 " rN"；其余符号一律不动。
+func metaTail(r viewmodel.Row, k viewmodel.ScreenKind) string {
+	var parts []string
 	if at := formatTime(r.Meta.CreatedAt); at != "" {
 		parts = append(parts, " "+at)
 	}
 	if k == viewmodel.ScreenThreads && r.Meta.Replies > 0 {
-		parts = append(parts, fmt.Sprintf(" %d回复", r.Meta.Replies))
+		parts = append(parts, fmt.Sprintf(" r%d", r.Meta.Replies))
 	}
 	if r.Meta.Node != "" {
 		parts = append(parts, " ")
 	}
 	return strings.Join(parts, "")
+}
+
+// authorSegment 返回带前导空格的作者段。username 存在时显示 " @<username>"，
+// 缺失/查不到时回退到 " #<ID>"。返回值交给 ext() 净化，本函数不产生任何 ANSI。
+func authorSegment(r viewmodel.Row) string {
+	if r.Meta.Author != "" {
+		return " @" + truncateDisplayWidth(r.Meta.Author, maxAuthorCols)
+	}
+	if r.Meta.AuthorID > 0 {
+		return fmt.Sprintf(" #%d", r.Meta.AuthorID)
+	}
+	return ""
+}
+
+// truncateDisplayWidth 按**显示列**截断外部文本（CJK/emoji 算 2 列），
+// 超出时以 ASCII '~' 收尾（不引入新的宽字符或多字节省略号）。
+// 只在 rune 边界切分，结果是合法 UTF-8；截断严格发生在净化之前，
+// 净化与白名单渲染仍由 ext() 统一完成，不在这里碰控制字符。
+func truncateDisplayWidth(s string, max int) string {
+	if displayWidth(s) <= max {
+		return s
+	}
+	budget := max - 1 // 给 '~' 留 1 列
+	if budget < 0 {
+		budget = 0
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		w := safe.DisplayWidth(r)
+		if col+w > budget {
+			break
+		}
+		b.WriteRune(r)
+		col += w
+	}
+	b.WriteByte('~')
+	return b.String()
+}
+
+func displayWidth(s string) int {
+	col := 0
+	for _, r := range s {
+		col += safe.DisplayWidth(r)
+	}
+	return col
 }
 
 // showRowID 报告该页面的 Row.ID 是否是用户可操作的帖子/回复 ID。
