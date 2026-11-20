@@ -8,16 +8,76 @@ import (
 	"testing"
 )
 
-// P2-M1b 内容治理静态守卫。E 类缺陷（语法合法、单测也过、跑起来出事）在这里逼到明面：
-//  1. HidePost / HideThread 用例入口只经 requireAdmin → CanAdmin 单点谓词；
+// P2-M1b + ADR-053 内容治理静态守卫。E 类缺陷（语法合法、单测也过、跑起来出事）在这里逼到明面：
+//  1. HidePost / HideThread / UnhidePost / UnhideThread 用例入口只经 requireAdmin → CanAdmin 单点谓词；
 //     不得直接调 CanAdmin、不得走作者判定 canModify、不得用写路径 checkWrite；
-//  2. 审计 AppendOutbox 必须在 Write 闭包内，且两个用例各用固定命令名；
-//  3. 仓储只 UPDATE status='hidden'，带幂等条件，绝不物理删 / 级联；
+//  2. 审计 AppendOutbox 必须在 Write 闭包内，四个用例各用固定命令名
+//     （post/thread hide 与 post/thread unhide）；
+//  3. 仓储只 UPDATE status，带各自的幂等条件，绝不物理删 / 级联；
 //  4. 生产代码不得出现 DELETE FROM posts / threads（全仓扫描，不只软删函数）。
 //
 // 每条守卫配负向注入，证明拿掉规则就会报警——静态断言假绿比没有守卫更危险。
 
-var moderationUseCases = []string{"HidePost", "HideThread"}
+// moderationCase 把「用例名 → 审计命令名 / 目标表 / 目标状态 / 幂等 IN 条件」绑在一起，
+// 避免隐藏与恢复共用索引时错位（这是最容易写假绿的地方）。
+type moderationCase struct {
+	name         string
+	auditCommand string
+	table        string
+	targetStatus string
+	guard        string
+}
+
+// 应用用例（5 条）：Unthread 是 /unthread 的用例入口，审计命令名独立。
+var moderationAppCases = []moderationCase{
+	{"HidePost", "post hide", "posts", "hidden", "'normal', 'hidden'"},
+	{"HideThread", "thread hide", "threads", "hidden", "'active', 'hidden'"},
+	{"UnhidePost", "post unhide", "posts", "normal", "'hidden', 'normal'"},
+	{"UnhideThread", "thread unhide", "threads", "active", "'hidden', 'active'"},
+	{"Unthread", "thread unthread", "threads", "active", "'hidden', 'active'"},
+}
+
+// 仓储实现（4 个）：Unthread 复用 UnhideThread 的写端口，没有独立 repo 方法。
+var moderationSQLCases = []moderationCase{
+	{"HidePost", "post hide", "posts", "hidden", "'normal', 'hidden'"},
+	{"HideThread", "thread hide", "threads", "hidden", "'active', 'hidden'"},
+	{"UnhidePost", "post unhide", "posts", "normal", "'hidden', 'normal'"},
+	{"UnhideThread", "thread unhide", "threads", "active", "'hidden', 'active'"},
+}
+
+// 负向注入里的「干净对照」：注入某一处缺陷时，其余用例必须合规，
+// 否则「扫描不到 UnhidePost」这类噪音会稀释断言。
+const cleanUnhideAppSrc = `func (s *Service) UnhidePost(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("post unhide", "post:1", 0, actor, now))
+	})
+}
+func (s *Service) UnhideThread(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("thread unhide", "thread:1", 0, actor, now))
+	})
+}
+`
+
+const cleanUnthreadAppSrc = `func (s *Service) Unthread(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("thread unthread", "thread:1", 0, actor, now))
+	})
+}
+`
+
+const cleanUnhideSQLSrc = `func (w *sqlWriteTx) UnhidePost(ctx context.Context, id int64) error {
+	_, err := w.tx.ExecContext(ctx, "UPDATE posts SET status = 'normal' WHERE id = ? AND status IN ('hidden', 'normal')", id)
+	return err
+}
+func (w *sqlWriteTx) UnhideThread(ctx context.Context, id int64) error {
+	_, err := w.tx.ExecContext(ctx, "UPDATE threads SET status = 'active' WHERE id = ? AND status IN ('hidden', 'active')", id)
+	return err
+}
+`
 
 // collectModerationAppIssues 守用例层的权限单点与审计覆盖。
 func collectModerationAppIssues(dir string) ([]string, error) {
@@ -26,27 +86,26 @@ func collectModerationAppIssues(dir string) ([]string, error) {
 		return nil, err
 	}
 	var issues []string
-	for i, name := range moderationUseCases {
-		fn, ok := findFuncDecl(files, name)
+	for _, tc := range moderationAppCases {
+		fn, ok := findFuncDecl(files, tc.name)
 		if !ok {
-			issues = append(issues, "扫描不到治理用例 "+name)
+			issues = append(issues, "扫描不到治理用例 "+tc.name)
 			continue
 		}
 		calls := callNames(fn)
 		if !calls["requireAdmin"] {
-			issues = append(issues, name+" 必须过单点 requireAdmin 谓词")
+			issues = append(issues, tc.name+" 必须过单点 requireAdmin 谓词")
 		}
 		for _, forbidden := range []string{"CanAdmin", "canModify", "checkWrite", "Publish"} {
 			if calls[forbidden] {
-				issues = append(issues, name+" 不得直接调用 "+forbidden+"（权限/投递只有单点入口）")
+				issues = append(issues, tc.name+" 不得直接调用 "+forbidden+"（权限/投递只有单点入口）")
 			}
 		}
 		if !calls["Write"] || !calls["AppendOutbox"] {
-			issues = append(issues, name+" 必须在 Write 闭包内 AppendOutbox 审计事件")
+			issues = append(issues, tc.name+" 必须在 Write 闭包内 AppendOutbox 审计事件")
 		}
-		wantCommand := []string{"post hide", "thread hide"}[i]
-		if !strings.Contains(strings.Join(stringLiterals(fn), " "), wantCommand) {
-			issues = append(issues, name+" 审计命令名必须是固定字面量 "+wantCommand)
+		if !strings.Contains(strings.Join(stringLiterals(fn), " "), tc.auditCommand) {
+			issues = append(issues, tc.name+" 审计命令名必须是固定字面量 "+tc.auditCommand)
 		}
 	}
 	return issues, nil
@@ -59,24 +118,23 @@ func collectModerationSQLIssues(dir string) ([]string, error) {
 		return nil, err
 	}
 	var issues []string
-	for i, name := range moderationUseCases {
-		fn, ok := findFuncDecl(files, name)
+	for _, tc := range moderationSQLCases {
+		fn, ok := findFuncDecl(files, tc.name)
 		if !ok {
-			issues = append(issues, "扫描不到仓储实现 "+name)
+			issues = append(issues, "扫描不到仓储实现 "+tc.name)
 			continue
 		}
 		lits := strings.Join(stringLiterals(fn), " ")
 		sql := compact(lits)
-		table := []string{"posts", "threads"}[i]
-		guard := []string{"'normal', 'hidden'", "'active', 'hidden'"}[i]
-		if !strings.Contains(sql, "UPDATE"+table+"SETstatus='hidden'") {
-			issues = append(issues, name+" 必须执行 UPDATE "+table+" SET status = 'hidden'")
+		wantUpdate := "UPDATE" + tc.table + "SETstatus='" + tc.targetStatus + "'"
+		if !strings.Contains(sql, wantUpdate) {
+			issues = append(issues, tc.name+" 必须执行 UPDATE "+tc.table+" SET status = '"+tc.targetStatus+"'")
 		}
-		if !strings.Contains(sql, compact(guard)) {
-			issues = append(issues, name+" 缺少幂等条件 status IN "+guard)
+		if !strings.Contains(sql, compact(tc.guard)) {
+			issues = append(issues, tc.name+" 缺少幂等条件 status IN "+tc.guard)
 		}
 		if strings.Contains(strings.ToUpper(lits), "DELETE FROM") {
-			issues = append(issues, name+" 不得物理删（hidden 是软删治理动作）")
+			issues = append(issues, tc.name+" 不得物理删（hidden / unhide 都是软状态迁移）")
 		}
 	}
 	return issues, nil
@@ -144,7 +202,7 @@ func (s *Service) HideThread(ctx context.Context, actor Actor, id int64) error {
 		return tx.AppendOutbox(ctx, adminActionEvent("thread hide", "thread:1", 0, actor, now))
 	})
 }
-`
+` + cleanUnhideAppSrc + cleanUnthreadAppSrc
 	if err := os.WriteFile(filepath.Join(dir, "moderation.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +230,7 @@ func (s *Service) HideThread(ctx context.Context, actor Actor, id int64) error {
 		return tx.AppendOutbox(ctx, adminActionEvent("thread hide", "thread:1", 0, actor, now))
 	})
 }
-`
+` + cleanUnhideAppSrc + cleanUnthreadAppSrc
 	if err := os.WriteFile(filepath.Join(dir, "moderation.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +260,7 @@ func (s *Service) HideThread(ctx context.Context, actor Actor, id int64) error {
 		return tx.AppendOutbox(ctx, adminActionEvent("thread hide", "thread:1", 0, actor, now))
 	})
 }
-`
+` + cleanUnhideAppSrc + cleanUnthreadAppSrc
 	if err := os.WriteFile(filepath.Join(dir, "moderation.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +326,7 @@ func (w *sqlWriteTx) HideThread(ctx context.Context, id int64) error {
 	_, err := w.tx.ExecContext(ctx, "UPDATE threads SET status = 'deleted' WHERE id = ?", id)
 	return err
 }
-`
+` + cleanUnhideSQLSrc
 	if err := os.WriteFile(filepath.Join(dir, "repo_moderation.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -285,6 +343,133 @@ func (w *sqlWriteTx) HideThread(ctx context.Context, id int64) error {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("注入的违规 SQL 未检出 %q:\n%s", want, joined)
+		}
+	}
+}
+
+// ADR-053 新增守卫的负向注入：unhide 若绕过 requireAdmin，必须报警。
+func TestGuardDetectsUnhideSkippingRequireAdmin(t *testing.T) {
+	dir := t.TempDir()
+	src := `package forum
+func (s *Service) HidePost(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("post hide", "post:1", 0, actor, now))
+	})
+}
+func (s *Service) HideThread(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("thread hide", "thread:1", 0, actor, now))
+	})
+}
+func (s *Service) UnhidePost(ctx context.Context, actor Actor, id int64) error {
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("post unhide", "post:1", 0, actor, now))
+	})
+}
+func (s *Service) UnhideThread(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("thread unhide", "thread:1", 0, actor, now))
+	})
+}
+` + cleanUnthreadAppSrc
+	if err := os.WriteFile(filepath.Join(dir, "moderation.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	issues, err := collectModerationAppIssues(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(issues, "\n")
+	if !strings.Contains(joined, "UnhidePost 必须过单点 requireAdmin") {
+		t.Fatalf("注入 unhide 越权后未检出: %v", issues)
+	}
+	if strings.Contains(joined, "UnhideThread 必须过单点 requireAdmin") {
+		t.Fatalf("合规的 UnhideThread 被误报: %v", issues)
+	}
+}
+
+// ADR-053 新增守卫的负向注入：unhide 若硬删或写错目标状态，必须报警。
+func TestGuardDetectsBadUnhideSQL(t *testing.T) {
+	dir := t.TempDir()
+	src := `package sqlite
+func (w *sqlWriteTx) HidePost(ctx context.Context, id int64) error {
+	_, err := w.tx.ExecContext(ctx, "UPDATE posts SET status = 'hidden' WHERE id = ? AND status IN ('normal', 'hidden')", id)
+	return err
+}
+func (w *sqlWriteTx) HideThread(ctx context.Context, id int64) error {
+	_, err := w.tx.ExecContext(ctx, "UPDATE threads SET status = 'hidden' WHERE id = ? AND status IN ('active', 'hidden')", id)
+	return err
+}
+func (w *sqlWriteTx) UnhidePost(ctx context.Context, id int64) error {
+	_, err := w.tx.ExecContext(ctx, "UPDATE posts SET status = 'normal' WHERE id = ? AND status IN ('hidden', 'normal')", id)
+	return err
+}
+func (w *sqlWriteTx) UnhideThread(ctx context.Context, id int64) error {
+	_, err := w.tx.ExecContext(ctx, "DELETE FROM threads WHERE id = ?", id)
+	return err
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "repo_moderation.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	issues, err := collectModerationSQLIssues(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(issues, "\n")
+	for _, want := range []string{
+		"UnhideThread 必须执行 UPDATE threads SET status = 'active'",
+		"UnhideThread 缺少幂等条件 status IN 'hidden', 'active'",
+		"UnhideThread 不得物理删",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("注入的违规 unhide SQL 未检出 %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "UnhidePost 必须执行") || strings.Contains(joined, "扫描不到") {
+		t.Fatalf("合规的 UnhidePost 被误报: %v", issues)
+	}
+}
+
+// ADR-053 补丁守卫：/unthread 的用例入口若绕过 requireAdmin，必须报警。
+func TestGuardDetectsUnthreadSkippingRequireAdmin(t *testing.T) {
+	dir := t.TempDir()
+	src := `package forum
+func (s *Service) HidePost(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("post hide", "post:1", 0, actor, now))
+	})
+}
+func (s *Service) HideThread(ctx context.Context, actor Actor, id int64) error {
+	if err := s.requireAdmin(actor); err != nil { return err }
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("thread hide", "thread:1", 0, actor, now))
+	})
+}
+` + cleanUnhideAppSrc + `func (s *Service) Unthread(ctx context.Context, actor Actor, id int64) error {
+	return s.repos.Write(ctx, func(tx WriteTx) error {
+		return tx.AppendOutbox(ctx, adminActionEvent("thread unthread", "thread:1", 0, actor, now))
+	})
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "moderation.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	issues, err := collectModerationAppIssues(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(issues, "\n")
+	if !strings.Contains(joined, "Unthread 必须过单点 requireAdmin") {
+		t.Fatalf("注入 unthread 越权后未检出: %v", issues)
+	}
+	for _, clean := range []string{"HidePost", "UnhidePost", "UnhideThread"} {
+		if strings.Contains(joined, clean+" 必须过单点 requireAdmin") {
+			t.Fatalf("合规的 %s 被误报: %v", clean, issues)
 		}
 	}
 }

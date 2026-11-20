@@ -199,3 +199,19 @@ func TestPageControllerBodyLimitHintAndNoEcho(t *testing.T) {
 		t.Fatalf("超限粘贴后缓冲应为空: %q", got)
 	}
 }
+
+// 编辑态 Esc 走 pageController.editorKey，仍输出「（已取消编辑）」并退出编辑态；
+// 浏览态 Esc 的静默改造不得波及这条真正在取消的路径。
+func TestEditorEscStillCancelsWithFixedText(t *testing.T) {
+	ctx, pc, sess := enterBodyForNewThread(t)
+	sess.reset()
+	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyEsc}); err != nil {
+		t.Fatalf("编辑态 Esc 不应报错: %v", err)
+	}
+	if got := sess.output(); !strings.Contains(got, "（已取消编辑）") {
+		t.Fatalf("编辑态 Esc 必须输出取消文案，实际 %q", got)
+	}
+	if pc.editor != nil {
+		t.Fatal("编辑态 Esc 必须退出编辑态")
+	}
+}

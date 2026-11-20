@@ -227,6 +227,13 @@ type WriteTx interface {
 	// 目标不存在或已被作者删除返回 ErrNotFound。与判权一起落在同一事务快照内。
 	HideThread(ctx context.Context, threadID int64) error
 	HidePost(ctx context.Context, postID int64) error
+	// UnhideThread / UnhidePost 是隐藏的逆操作（ADR-053）：只把 status 从 hidden
+	// 改回 active / normal，不物理删、不级联、不改任何其它列。
+	// 条件更新用 IN ('hidden','active') / IN ('hidden','normal') 实现幂等：
+	// 未隐藏的目标再 unhide 一次是合法 no-op；作者已删除（deleted）或
+	// 根本不存在的目标返回 ErrNotFound。与判权一起落在同一事务快照内。
+	UnhideThread(ctx context.Context, threadID int64) error
+	UnhidePost(ctx context.Context, postID int64) error
 	// AppendOutbox 在业务写事务内追加一条领域事件（R12）。
 	// 必须与业务写同提交、同回滚；event_id 唯一，重复事件静默去重。
 	// 投递绝不在这里做——handler 只能在事务提交后由 Outbox 调度器调用。

@@ -62,11 +62,51 @@ func TestApplyKeyCancelQuitAndPaste(t *testing.T) {
 	if a, _, _ := applyKey(cl, input.KeyMsg{Kind: input.KeyCtrlC}); a != actionQuit {
 		t.Fatal("非编辑态 Ctrl-C 应退出会话")
 	}
-	if a, _, _ := applyKey(cl, input.KeyMsg{Kind: input.KeyEsc}); a != actionEscNotice {
-		t.Fatal("非编辑态 Esc 应给出取消提示")
+	if a, _, _ := applyKey(cl, input.KeyMsg{Kind: input.KeyEsc}); a != actionNone {
+		t.Fatal("非编辑态 Esc 应静默（浏览态没有可取消对象）")
 	}
 	if a, _, n := applyKey(cl, input.KeyMsg{Kind: input.KeyPaste, Text: "abc"}); a != actionPasteNotice || n != 3 {
 		t.Fatalf("非编辑态粘贴应只提示字节数，实际 action=%v n=%d", a, n)
+	}
+}
+
+// 浏览态连按 Esc：动作必须是 actionNone（在 ADR-027 的「屏幕连续」集合里），
+// 且固定提示函数返回空串——两级合起来即「输出零新增文本、屏幕不追加行」。
+func TestBrowseEscIsSilentOnRepeats(t *testing.T) {
+	cl := &commandLine{}
+	for i := 0; i < 3; i++ {
+		action, _, pasteLen := applyKey(cl, input.KeyMsg{Kind: input.KeyEsc})
+		if action != actionNone {
+			t.Fatalf("第 %d 次浏览态 Esc 应为 actionNone，实际 %v", i+1, action)
+		}
+		if got := actionNotice(action, pasteLen); got != "" {
+			t.Fatalf("第 %d 次浏览态 Esc 不得产生输出，实际 %q", i+1, got)
+		}
+		if cl.active || len(cl.runes) != 0 {
+			t.Fatalf("浏览态 Esc 不得改变命令行状态: active=%v runes=%q", cl.active, string(cl.runes))
+		}
+	}
+	// 屏幕连续集合必须含 actionNone，否则下一次渲染会退回追加模式（ADR-027）。
+	continuous := map[cmdAction]bool{
+		actionMoveDown: true, actionMoveUp: true, actionOpen: true, actionBack: true,
+		actionNextPage: true, actionPrevPage: true, actionNone: true,
+	}
+	if !continuous[actionNone] {
+		t.Fatal("actionNone 必须保持屏幕连续")
+	}
+}
+
+// 命令输入态 Esc 仍输出取消文案；粘贴提示仍按纯函数产生固定文本（回归）。
+func TestActionNoticeKeepsRealCancelTexts(t *testing.T) {
+	if got := actionNotice(actionCancel, 0); got != "（已取消命令输入）\r\n" {
+		t.Fatalf("命令输入态取消文案被破坏: %q", got)
+	}
+	if got := actionNotice(actionPasteNotice, 3); got != "（已收到粘贴块 3 字节；请先在编辑态内粘贴）\r\n" {
+		t.Fatalf("粘贴提示文案被破坏: %q", got)
+	}
+	// 浏览态 Esc 改造后，旧的「（取消）」文案彻底消失。
+	if strings.Contains(actionNotice(actionNone, 0), "取消") {
+		t.Fatal("静默动作不得输出取消文案")
 	}
 }
 

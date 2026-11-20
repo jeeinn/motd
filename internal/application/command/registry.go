@@ -21,6 +21,10 @@ var (
 // Command 描述一条斜杠命令的元数据。MaxArgs = -1 表示不限参数个数。
 // Sub 非空表示这是某条命令的子命令（如 /node create）：Name 相同但 Sub 唯一，
 // MinArgs/MaxArgs 约束的是**子命令之后**的参数个数。
+//
+// Group 是纯展示元数据：只决定 Help() 里命令排在哪个分组、是否插分组说明行。
+// 它**不是权限判定**——白名单准入永远只在 forum.requireAdmin（ADR-049/053）；
+// Parse / Lookup 完全忽略 Group，因此加分组不会多出一条"可执行命令"。
 type Command struct {
 	Name    string // 不含前导 /
 	Sub     string // 子命令名，可为空
@@ -29,7 +33,14 @@ type Command struct {
 	Aliases []string
 	MinArgs int
 	MaxArgs int
+	Group   string // 展示分组；GroupAdmin = 管理员命令，空 = 普通命令
 }
+
+// GroupAdmin 只用于 Help() 排版分组，不代表任何鉴权语义。
+const GroupAdmin = "admin"
+
+// adminGroupHelpHeader 是固定文案（不含任何用户数据），Help() 在进入管理员分组前插一次。
+const adminGroupHelpHeader = "\r\n管理员命令（需白名单指纹授权）：\r\n"
 
 // Binding 是「键位 → 语义」的说明，P1 的鼠标 / 快捷键也映射到同一张表。
 type Binding struct {
@@ -64,8 +75,6 @@ var defaultCommands = []Command{
 	// P2-M2：与 /delete 对称的作者权。无参重新输入当前主题正文（首帖），
 	// 带 id 则重新输入指定回复全文（仅作者）。MinArgs=0 让无参进入 handler 解析首帖。
 	{Name: "edit", Usage: "/edit [id]", Summary: "编辑当前主题正文 / 指定回复（仅作者）", MinArgs: 0, MaxArgs: 1},
-	// P2-M1b：与 /delete 对称的治理口径。无参隐藏当前主题，带 id 隐藏回复（仅管理员）。
-	{Name: "hide", Usage: "/hide [id]", Summary: "隐藏当前主题 / 指定回复（仅管理员）", MinArgs: 0, MaxArgs: 1},
 	// MinArgs=0 是刻意的：/login 不带参数时不落到通用「参数个数不符」，
 	// 而是进入 handle 的 provider 白名单分支，给出支持的 provider 提示。
 	{Name: "login", Usage: "/login github | /login email", Summary: "GitHub Device Flow / 邮箱密码登录", MinArgs: 0, MaxArgs: 1, Aliases: []string{"signin"}},
@@ -85,13 +94,22 @@ var defaultCommands = []Command{
 	{Name: "vote", Usage: "/vote <up|down|rm>", Summary: "给当前主题投赞成/反对票或撤销", MinArgs: 1, MaxArgs: 1},
 	// 关键词可含空格：MaxArgs=-1 后在页面层用空格拼回，仍只把整串作为查询词。
 	{Name: "search", Usage: "/search <关键词>", Summary: "检索正文", MinArgs: 1, MaxArgs: -1},
-	// P2-M1：节点治理四条子命令。参数区间各自独立，缺子命令/多参数都在注册表层挡掉。
-	{Name: "node", Sub: "list", Usage: "/node list", Summary: "列出全部版块（含归档，仅管理员）", MaxArgs: 0},
-	{Name: "node", Sub: "create", Usage: "/node create <slug> <name>", Summary: "创建版块（仅管理员）", MinArgs: 2, MaxArgs: 2},
-	{Name: "node", Sub: "rename", Usage: "/node rename <slug> <name>", Summary: "版块改名（仅管理员）", MinArgs: 2, MaxArgs: 2},
-	{Name: "node", Sub: "archive", Usage: "/node archive <slug>", Summary: "归档版块（仅管理员）", MinArgs: 1, MaxArgs: 1},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
+
+	// ---- 管理员分组（B 方案：不隐藏，只在 Help() 里归组并加一行说明）----
+	// Group 只是排版标记；权限仍只在 forum.requireAdmin 判定，命令层不做鉴权。
+	// /delete、/edit 是作者权，刻意不归入本组。
+	// P2-M1b 隐藏 + ADR-053 恢复：无参作用于当前主题，带 id 作用于该主题下的回复。
+	{Name: "hide", Usage: "/hide [id]", Summary: "隐藏当前主题 / 指定回复（仅管理员）", MinArgs: 0, MaxArgs: 1, Group: GroupAdmin},
+	{Name: "unhide", Usage: "/unhide [id]", Summary: "恢复当前主题 / 指定回复（仅管理员）", MinArgs: 0, MaxArgs: 1, Group: GroupAdmin},
+	// ADR-053 补丁：隐藏主题打不开详情，因此单独给一条从任意屏按 ID 恢复主题的命令。
+	{Name: "unthread", Usage: "/unthread <thread-id>", Summary: "恢复被隐藏的主题（可从任意页面）", MinArgs: 1, MaxArgs: 1, Group: GroupAdmin},
+	// P2-M1：节点治理四条子命令。参数区间各自独立，缺子命令/多参数都在注册表层挡掉。
+	{Name: "node", Sub: "list", Usage: "/node list", Summary: "列出全部版块（含归档，仅管理员）", MaxArgs: 0, Group: GroupAdmin},
+	{Name: "node", Sub: "create", Usage: "/node create <slug> <name>", Summary: "创建版块（仅管理员）", MinArgs: 2, MaxArgs: 2, Group: GroupAdmin},
+	{Name: "node", Sub: "rename", Usage: "/node rename <slug> <name>", Summary: "版块改名（仅管理员）", MinArgs: 2, MaxArgs: 2, Group: GroupAdmin},
+	{Name: "node", Sub: "archive", Usage: "/node archive <slug>", Summary: "归档版块（仅管理员）", MinArgs: 1, MaxArgs: 1, Group: GroupAdmin},
 }
 
 var defaultBindings = []Binding{
@@ -260,10 +278,19 @@ func (r *Registry) Bindings() []Binding {
 
 // Help 由 All() 与 Bindings() 生成，是帮助屏的唯一来源。
 // 页面若要展示命令，必须调这里，不允许另写一份清单（§3.2 验收项）。
+//
+// B 方案（用户 2026-11-20 拍板）：所有命令对所有人可见，不按角色隐藏；
+// 只在进入 GroupAdmin 分组时插一行固定说明，把管理员命令集中到一处降低噪音。
+// 安全边界仍是 requireAdmin，帮助里的 Group 字段不参与任何鉴权。
 func (r *Registry) Help() string {
 	var b strings.Builder
 	b.WriteString("命令（唯一入口）：\r\n")
+	inAdminGroup := false
 	for _, c := range r.All() {
+		if c.Group == GroupAdmin && !inAdminGroup {
+			b.WriteString(adminGroupHelpHeader)
+			inAdminGroup = true
+		}
 		_, _ = fmt.Fprintf(&b, "  %-18s %s\r\n", c.Usage, c.Summary)
 	}
 	b.WriteString("\r\n键位：\r\n")

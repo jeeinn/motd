@@ -1,6 +1,7 @@
 package forum
 
 // P2-M1b 内容治理：管理员隐藏他人主题 / 回复。
+// ADR-053 追加 Unhide：误隐藏可逆，恢复走与 Hide 完全对称的口径。
 //
 // 三条不变量写在这里，命令层不得复制：
 //  1. 准入只有 requireAdmin 一个入口（ADR-049）：白名单指纹即授权，
@@ -69,6 +70,102 @@ func (s *Service) HideThread(ctx context.Context, actor Actor, threadID int64) e
 			return err
 		}
 		ev = adminActionEvent("thread hide", "thread:"+strconv.FormatInt(threadID, 10), 0, actor, now)
+		ev.ThreadID = threadID
+		if s.outbox != nil {
+			return tx.AppendOutbox(ctx, ev)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.afterCommit(ctx, ev)
+	return nil
+}
+
+// UnhidePost 恢复一条被隐藏的回复。与 HidePost 同构：入口 requireAdmin、
+// 单写事务、审计同事务 AppendOutbox；固定文案不回显目标原文 / ID。
+// 未隐藏的目标（status=normal）是合法 no-op，便于重试；作者已删的目标仍不可恢复。
+func (s *Service) UnhidePost(ctx context.Context, actor Actor, postID int64) error {
+	if err := s.requireAdmin(actor); err != nil {
+		return err
+	}
+	if postID <= 0 {
+		return ErrNotFound
+	}
+
+	now := s.now().UTC()
+	var ev event.DomainEvent
+	err := s.repos.Write(ctx, func(tx WriteTx) error {
+		// 条件更新即存在性判定：deleted / 不存在 → ErrNotFound；
+		// hidden → 恢复；已 normal → 幂等成功。检查与写入同一快照。
+		if err := tx.UnhidePost(ctx, postID); err != nil {
+			return err
+		}
+		ev = adminActionEvent("post unhide", "post:"+strconv.FormatInt(postID, 10), 0, actor, now)
+		ev.PostID = postID
+		if s.outbox != nil {
+			return tx.AppendOutbox(ctx, ev)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.afterCommit(ctx, ev)
+	return nil
+}
+
+// UnhideThread 恢复整个主题。只改 threads.status 回 active，不级联改回复行
+// （隐藏时也没改；与 HideThread / SoftDeleteThread 同构）。
+func (s *Service) UnhideThread(ctx context.Context, actor Actor, threadID int64) error {
+	if err := s.requireAdmin(actor); err != nil {
+		return err
+	}
+	if threadID <= 0 {
+		return ErrNotFound
+	}
+
+	now := s.now().UTC()
+	var ev event.DomainEvent
+	err := s.repos.Write(ctx, func(tx WriteTx) error {
+		if err := tx.UnhideThread(ctx, threadID); err != nil {
+			return err
+		}
+		ev = adminActionEvent("thread unhide", "thread:"+strconv.FormatInt(threadID, 10), 0, actor, now)
+		ev.ThreadID = threadID
+		if s.outbox != nil {
+			return tx.AppendOutbox(ctx, ev)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.afterCommit(ctx, ev)
+	return nil
+}
+
+// Unthread 是 ADR-053 补丁：从任意屏幕按 ID 恢复被隐藏的**主题**。
+// 与 UnhideThread 的差别只有两个：① 不要求当前处于该主题详情页——隐藏主题
+// 已被 GetThread 过滤，根本打不开详情；② 审计命令名固定为 "thread unthread"，
+// 与无参 /unhide 的 "thread unhide" 分开，审计能区分入口，event ID 的
+// 幂等键也不会互相干扰。写端口仍复用 UnhideThread（幂等、只 UPDATE status）。
+func (s *Service) Unthread(ctx context.Context, actor Actor, threadID int64) error {
+	if err := s.requireAdmin(actor); err != nil {
+		return err
+	}
+	if threadID <= 0 {
+		return ErrNotFound
+	}
+
+	now := s.now().UTC()
+	var ev event.DomainEvent
+	err := s.repos.Write(ctx, func(tx WriteTx) error {
+		if err := tx.UnhideThread(ctx, threadID); err != nil {
+			return err
+		}
+		ev = adminActionEvent("thread unthread", "thread:"+strconv.FormatInt(threadID, 10), 0, actor, now)
 		ev.ThreadID = threadID
 		if s.outbox != nil {
 			return tx.AppendOutbox(ctx, ev)

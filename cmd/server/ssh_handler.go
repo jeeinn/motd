@@ -165,7 +165,6 @@ const (
 	actionHelp
 	actionCommandStart
 	actionPasteNotice
-	actionEscNotice
 	// MVP 页面导航（P0-25）：键盘与斜杠命令最终都落到同一个 pageController，
 	// 不产生第二条业务路径（§3.2）。
 	actionMoveDown
@@ -176,6 +175,21 @@ const (
 	actionNextPage
 	actionPrevPage
 )
+
+// actionNotice 返回「产生文本、但不承载业务」的动作对应的固定提示文案。
+// 空串表示该动作不写终端（导航键与静默动作）。
+// 抽成纯函数是为了让「浏览态 Esc 输出为零」可直接断言，不必构造 SSH 会话。
+// 注意：编辑态取消（已取消编辑）走 pageController.editorKey，与此无关。
+func actionNotice(action cmdAction, pasteLen int) string {
+	switch action {
+	case actionCancel:
+		return "（已取消命令输入）\r\n"
+	case actionPasteNotice:
+		return fmt.Sprintf("（已收到粘贴块 %d 字节；请先在编辑态内粘贴）\r\n", pasteLen)
+	default:
+		return ""
+	}
+}
 
 func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	// 页面状态每会话独立：inputHandler 是进程级单例，绝不能把光标 / 当前节点
@@ -371,11 +385,13 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 	default:
 		pc.invalidateScreen()
 	}
+	// 固定提示统一从纯函数取；空串即「零输出」（浏览态 Esc 走 actionNone）。
+	if notice := actionNotice(action, pasteLen); notice != "" {
+		_, _ = io.WriteString(sess, notice)
+	}
 	switch action {
 	case actionQuit:
 		return outcomeQuit
-	case actionCancel:
-		_, _ = io.WriteString(sess, "（已取消命令输入）\r\n")
 	case actionHelp:
 		_, _ = io.WriteString(sess, h.reg.Help())
 	case actionCommandStart:
@@ -385,10 +401,6 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 		pc.maybeShowCommandEntryHint(sess)
 		// 提示换行后再回显预置的 '/'，保证用户输入行连续（ADR-026）。
 		pc.echo.preloadedSlash()
-	case actionPasteNotice:
-		_, _ = fmt.Fprintf(sess, "（已收到粘贴块 %d 字节；请先在编辑态内粘贴）\r\n", pasteLen)
-	case actionEscNotice:
-		_, _ = io.WriteString(sess, "（取消）\r\n")
 	case actionMoveDown, actionMoveUp, actionOpen, actionBack, actionReply,
 		actionNextPage, actionPrevPage:
 		// 键盘与斜杠命令汇聚到同一个页面控制器，不产生第二条业务路径。
@@ -699,7 +711,9 @@ func applyKey(cl *commandLine, m input.KeyMsg) (cmdAction, string, int) {
 			return actionPrevPage, "", 0
 		}
 	case input.KeyEsc:
-		return actionEscNotice, "", 0
+		// 浏览态没有可取消对象：静默（actionNone），不输出「（取消）」也不让
+		// 屏幕失效。编辑态 Esc 由 editorKey 处理，命令输入态 Esc 仍是 actionCancel。
+		return actionNone, "", 0
 	case input.KeyPaste:
 		return actionPasteNotice, "", len(m.Text)
 	}

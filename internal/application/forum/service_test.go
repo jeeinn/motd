@@ -577,6 +577,29 @@ func (x *fakeTx) HideThread(_ context.Context, threadID int64) error {
 	return nil
 }
 
+// 恢复的内存语义：deleted / 不存在 → ErrNotFound；hidden 回 normal/active；
+// 已 normal/active 幂等成功（与真实 SQL 的 requireOneRow 对齐）。
+func (x *fakeTx) UnhidePost(_ context.Context, postID int64) error {
+	p, ok := x.state.posts[postID]
+	if !ok || p.Status == post.StatusDeleted {
+		return ErrNotFound
+	}
+	p.Status = post.StatusNormal
+	x.state.posts[postID] = p
+	return nil
+}
+
+func (x *fakeTx) UnhideThread(_ context.Context, threadID int64) error {
+	if _, ok := x.state.threads[threadID]; !ok {
+		return ErrNotFound
+	}
+	if s := x.state.threadStatus[threadID]; s == "deleted" {
+		return ErrNotFound
+	}
+	x.state.threadStatus[threadID] = "active"
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // 测试辅助
 // ---------------------------------------------------------------------------

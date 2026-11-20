@@ -433,6 +433,10 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.edit(ctx, sess, inv.Args)
 	case "hide":
 		return p.hide(ctx, sess, inv.Args)
+	case "unhide":
+		return p.unhide(ctx, sess, inv.Args)
+	case "unthread":
+		return p.unthread(ctx, sess, inv.Args)
 	case "search":
 		return p.showSearch(ctx, sess, strings.Join(inv.Args, " "), 1)
 	case "node":
