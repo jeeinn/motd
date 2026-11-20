@@ -11,11 +11,25 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
+## 在线体验
+
+服务器已部署，直接用 SSH 连入试用（无需注册）：
+
+```bash
+ssh -p 2222 guest@jeeinn.com
+```
+
+用户名任意非 root 即可；未绑定公钥时以**访客**进入（可浏览、可 `/register`），用 `/login github` 登录后可发帖。
+
 ## 预览
 
-SSH 连入后的版块列表（五版块种子、键位提示、状态栏）：
+**版块列表首屏**——连入后按 `j/k` 移动、`Enter` 打开、`h/g` 返回：
 
-![motd 终端版块列表](docs/images/terminal-node-list.png)
+![SSH 连入后的版块列表](docs/images/terminal-node-list.png)
+
+**GitHub Device Flow 登录与发帖**——`/login github` 发起授权，浏览器打开 `github.com/login/device` 输入验证码即可自动创建账号并绑定当前公钥，随后用 `/new` 发帖：
+
+![GitHub Device Flow 登录与发帖](docs/images/login-github.png)
 
 更多截图见 [`docs/images/`](docs/images/)。
 

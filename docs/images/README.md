@@ -17,6 +17,9 @@
 
 当前截图：
 
-| 文件 | 内容 |
-| --- | --- |
-| `terminal-node-list.png` | SSH 连入后的版块列表首屏 |
+| 文件 | 内容 | README 引用 |
+| --- | --- | --- |
+| `terminal-node-list.png` | SSH 连入后的版块列表首屏（含 `guest@jeeinn.com` 在线体验命令） | 预览 |
+| `login-github.png` | GitHub Device Flow 登录到 `/new` 发帖的完整流程 | 预览 |
+
+> 尺寸说明：两张截图来自不同终端窗口，`login-github.png` 为宽屏、内容较长；新增截图时尽量保持与同组图一致的终端宽度（建议 80 列）。
