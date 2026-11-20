@@ -107,8 +107,13 @@ func newSession(id string, ch gossh.Channel, fp, pk string, p auth.Principal, re
 		principal: p, reg: reg,
 		done: make(chan struct{}),
 	}
+	// 这两个字段会被 closeWithReason 在锁内读取，赋值也必须在同一把锁内完成：
+	// 极短 lifetime（测试注入）时 AfterFunc 回调可能在赋值语句返回前就触发，
+	// 无锁赋值会与回调的锁内读取构成 data race（CI race job 实测捕获）。
+	s.mu.Lock()
 	s.lifetime = time.AfterFunc(getSessionMaxLifetime(), func() { s.closeWithReason(lifetimeCloseNotice) })
 	s.hb = time.NewTicker(sessionHeartbeatInterval)
+	s.mu.Unlock()
 	go s.heartbeatLoop()
 	return s
 }

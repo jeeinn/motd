@@ -97,7 +97,11 @@ func (s *loginStore) Write(_ context.Context, fn func(LoginWriteTx) error) error
 	return err
 }
 
-func (s *loginStore) inWriteTxn() bool { return s.inWrite }
+func (s *loginStore) inWriteTxn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inWrite
+}
 
 // seedAccount 预置一个账号（测试夹具用，不算写入事务）。
 func (s *loginStore) seedAccount(username, email string, status domainuser.Status) int64 {

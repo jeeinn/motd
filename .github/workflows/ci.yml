@@ -60,5 +60,6 @@ jobs:
       - name: Test with race detector
         env:
           CGO_ENABLED: "1"
-          GORACE: "halt_on_error=1"
+          # 不设 halt_on_error：一轮跑完让 race detector 报出全部竞态，
+          # 避免"修一个冒一个"的多轮往返（灰度期经验，见 ADR-058）。
         run: go test -race -count=1 -timeout 15m ./...
