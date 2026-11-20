@@ -53,7 +53,7 @@ func setupMVPRuntime(t *testing.T) (context.Context, *inputHandler, *forumRuntim
 		t.Fatalf("准备测试账号: %v", err)
 	}
 
-	rt, err := newForumRuntime(pools, writer, nil)
+	rt, err := newForumRuntime(pools, writer, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("装配运行时: %v", err)
 	}

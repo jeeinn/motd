@@ -139,7 +139,7 @@ func run() error {
 	rt, err := newForumRuntime(pools, writer, func(e event.DomainEvent, err error) {
 		logger.Warn("领域事件投递失败（事务已提交，不回滚）",
 			"event_id", e.ID, "type", e.Type, "err", err)
-	})
+	}, cfg.AdminFingerprints, auditLogger)
 	if err != nil {
 		return fmt.Errorf("装配论坛运行时失败: %w", err)
 	}

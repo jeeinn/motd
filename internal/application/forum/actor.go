@@ -14,5 +14,5 @@ func ActorFromPrincipal(p auth.Principal, status user.Status) Actor {
 	if !p.IsUser() {
 		return Actor{Guest: true}
 	}
-	return Actor{UserID: p.UserID, Status: status}
+	return Actor{UserID: p.UserID, Status: status, Fingerprint: p.KeyFingerprint}
 }

@@ -65,7 +65,7 @@ func TestMVPRestartAndBackupWithRealData(t *testing.T) {
 		t.Fatalf("准备账号: %v", err)
 	}
 
-	rt, err := newForumRuntime(pools, writer, nil)
+	rt, err := newForumRuntime(pools, writer, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("装配运行时: %v", err)
 	}

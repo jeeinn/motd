@@ -91,9 +91,29 @@ type WriteStats struct {
 // 方法名带领域前缀，是因为 Repos 会把三个端口聚合进同一个接口：
 // Go 不允许接口里出现同名不同签名的方法，统一命名也避免调用点靠参数猜语义。
 
+// NodeAdminView 是管理员列表的一行：公开列表只给 node.Node，治理屏还需要状态。
+// Status 只在这里出现，不进公开 ViewModel，避免归档节点泄漏到普通用户视图。
+type NodeAdminView struct {
+	ID     int64
+	Slug   string
+	Name   string
+	Status string
+}
+
+// NewNode 是创建版块的写入参数。Slug 由用例层的 ValidateSlug 收口。
+// nodes 表没有 created_at 列，事件时间由用例层的 now 提供。
+type NewNode struct {
+	Slug        string
+	Name        string
+	Description string
+}
+
 // NodeReader 是版块的只读端口。
 type NodeReader interface {
 	ListNodes(ctx context.Context) ([]node.Node, error)
+	// ListAllNodes 是管理员专用只读变体：含 active/archived，按 id 升序。
+	// 公开用例不得调用它；准入由 Service.ListAdminNodes 单点把守。
+	ListAllNodes(ctx context.Context) ([]NodeAdminView, error)
 	GetNodeBySlug(ctx context.Context, slug string) (node.Node, error)
 }
 
@@ -146,6 +166,15 @@ type UsernameReader interface {
 type WriteTx interface {
 	UserStatus(ctx context.Context, userID int64) (user.Status, error)
 	NodeExists(ctx context.Context, nodeID int64) (bool, error)
+	// NodeIDBySlug 在写事务内解析用户给的 slug；不存在返回 ErrNotFound。
+	// 目标解析与写入同快照，避免「检查后改名」的 TOCTOU 窗口。
+	NodeIDBySlug(ctx context.Context, slug string) (int64, error)
+	// CreateNode 插入一个 active 节点；slug 冲突必须返回 ErrNodeSlugExists。
+	CreateNode(ctx context.Context, n NewNode) (int64, error)
+	// RenameNode 只改 name，绝不改 slug（slug 是稳定标识）。
+	RenameNode(ctx context.Context, id int64, newName string) error
+	// ArchiveNode 只把 nodes.status 置为 archived；threads 一行不动，重复归档不报错。
+	ArchiveNode(ctx context.Context, id int64) error
 	ThreadExists(ctx context.Context, threadID int64) (bool, error)
 	RecentWriteStats(ctx context.Context, userID int64, since time.Time) (WriteStats, error)
 	InsertThread(ctx context.Context, n NewThread) (int64, error)

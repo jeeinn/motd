@@ -9,13 +9,36 @@ func TestDomainEventTypeValid(t *testing.T) {
 	if EventUnknown.Valid() {
 		t.Error("零值事件种类不应合法")
 	}
-	for _, k := range []DomainEventType{EventPostCreated, EventThreadCreated, EventUserRegistered, EventVoteCast} {
+	for _, k := range []DomainEventType{EventPostCreated, EventThreadCreated, EventUserRegistered, EventVoteCast, EventAdminAction} {
 		if !k.Valid() {
 			t.Errorf("事件种类 %d 应合法", k)
 		}
 	}
-	if (DomainEventType(5)).Valid() || (DomainEventType(255)).Valid() {
+	if (DomainEventType(6)).Valid() || (DomainEventType(255)).Valid() {
 		t.Error("越界事件种类不应合法")
+	}
+}
+
+// 治理事件允许访客管理员：ActorID=0 但必须有指纹/命令/结果。
+func TestAdminActionEventSupportsGuestActor(t *testing.T) {
+	ev := validEvent()
+	ev.Type = EventAdminAction
+	ev.ActorID = 0
+	ev.AdminFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	ev.AdminCommand = "node create"
+	ev.AdminResult = "success"
+	if err := ev.Validate(); err != nil {
+		t.Fatalf("访客治理事件应合法: %v", err)
+	}
+	ev.AdminFingerprint = ""
+	if err := ev.Validate(); err == nil {
+		t.Fatal("治理事件缺指纹必须拒绝，审计不能丢主体")
+	}
+	// 非治理事件仍然必须有 UserID。
+	plain := validEvent()
+	plain.ActorID = 0
+	if err := plain.Validate(); err == nil {
+		t.Fatal("普通领域事件缺 UserID 仍应拒绝")
 	}
 }
 

@@ -74,8 +74,22 @@ func NoticeFromError(err error) viewmodel.Notice {
 	case errors.Is(err, ErrInvalidSort), errors.Is(err, ErrInvalidCursor),
 		errors.Is(err, ErrInvalidLimit), errors.Is(err, ErrInvalidTitle),
 		errors.Is(err, ErrInvalidBody), errors.Is(err, ErrInvalidVote),
-		errors.Is(err, ErrInvalidVoteTarget):
+		errors.Is(err, ErrInvalidVoteTarget), errors.Is(err, ErrInvalidSlug),
+		errors.Is(err, ErrInvalidNodeName):
 		n.Kind, n.Code = viewmodel.NoticeWarning, "invalid_input"
+	case errors.Is(err, ErrAdminDenied), errors.Is(err, ErrNodeSlugExists),
+		errors.Is(err, ErrSeedNodeRename):
+		n.Kind, n.Code = viewmodel.NoticeWarning, "admin_denied"
+		// 与 ErrNotOwner 同口径：写事务包装过错误，直接 err.Error() 会暴露内部实现。
+		// 固定取哨兵文案，绝不回显用户提交的 slug / name / 指纹。
+		switch {
+		case errors.Is(err, ErrAdminDenied):
+			n.Message = ErrAdminDenied.Error()
+		case errors.Is(err, ErrNodeSlugExists):
+			n.Message = ErrNodeSlugExists.Error()
+		default:
+			n.Message = ErrSeedNodeRename.Error()
+		}
 	}
 	return n
 }

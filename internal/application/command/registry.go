@@ -19,8 +19,11 @@ var (
 )
 
 // Command 描述一条斜杠命令的元数据。MaxArgs = -1 表示不限参数个数。
+// Sub 非空表示这是某条命令的子命令（如 /node create）：Name 相同但 Sub 唯一，
+// MinArgs/MaxArgs 约束的是**子命令之后**的参数个数。
 type Command struct {
 	Name    string // 不含前导 /
+	Sub     string // 子命令名，可为空
 	Usage   string // 如 "/open <id>"
 	Summary string
 	Aliases []string
@@ -34,17 +37,22 @@ type Binding struct {
 	Desc string
 }
 
-// Invocation 是一次解析结果。Name 一定来自注册表（白名单），可安全用于回显。
+// Invocation 是一次解析结果。Name / Sub 一定来自注册表（白名单），可安全用于回显。
 type Invocation struct {
 	Name string
+	Sub  string
 	Args []string
 }
 
 // Registry 是不可变的命令注册表；所有查询返回防御性副本。
 type Registry struct {
-	cmds   []Command
-	byName map[string]int
+	cmds     []Command
+	byName   map[string]int
+	bySub    map[string]int
+	subNames map[string]bool
 }
+
+func subKey(name, sub string) string { return name + "\x00" + sub }
 
 var defaultCommands = []Command{
 	{Name: "top", Usage: "/top", Summary: "回到版块列表", MaxArgs: 0},
@@ -72,6 +80,11 @@ var defaultCommands = []Command{
 	{Name: "vote", Usage: "/vote <up|down|rm>", Summary: "给当前主题投赞成/反对票或撤销", MinArgs: 1, MaxArgs: 1},
 	// 关键词可含空格：MaxArgs=-1 后在页面层用空格拼回，仍只把整串作为查询词。
 	{Name: "search", Usage: "/search <关键词>", Summary: "检索正文", MinArgs: 1, MaxArgs: -1},
+	// P2-M1：节点治理四条子命令。参数区间各自独立，缺子命令/多参数都在注册表层挡掉。
+	{Name: "node", Sub: "list", Usage: "/node list", Summary: "列出全部版块（含归档，仅管理员）", MaxArgs: 0},
+	{Name: "node", Sub: "create", Usage: "/node create <slug> <name>", Summary: "创建版块（仅管理员）", MinArgs: 2, MaxArgs: 2},
+	{Name: "node", Sub: "rename", Usage: "/node rename <slug> <name>", Summary: "版块改名（仅管理员）", MinArgs: 2, MaxArgs: 2},
+	{Name: "node", Sub: "archive", Usage: "/node archive <slug>", Summary: "归档版块（仅管理员）", MinArgs: 1, MaxArgs: 1},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 }
@@ -103,21 +116,35 @@ func mustNew(defs []Command) *Registry {
 }
 
 // New 校验并构造注册表。重名、空名、非法字符、别名冲突、参数区间矛盾一律拒绝。
+// 同名不同 Sub 是子命令，合法；同一个 (Name,Sub) 重复仍拒绝。
 func New(defs []Command) (*Registry, error) {
-	r := &Registry{byName: make(map[string]int, len(defs)*2)}
+	r := &Registry{
+		byName:   make(map[string]int, len(defs)*2),
+		bySub:    make(map[string]int, len(defs)),
+		subNames: make(map[string]bool, len(defs)),
+	}
 	for i, c := range defs {
 		if err := validateCommand(c); err != nil {
 			return nil, fmt.Errorf("命令 #%d: %w", i, err)
 		}
-		if _, exists := r.byName[c.Name]; exists {
-			return nil, fmt.Errorf("命令重名: %q", c.Name)
-		}
-		r.byName[c.Name] = i
-		for _, a := range c.Aliases {
-			if _, exists := r.byName[a]; exists {
-				return nil, fmt.Errorf("别名 %q 与已有命令冲突", a)
+		if c.Sub == "" {
+			if _, exists := r.byName[c.Name]; exists {
+				return nil, fmt.Errorf("命令重名: %q", c.Name)
 			}
-			r.byName[a] = i
+			r.byName[c.Name] = i
+			for _, a := range c.Aliases {
+				if _, exists := r.byName[a]; exists {
+					return nil, fmt.Errorf("别名 %q 与已有命令冲突", a)
+				}
+				r.byName[a] = i
+			}
+		} else {
+			key := subKey(c.Name, c.Sub)
+			if _, exists := r.bySub[key]; exists {
+				return nil, fmt.Errorf("子命令重名: %q", c.Name+"/"+c.Sub)
+			}
+			r.bySub[key] = i
+			r.subNames[c.Name] = true
 		}
 		copyCmd := c
 		copyCmd.Aliases = append([]string(nil), c.Aliases...)
@@ -138,6 +165,18 @@ func validateCommand(c Command) error {
 		if !ok {
 			return fmt.Errorf("命令名只含小写字母/数字/中划线且以字母开头: %q", c.Name)
 		}
+	}
+	for i, ch := range c.Sub {
+		ok := ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-'
+		if i == 0 {
+			ok = ch >= 'a' && ch <= 'z'
+		}
+		if !ok {
+			return fmt.Errorf("%q 的子命令名不合法: %q", c.Name, c.Sub)
+		}
+	}
+	if c.Sub != "" && len(c.Aliases) > 0 {
+		return fmt.Errorf("子命令 %q 不支持别名", c.Name+"/"+c.Sub)
 	}
 	if c.Usage == "" || c.Summary == "" {
 		return fmt.Errorf("%q 缺少 Usage 或 Summary", c.Name)
@@ -184,14 +223,27 @@ func (r *Registry) Parse(line string) (Invocation, error) {
 	fields := strings.Fields(trimmed)
 	name := strings.TrimPrefix(fields[0], "/")
 	cmd, ok := r.Lookup(name)
-	if !ok {
+	sub := ""
+	args := fields[1:]
+	if r.subNames[name] {
+		// 子命令名同样来自注册表白名单；未知子命令只回固定错误，不回显原文。
+		if len(args) == 0 {
+			return Invocation{}, ErrArgCount
+		}
+		sub = args[0]
+		i, found := r.bySub[subKey(name, sub)]
+		if !found {
+			return Invocation{}, ErrUnknownCommand
+		}
+		cmd = r.cmds[i]
+		args = args[1:]
+	} else if !ok {
 		return Invocation{}, ErrUnknownCommand
 	}
-	args := fields[1:]
 	if len(args) < cmd.MinArgs || (cmd.MaxArgs >= 0 && len(args) > cmd.MaxArgs) {
 		return Invocation{}, ErrArgCount
 	}
-	return Invocation{Name: cmd.Name, Args: append([]string(nil), args...)}, nil
+	return Invocation{Name: cmd.Name, Sub: sub, Args: append([]string(nil), args...)}, nil
 }
 
 // Bindings 返回默认键位说明副本。

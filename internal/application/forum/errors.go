@@ -30,6 +30,16 @@ var (
 	ErrNotOwner = errors.New("仅作者可删除")
 	// ErrInvalidDeleteTarget 表示删除目标类型不是 thread/post（内部调用错误，非用户文本）。
 	ErrInvalidDeleteTarget = errors.New("删除目标类型不合法")
+	// ErrAdminDenied 是所有节点治理命令的统一对外口径：
+	// 访客、非 active 账号、指纹不在白名单，一律返回它，不区分原因、不回显输入。
+	ErrAdminDenied = errors.New("仅管理员可执行")
+	// ErrInvalidSlug / ErrInvalidNodeName 是节点字段校验的哨兵，供固定文案映射。
+	ErrInvalidSlug     = errors.New("slug 不合法")
+	ErrInvalidNodeName = errors.New("版块名称不合法")
+	// ErrNodeSlugExists 表示 slug 已被占用（含归档节点，slug 名额不释放）。
+	ErrNodeSlugExists = errors.New("slug 已存在")
+	// ErrSeedNodeRename 表示尝试给 5 个 seed 版块改名（用户拍板：可归档、不可改名）。
+	ErrSeedNodeRename = errors.New("种子版块不可改名")
 )
 
 // RateLimitError 表示命中发帖限流（Q6：每人 60 秒 1 帖、每小时 10 帖）。
@@ -63,6 +73,10 @@ func (e *ValidationError) Unwrap() error {
 		return ErrInvalidTitle
 	case "body":
 		return ErrInvalidBody
+	case "slug":
+		return ErrInvalidSlug
+	case "name":
+		return ErrInvalidNodeName
 	default:
 		return nil
 	}

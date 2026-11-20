@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jeeinn/motd/internal/application/admin"
+	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
@@ -30,7 +32,10 @@ type forumRuntime struct {
 // 装配边界：cmd 是唯一可以同时看到 application / plugin / infrastructure 的地方；
 // application 不 import plugin（DomainEventSink 由 DomainBus 结构化匹配实现），
 // plugin 不 import infrastructure（受限上下文由 cmd 注入）。
-func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer, onPublishError func(event.DomainEvent, error)) (*forumRuntime, error) {
+func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer,
+	onPublishError func(event.DomainEvent, error),
+	adminFingerprints map[string]struct{}, auditLogger *auth.AuditLogger,
+) (*forumRuntime, error) {
 	repos := sqlite.NewForumRepos(pools, writer)
 
 	store := appuser.NewMemoryAchievementStore() // P0 占位：不写 SQLite
@@ -41,6 +46,13 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer, onPublishError 
 	}
 
 	bus := events.NewDomainBus()
+	// P2-M1：治理事件经 outbox 提交后投递到 auth_events 的异步审计通道。
+	// 审计器由进程持有（ticker 在 main），这里只注册提交后的桥接订阅者。
+	if auditLogger != nil {
+		if err := bus.Subscribe(event.EventAdminAction, admin.AuditBridge(auditLogger)); err != nil {
+			return nil, fmt.Errorf("装配治理审计订阅者: %w", err)
+		}
+	}
 	plugins := registry.All()
 	for _, p := range plugins {
 		p := p
@@ -67,6 +79,7 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer, onPublishError 
 		forum.WithEventSink(bus),
 		forum.WithPublishObserver(obs),
 		forum.WithOutbox(outbox),
+		forum.WithAdminWhitelist(adminFingerprints),
 	)
 	return &forumRuntime{
 		Service:  svc,

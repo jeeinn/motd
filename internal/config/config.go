@@ -44,6 +44,9 @@ type Config struct {
 	AuditCapacity int
 	// AuditFlushInterval 是异步批量落库周期。
 	AuditFlushInterval time.Duration
+	// AdminFingerprints 是节点治理命令的公钥指纹白名单（键为服务端算出的指纹）。
+	// 空 map 表示无人可管；判定统一走 application/admin.CanAdmin。
+	AdminFingerprints map[string]struct{}
 	// LogLevel debug / info / warn / error。
 	LogLevel string
 	// LogFormat text / json。
@@ -120,6 +123,13 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.Email = emailCfg
+
+	// 管理员白名单在启动期解析：非法指纹直接失败关闭，不留「配了却没人能管」的静默状态。
+	adminFPs, err := ParseAdminFingerprints(env("MOTD_ADMIN_FINGERPRINTS", ""))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.AdminFingerprints = adminFPs
 
 	switch cfg.LogLevel {
 	case "debug", "info", "warn", "error":

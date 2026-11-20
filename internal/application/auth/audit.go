@@ -31,6 +31,9 @@ const (
 	AuditKeyUnbound          = "key_unbound"
 	AuditSessionRevoked      = "session_revoked"
 	AuditLogout              = "logout"
+	// AuditAdminAction 是 P2-M1 节点治理动作的审计事件名。
+	// 治理事件经 forum outbox 提交后投递到这里，与其它认证审计共用 auth_events 通道。
+	AuditAdminAction = "admin_action"
 )
 
 // DefaultAuditCapacity / DefaultAuditFlushInterval 与 config 包同名默认值一致。

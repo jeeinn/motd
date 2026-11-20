@@ -45,7 +45,7 @@ func setupRuntime(t *testing.T) (context.Context, *forumRuntime) {
 		t.Fatalf("准备测试用户: %v", err)
 	}
 
-	rt, err := newForumRuntime(pools, writer, nil)
+	rt, err := newForumRuntime(pools, writer, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("装配运行时: %v", err)
 	}

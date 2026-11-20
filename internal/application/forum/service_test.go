@@ -31,11 +31,13 @@ type voteKey struct {
 
 type fakeState struct {
 	nodes        map[int64]node.Node
+	nodeStatus   map[int64]string
 	threads      map[int64]thread.Thread
 	posts        map[int64]post.Post
 	users        map[int64]user.Status
 	votes        map[voteKey]vote.Value
 	outboxEvents []event.DomainEvent
+	nextNodeID   int64
 	nextThreadID int64
 	nextPostID   int64
 }
@@ -43,16 +45,21 @@ type fakeState struct {
 func (s fakeState) clone() fakeState {
 	out := fakeState{
 		nodes:        make(map[int64]node.Node, len(s.nodes)),
+		nodeStatus:   make(map[int64]string, len(s.nodeStatus)),
 		threads:      make(map[int64]thread.Thread, len(s.threads)),
 		posts:        make(map[int64]post.Post, len(s.posts)),
 		users:        make(map[int64]user.Status, len(s.users)),
 		votes:        make(map[voteKey]vote.Value, len(s.votes)),
+		nextNodeID:   s.nextNodeID,
 		nextThreadID: s.nextThreadID,
 		nextPostID:   s.nextPostID,
 		outboxEvents: append([]event.DomainEvent(nil), s.outboxEvents...),
 	}
 	for k, v := range s.nodes {
 		out.nodes[k] = v
+	}
+	for k, v := range s.nodeStatus {
+		out.nodeStatus[k] = v
 	}
 	for k, v := range s.threads {
 		out.threads[k] = v
@@ -71,8 +78,9 @@ func (s fakeState) clone() fakeState {
 
 type fakeRepos struct {
 	state           fakeState
-	failInsertPost  error // 注入失败，用于验证事务回滚
-	failAdjustScore error // 注入失败，用于验证投票分数回滚
+	outboxStore     *fakeOutboxStore // 注入后，AppendOutbox 会同步落到这里供提交后投递
+	failInsertPost  error            // 注入失败，用于验证事务回滚
+	failAdjustScore error            // 注入失败，用于验证投票分数回滚
 	usernames       map[int64]string
 	failUsernames   error
 	usernameCalls   [][]int64 // 每次投影查询收到的 ids 副本，供「一次批量」断言
@@ -84,6 +92,8 @@ func newFakeRepos() *fakeRepos {
 			1: {ID: 1, Slug: "/dev/ai", Name: "AI 与大模型", Description: "模型与工具链"},
 			2: {ID: 2, Slug: "/dev/rust", Name: "Rust", Description: "Rust 生态"},
 		},
+		nodeStatus:   map[int64]string{1: "active", 2: "active"},
+		nextNodeID:   3,
 		threads:      map[int64]thread.Thread{},
 		posts:        map[int64]post.Post{},
 		users:        map[int64]user.Status{1: user.StatusActive, 2: user.StatusActive},
@@ -117,6 +127,19 @@ func (r *fakeRepos) ListNodes(ctx context.Context) ([]node.Node, error) {
 	out := make([]node.Node, 0, len(r.state.nodes))
 	for _, n := range r.state.nodes {
 		out = append(out, n)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (r *fakeRepos) ListAllNodes(ctx context.Context) ([]NodeAdminView, error) {
+	out := make([]NodeAdminView, 0, len(r.state.nodes))
+	for _, n := range r.state.nodes {
+		status := r.state.nodeStatus[n.ID]
+		if status == "" {
+			status = "active"
+		}
+		out = append(out, NodeAdminView{ID: n.ID, Slug: n.Slug, Name: n.Name, Status: status})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
@@ -249,7 +272,8 @@ func (r *fakeRepos) SearchPosts(_ context.Context, q SearchQuery) ([]SearchHit, 
 func (r *fakeRepos) Write(ctx context.Context, fn func(WriteTx) error) error {
 	staged := r.state.clone()
 	if err := fn(&fakeTx{
-		state: &staged, failInsertPost: r.failInsertPost, failAdjustScore: r.failAdjustScore,
+		state: &staged, store: r.outboxStore,
+		failInsertPost: r.failInsertPost, failAdjustScore: r.failAdjustScore,
 	}); err != nil {
 		return fmt.Errorf("写入事务失败（不可重试）: %w", err)
 	}
@@ -259,6 +283,7 @@ func (r *fakeRepos) Write(ctx context.Context, fn func(WriteTx) error) error {
 
 type fakeTx struct {
 	state           *fakeState
+	store           *fakeOutboxStore
 	failInsertPost  error
 	failAdjustScore error
 }
@@ -274,6 +299,46 @@ func (x *fakeTx) UserStatus(ctx context.Context, userID int64) (user.Status, err
 func (x *fakeTx) NodeExists(ctx context.Context, nodeID int64) (bool, error) {
 	_, ok := x.state.nodes[nodeID]
 	return ok, nil
+}
+
+func (x *fakeTx) NodeIDBySlug(ctx context.Context, slug string) (int64, error) {
+	for _, n := range x.state.nodes {
+		if n.Slug == slug {
+			return n.ID, nil
+		}
+	}
+	return 0, ErrNotFound
+}
+
+func (x *fakeTx) CreateNode(ctx context.Context, n NewNode) (int64, error) {
+	for _, existing := range x.state.nodes {
+		if existing.Slug == n.Slug {
+			return 0, ErrNodeSlugExists
+		}
+	}
+	id := x.state.nextNodeID
+	x.state.nextNodeID++
+	x.state.nodes[id] = node.Node{ID: id, Slug: n.Slug, Name: n.Name}
+	x.state.nodeStatus[id] = "active"
+	return id, nil
+}
+
+func (x *fakeTx) RenameNode(ctx context.Context, id int64, newName string) error {
+	n, ok := x.state.nodes[id]
+	if !ok {
+		return ErrNotFound
+	}
+	n.Name = newName
+	x.state.nodes[id] = n
+	return nil
+}
+
+func (x *fakeTx) ArchiveNode(ctx context.Context, id int64) error {
+	if _, ok := x.state.nodes[id]; !ok {
+		return ErrNotFound
+	}
+	x.state.nodeStatus[id] = "archived"
+	return nil
 }
 
 func (x *fakeTx) ThreadExists(ctx context.Context, threadID int64) (bool, error) {
@@ -336,6 +401,11 @@ func (x *fakeTx) InsertPost(ctx context.Context, p NewPost) (int64, error) {
 
 func (x *fakeTx) AppendOutbox(ctx context.Context, e event.DomainEvent) error {
 	x.state.outboxEvents = append(x.state.outboxEvents, e)
+	if x.store != nil {
+		id := int64(len(x.store.records) + 1)
+		x.store.records = append(x.store.records, OutboxRecord{ID: id, Event: e})
+		x.store.status[id] = "pending"
+	}
 	return nil
 }
 

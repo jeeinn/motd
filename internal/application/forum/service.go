@@ -20,6 +20,10 @@ type Actor struct {
 	UserID int64
 	Status user.Status
 	Guest  bool
+	// Fingerprint 是服务端认证阶段持有的会话公钥指纹（Principal.KeyFingerprint）。
+	// 普通写用例不用它；治理用例用它做唯一的白名单准入判定。
+	// 它永远不来自命令参数，因此用户无法通过提供文本自我提权。
+	Fingerprint string
 }
 
 // checkWrite 是写用例的统一入口判定：访客只读，非 active 冻结。
@@ -42,6 +46,8 @@ type Service struct {
 	outbox          *Outbox
 	onPublishErr    PublishObserver
 	publishFailures atomic.Int64
+	// adminWhitelist 由启动配置注入；未注入时所有 /node 治理用例一律拒绝。
+	adminWhitelist map[string]struct{}
 }
 
 // ServiceOption 用于注入时钟与事件出口；限流判定必须可测，不能靠真实等待 60 秒。

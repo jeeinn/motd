@@ -9,14 +9,53 @@ import (
 func TestDefaultRegistryHasP0Commands(t *testing.T) {
 	// P1-M2 追加 /logout，P1-M3 追加 /vote 与 /search，v0.2.1 追加 /delete；
 	// P1-M5 在 login 之后追加邮箱四命令；顺序固定（帮助文本由注册表生成）。
-	want := []string{"top", "open", "new", "reply", "delete", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "help", "quit"}
+	want := []string{"top", "open", "new", "reply", "delete", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "node", "node", "node", "node", "help", "quit"}
 	all := Default().All()
 	if len(all) != len(want) {
-		t.Fatalf("P0 命令应为 %d 条，实际 %d", len(want), len(all))
+		t.Fatalf("命令应为 %d 条，实际 %d", len(want), len(all))
 	}
 	for i, name := range want {
 		if all[i].Name != name {
 			t.Errorf("命令 #%d 应为 %q，实际 %q", i, name, all[i].Name)
+		}
+	}
+	subs := []string{"list", "create", "rename", "archive"}
+	for i, sub := range subs {
+		if all[15+i].Sub != sub {
+			t.Errorf("/node 第 %d 条子命令应为 %q，实际 %q", i, sub, all[15+i].Sub)
+		}
+	}
+}
+
+func TestParseNodeSubcommands(t *testing.T) {
+	r := Default()
+	cases := []struct {
+		line string
+		sub  string
+		args []string
+		err  error
+	}{
+		{"/node list", "list", nil, nil},
+		{"/node create /dev/x 新节点", "create", []string{"/dev/x", "新节点"}, nil},
+		{"/node rename /dev/x 改名", "rename", []string{"/dev/x", "改名"}, nil},
+		{"/node archive /dev/x", "archive", []string{"/dev/x"}, nil},
+		{"/node list extra", "", nil, ErrArgCount},
+		{"/node create /dev/x", "", nil, ErrArgCount},
+		{"/node archive /dev/x 多一个", "", nil, ErrArgCount},
+		{"/node", "", nil, ErrArgCount},
+		{"/node \x1b[2J", "", nil, ErrUnknownCommand},
+	}
+	for _, tc := range cases {
+		inv, err := r.Parse(tc.line)
+		if !errors.Is(err, tc.err) {
+			t.Errorf("Parse(%q) err = %v，期望 %v", tc.line, err, tc.err)
+			continue
+		}
+		if tc.err != nil {
+			continue
+		}
+		if inv.Name != "node" || inv.Sub != tc.sub || strings.Join(inv.Args, ",") != strings.Join(tc.args, ",") {
+			t.Errorf("Parse(%q) = %+v，期望 node/%s %v", tc.line, inv, tc.sub, tc.args)
 		}
 	}
 }

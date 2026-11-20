@@ -429,6 +429,8 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.delete(ctx, sess, inv.Args)
 	case "search":
 		return p.showSearch(ctx, sess, strings.Join(inv.Args, " "), 1)
+	case "node":
+		return p.nodeCommand(ctx, sess, inv)
 	default:
 		return p.writeFixed(sess, "该命令暂未接入（按 ? 查看全部命令）")
 	}
