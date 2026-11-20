@@ -5,15 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.1.1] - 2026-11-19
-
-展示时区 patch，无 schema 迁移、无新依赖。
-
-### Fixed
-
-- 帖子/回复与 `/keys` 公钥详情时间此前固定按 UTC 显示，中国用户看到相差 8 小时的时间。新增 `MOTD_DISPLAY_TIMEZONE`（默认 `Asia/Shanghai`）统一控制展示时区；论坛格式 `MM-DD HH:MM` 不变，`/keys` 后缀按时间戳所在时刻的时区缩写（CST / UTC / EST…）显示，不再硬编码 " UTC"。存储层归一化未改动，历史数据无需迁移。非法时区值启动即失败，不静默回落 UTC。
-
-## [0.3.1] - 2026-11-19
+## [0.3.1] - 2026-11-20
 
 体验优化小版本，无 schema 迁移、无新依赖。
 
@@ -26,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/verify <码>` 在收密码前先做只读预检：无效 / 过期 / 已消费码立即报错，不再白输两遍 argon2 密码；预检有独立防爆破限流（邮箱跨 IP 20 次/小时）。
 - 命令输入提示改为每会话首次按 `/` 显示一次，重连重新显示，减少长会话滚动。
+
+### Fixed
+
+- 帖子/回复与 `/keys` 公钥详情时间此前固定按 UTC 显示，中国用户看到相差 8 小时的时间。新增 `MOTD_DISPLAY_TIMEZONE`（默认 `Asia/Shanghai`）统一控制展示时区；论坛格式 `MM-DD HH:MM` 不变，`/keys` 后缀按时间戳所在时刻的时区缩写（CST / UTC / EST…）显示，不再硬编码 " UTC"。存储层归一化未改动，历史数据无需迁移。非法时区值启动即失败，不静默回落 UTC。
 
 ## [Unreleased]
 
@@ -128,8 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.1.1...HEAD
-[0.3.1.1]: https://github.com/jeeinn/motd/compare/v0.3.1...v0.3.1.1
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.1...HEAD
 [0.3.1]: https://github.com/jeeinn/motd/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jeeinn/motd/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jeeinn/motd/compare/v0.2.0...v0.2.1
