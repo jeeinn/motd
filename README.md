@@ -11,6 +11,14 @@ SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
+## 预览
+
+SSH 连入后的版块列表（五版块种子、键位提示、状态栏）：
+
+![motd 终端版块列表](docs/images/terminal-node-list.png)
+
+更多截图见 [`docs/images/`](docs/images/)。
+
 ## 功能
 
 - SSH 入口：仅公钥认证，禁 root，默认端口 `:2222`；停止浏览但连接仍在时不会断连（会话最长在线 6 小时，到点提示后关闭）
