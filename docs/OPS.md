@@ -265,9 +265,10 @@ chmod 600 .env
    mv data/motd.db-shm    data/motd.db-shm.broken-YYYYMMDD    2>/dev/null || true
    ```
 3. **恢复**：`scripts/restore.sh <backup-file> data/motd.db`。脚本会先做校验和 + 完整性验收，任一失败即中止。
-4. **启动**：`systemctl start motd`，`curl -s http://127.0.0.1:8080/healthz`（应返回 `ok <version> queue=0/256 online=0 active=0 commits=0`）。
-5. **抽查**：用户数、最新主题、迁移版本是否与备份点一致。
-6. **记录**：把命令、结果、耗时写回本文件 §4 的演练记录。
+4. **重建全文索引（必须）**：`motdctl fts-rebuild --db data/motd.db`，输出应为 `indexed=N`。FTS5 外部内容表的索引不随备份恢复，漏掉这步会让 `/search` 返回空（ADR-033）。
+5. **启动**：`systemctl start motd`，`curl -s http://127.0.0.1:8080/healthz`（应返回 `ok <version> queue=0/256 online=0 active=0 commits=0`）。
+6. **抽查**：用户数、最新主题、迁移版本是否与备份点一致；补做一次 `/search` 确认索引已恢复。
+7. **记录**：把命令、结果、耗时写回本文件 §5 的演练记录。
 
 > 恢复目标已存在时 `motdctl restore` 会直接拒绝（`ErrTargetExists`）。这是刻意设计：防止误把备份恢复覆盖到正在运行的库上。
 

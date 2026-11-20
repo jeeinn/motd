@@ -14,6 +14,14 @@ import (
 	"github.com/jeeinn/motd/internal/domain/user"
 )
 
+// karma 计分常量（v0.5.0 / ADR-057，规则见 P3-PLAN §3.2，用户 2026-11-20 确认）。
+// 只用于派生显示等级，不参与任何权限判断（ADR-014）。
+const (
+	karmaForThread = int64(2) // 发主题
+	karmaForPost   = int64(1) // 发回复
+	karmaPerUpvote = int64(1) // 被 upvote 每票；被 downvote 不扣作者
+)
+
 // Actor 是一次调用的发起者。M2 的 auth.Principal 会映射到这里，
 // 因此 P0-10 不依赖任何认证实现，也不 import transport。
 type Actor struct {
@@ -261,6 +269,10 @@ func (s *Service) CreateThread(ctx context.Context, actor Actor, in CreateThread
 		if err != nil {
 			return err
 		}
+		// v0.5.0 / ADR-057：发主题 +2 karma，与插入同事务。
+		if err := tx.AdjustKarma(ctx, actor.UserID, karmaForThread); err != nil {
+			return err
+		}
 		// 事件在写事务内构造并（若启用 outbox）随业务写一起落库。
 		ev = event.DomainEvent{
 			ID:         fmt.Sprintf("post:%d", postID),
@@ -334,6 +346,10 @@ func (s *Service) CreatePost(ctx context.Context, actor Actor, in CreatePostInpu
 		// 一条 UPDATE 同时维护 last_reply_at 与 score。
 		// P0 无投票来源，scoreDelta 恒为 0；P1 的投票可直接复用这条事务路径。
 		if err := tx.TouchThread(ctx, in.ThreadID, now, 0); err != nil {
+			return err
+		}
+		// v0.5.0 / ADR-057：发回复 +1 karma，与插入同事务。
+		if err := tx.AdjustKarma(ctx, actor.UserID, karmaForPost); err != nil {
 			return err
 		}
 		ev = event.DomainEvent{

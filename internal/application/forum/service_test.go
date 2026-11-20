@@ -36,6 +36,7 @@ type fakeState struct {
 	threadStatus map[int64]string // 治理隐藏用：thread.Thread 没有 Status 字段
 	posts        map[int64]post.Post
 	users        map[int64]user.Status
+	karma        map[int64]int64 // v0.5.0 / ADR-057：karma 计分
 	votes        map[voteKey]vote.Value
 	outboxEvents []event.DomainEvent
 	nextNodeID   int64
@@ -51,6 +52,7 @@ func (s fakeState) clone() fakeState {
 		threadStatus: make(map[int64]string, len(s.threadStatus)),
 		posts:        make(map[int64]post.Post, len(s.posts)),
 		users:        make(map[int64]user.Status, len(s.users)),
+		karma:        make(map[int64]int64, len(s.karma)),
 		votes:        make(map[voteKey]vote.Value, len(s.votes)),
 		nextNodeID:   s.nextNodeID,
 		nextThreadID: s.nextThreadID,
@@ -74,6 +76,9 @@ func (s fakeState) clone() fakeState {
 	}
 	for k, v := range s.users {
 		out.users[k] = v
+	}
+	for k, v := range s.karma {
+		out.karma[k] = v
 	}
 	for k, v := range s.votes {
 		out.votes[k] = v
@@ -106,6 +111,7 @@ func newFakeRepos() *fakeRepos {
 		threadStatus: map[int64]string{},
 		posts:        map[int64]post.Post{},
 		users:        map[int64]user.Status{1: user.StatusActive, 2: user.StatusActive},
+		karma:        map[int64]int64{},
 		votes:        map[voteKey]vote.Value{},
 		nextThreadID: 1,
 		nextPostID:   1,
@@ -476,6 +482,15 @@ func (x *fakeTx) UpsertVote(_ context.Context, userID int64, targetType vote.Tar
 
 func (x *fakeTx) DeleteVote(_ context.Context, userID int64, targetType vote.TargetType, targetID int64) error {
 	delete(x.state.votes, voteKey{userID, targetType, targetID})
+	return nil
+}
+
+// AdjustKarma 调整用户 karma（v0.5.0 / ADR-057）。
+func (x *fakeTx) AdjustKarma(_ context.Context, userID int64, delta int64) error {
+	if _, ok := x.state.users[userID]; !ok {
+		return ErrNotFound
+	}
+	x.state.karma[userID] += delta
 	return nil
 }
 

@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-20
+
+P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞态检测，最小压测集落地，备份调度可复制。无 schema 迁移、无新依赖、无新环境变量；测试 905 → 914。彩蛋命令（P3-M6）拆到 v0.5.1。
+
+### Added
+
+- **CI 竞态检测 job**：`.github/workflows/ci.yml` 追加独立 `race` job（`CGO_ENABLED=1`、`GORACE=halt_on_error=1`、`go test -race -timeout 15m`），初期非 required。本机 Windows 无 gcc 跑不了 race，Linux CI 可行（更正 PHASE1-PLAN 中"纯 Go 故 race 不可用"的因果，见 ADR-058）。
+- **最小压测集合**：4 个同包 benchmark（SSH 握手 / 浏览列表 / 写队列背压 / 并发渲染+presence）+ `scripts/bench.sh`，不进 CI 默认 job。**诚实口径**：这是回环环境的相对延迟基线，不构成 1 Mbps / 1000 在线验收证据（ADR-059）。
+- **备份调度模板**：`deploy/motd-backup.service` + `.timer`（每日 03:00 模板，需部署方替换 `ENV_FILE` 后启用）；`backup.sh` 生成备份后立即 `motdctl verify`（ADR-060）。
+- `docs/P3-PLAN.md`：P3 完整方案（M1~M5 已实施，M6 拆 v0.5.1）。
+
+### Changed
+
+- **成就落 SQLite**：替换 P0 的内存占位 Store，新增 `repo_achievement.go`（`Has`/`Grant` 幂等/计数），进程重启后成就不丢；无迁移，0001 的 `achievements` 表已够用（ADR-056）。
+- **karma 计分接线**：发主题 +2、回复 +1、被 upvote +1（被踩不扣作者、自投票不给、改票按差、删内容不回退）；状态栏 karma/等级从恒 0/L1 变为真实值。等级**仅显示、不做权限**（重申 ADR-014）。计分规则由用户确认，见 ADR-057 / P3-PLAN §3.2。
+- 显示侧新增独立 `KarmaReader` 端口 + 可选接口断言，不扩 `StatusReader`，既有调用方与测试 fake 零改动。
+- `docs/OPS.md` §4 恢复流程补上必须的 `motdctl fts-rebuild` 步骤（此前遗漏会导致恢复后 `/search` 返回空）。
+
+### Notes
+
+- 无新环境变量、无 schema 迁移；从 v0.4.x 升级替换二进制重启即可，成就/karma 数据从新发布起开始累积。
+- 彩蛋命令（`/fortune` `/cowsay` `/xkcd` `/matrix` `/blame`）本版不做，已确认拆到 v0.5.1。
+
 ## [0.4.3] - 2026-11-20
 
 文档与运维增强版本。无代码行为变更、无 schema 迁移、无新依赖；二进制功能与 v0.4.2 一致，测试仍为 905。重点是把首次 VPS 部署的实战经验固化为可复制的手册，并新增面向 AI 智能体的自动部署规程。
@@ -218,7 +241,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jeeinn/motd/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jeeinn/motd/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jeeinn/motd/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jeeinn/motd/compare/v0.4.0...v0.4.1

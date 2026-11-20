@@ -881,3 +881,85 @@
 - 验证：`go build ./... && go vet ./... && go test -count=1 ./...` 全绿，测试 903 → 905（相对 v0.4.0），archtest 全绿。无新迁移、无新依赖、生产 `data/` 未触碰。CI 门禁待发版前确认。
 
 - 关联：`ADR-054`（会话保活——本条收敛其 idle 部分，保留硬上限部分）、`ADR-016`（presence 内存心跳与 Reap）、`ADR-019`（服务端固定文本可信路径）。
+
+## ADR-056 成就落 SQLite：替换内存占位 Store
+
+- 状态：已采纳，v0.5.0 / P3-M1 落地。
+- 背景：P0 为让插件链路端到端可验证，注入 `MemoryAchievementStore`（`memory_store.go:24`，`wiring.go:41` 注释"P0 占位：不写 SQLite"）。结果是插件经事件总线申请成就成功、进程重启后全部丢失——用户永远看不到持久化的解锁记录。表 `achievements` 自 0001 就存在（`id/user_id/code/unlocked_at`，`UNIQUE(user_id, code)`），但无写入实现。
+- 决策：
+  1. 新增 `internal/infrastructure/sqlite/repo_achievement.go` 实现 `appuser.AchievementStore`（端口仍定义在 application，ADR-015）：`Has` 走读池；`Grant` 经 `Writer.Submit` 走唯一写连接，`INSERT ... ON CONFLICT(user_id, code) DO NOTHING` 保证幂等（与内存实现同口径）；`GrantedCount` 读池计数。
+  2. `wiring.go` 换 SQLite 实现；`forumRuntime.Store` 从具体类型 `*appuser.MemoryAchievementStore` 改为 `*sqlite.AchievementStore`，并保留 `Entries()` 观测方法使现有端到端测试（`wiring_test.go:85`）零改动通过。
+  3. `Grant` 在插件事件回调中调用，是独立事务——不与发帖/投票的写事务嵌套，无需处理重入。
+  4. **无新迁移**：0001 的表结构、外键与 UNIQUE 约束已经够用。
+- 理由：成就"解锁过"是用户可见的长期事实，属于持久化数据（设计稿 §1.3 原则二），内存 Store 只是 P0 为验证链路的临时妥协。落库不改变 `AchievementService.Apply` 的四道校验（`achievement.go:69-94`），风险面仅限实现替换。
+- 代价 / 边界：`Entries()` 为测试观测保留，不是端口方法；`GrantedCount` 用 `context.Background()` 且错误返 0（纯观测，不参与业务判定）。成就落库失败不影响发帖结果——事件投递本就在 outbox 提交之后。内存实现文件保留但不再装配（避免删除带来的测试连带改动）。
+- 验证：`repo_achievement_test.go` 两个专项测试——幂等/计数/Entries 快照、**关闭重开同一库路径后成就仍在**（直击内存实现做不到的差异）；全量 `go build ./... && go vet ./... && go test -count=1 ./...` 全绿，0 FAIL；格式门禁零输出。测试 905 → 907。
+- 关联：`ADR-015`（outbox 与插件边界）、`ADR-013`（不臆造计分语义——本条只做持久化，不涉及规则）、`P3-PLAN.md §2`。
+
+## ADR-057 karma 计分接线：规则与事务落点
+
+- 状态：已采纳，v0.5.0 / P3-M2 落地。规则由用户 2026-11-20 确认（P3-PLAN §3.2）。
+- 背景：`users.karma` 自 0001 存在、`Level()`（`domain/user/level.go`）阈值齐备、状态栏渲染（`terminal/view.go:226`）也通，但**全代码无计分写入点**，`page_controller.viewContext()` 也不读该列——真实用户恒 0 / L1，是一个"看得到但永远没值"的占位缺口。ADR-013 明确"不臆造 P0 计分语义"，因此先由用户拍板规则再实现。
+- 计分规则（用户确认）：
+  | 动作 | karma |
+  | --- | --- |
+  | 发主题 | +2 |
+  | 发回复 | +1 |
+  | 被 upvote | +1 / 票 |
+  | 被 downvote | 不扣作者 |
+  | 改票 / 撤票 | 按 upvote 状态差精确同步 |
+  | 删除 / 隐藏内容 | 不回退 |
+  | 给自己投票 | 不给 karma（防自刷声望） |
+  | 等级 | 仅显示（L2=10 / L3=50 / L4=200），**绝不做权限谓词**（ADR-014） |
+- 决策：
+  1. `WriteTx` 增 `AdjustKarma(ctx, userID, delta)`；SQLite 实现用原子 `UPDATE users SET karma=karma+?`（`repo_karma.go`），不读后写，避免并发丢更新。
+  2. 写用例挂接：`CreateThread` 插入后同事务 +2；`CreatePost` 同事务 +1；`applyVote` 在 `delta≠0` 分支按 `voteKarma(to)-voteKarma(current)` 给**目标作者**加减（只认 Up，被踩不扣；用 `ThreadOwner/PostOwner` 在事务快照内取作者）。
+  3. 显示侧新增独立端口 `appuser.KarmaReader`，`sqlite.UserStatusReader` 顺带实现；`pageController.viewContext()` 用**可选接口断言**读取，未实现的 fake 自动回落 karma=0/L1——不扩 `StatusReader`，避免 6 处调用方与所有测试 fake 被迫实现无关方法。
+  4. 无新迁移（列已存在，DEFAULT 0，存量行无需回填）。
+- 理由：karma 是"用户声望"这一长期事实（设计稿 §1.3 原则二），必须落 SQLite 且与业务写同事务提交/回滚；与 `threads.score`（主题分数）正交，分别由 `AdjustKarma` / `AdjustScore` 维护。被踩不扣作者是防恶意刷踩的刻意选择；自投票不给分是防自刷声望。
+- 代价 / 边界：karma 只驱动显示，任何权限判断不得读它（重申 ADR-014）；`/edit` 不额外加分；删/隐藏内容不回退 karma（简单、不制造负状态）；改票按 upvote 状态差而非 `threads.score` 的 delta——两者语义不同，不可复用。
+- 验证：`karma_test.go` 5 个专项（发帖 +2/+1、up/down/改票/撤票精确同步、被踩不扣、自投票不给、规则常量锁定）+ `karma_display_test.go` 2 个（DB→viewContext→L2 派生、访客恒 0）；全量 `go build/vet/test` 全绿，0 FAIL；格式门禁零输出。测试 907 → 914。
+- 关联：`ADR-013`（不臆造计分语义——本条由用户拍板）、`ADR-014`（等级仅显示）、`ADR-031`（投票幂等/插件只感知首次）、`P3-PLAN.md §3`。
+
+## ADR-058 CI 加竞态检测 job 与 -race 因果澄清
+
+- 状态：已采纳，v0.5.0 / P3-M3 落地。
+- 背景：项目是多连接 SSH 服务，presence 注册表、写队列、outbox、插件事件、`atomic.Pointer` 时区均涉及并发。现有 19 个并发测试只验证功能正确性，不检测数据竞争。2026-11-20 前一轮口头说"本机无 gcc，-race 不可用"，并引用 `PHASE1-PLAN.md:75`"纯 Go（无 CGO，故 -race 不可用）"——**该因果不成立**，需澄清。
+- 事实澄清：`go.mod` 仅 `modernc.org/sqlite`（纯 Go）与 `golang.org/x/crypto`，无 CGO 依赖。Go 官方要求 `-race` 需 `CGO_ENABLED=1` + C 编译器（Windows 还需 mingw-w64）。纯 Go 依赖**恰恰意味着** Linux 上开 CGO 无额外安装成本；本机跑不了的真因是 Windows + 无 gcc（`DECISIONS.md:99` 的 `cgo: C compiler "gcc" not found`），不是"纯 Go 所以不行"。`PHASE1-PLAN.md` 原文不回改（历史快照），本条为更正。
+- 决策：
+  1. `.github/workflows/ci.yml` **追加独立 `race` job**（不改现有 `check`）：`CGO_ENABLED=1`、`GORACE=halt_on_error=1`、`go test -race -count=1 -timeout 15m ./...`。
+  2. 初期**不设为 required check**，观察 2–3 轮稳定后再提为门禁。
+  3. 预计首次编译 4–8 分钟、缓存命中 2–5 分钟；内存开销 5–10×，4C/16GB runner 足够。
+  4. 若暴露 data race，优先排查 19 个并发测试覆盖路径；若时间敏感断言在 race 下超时（`write_test.go:136` 的 60ms、`server_test.go:151` 的 3s、healthz 2s Ping），**调测试容差而非跳过 race**。
+- 理由：竞态 bug 平时不报错、偶发崩溃或数据错乱，常规测试抓不到；CI 是唯一具备 C 编译器的可用环境。独立 job 让常规门禁时长不受影响，渐进式提为 required 避免一次性引入不稳定。
+- 代价 / 边界：CI 多一个 job 的 runner 分钟消耗；本机（Windows）仍无法本地复现 race 结果，只能靠 CI。race 不是压测——它查并发正确性，不衡量容量（见 ADR-059 与 P3-PLAN §5 的诚实口径）。
+- 验证：YAML 结构与现有 `check` job 同构、人工核对缩进；本机实测 `go test -race` 报 `requires cgo`（符合预期，非缺陷）；全量 `go build/vet/test` 仍全绿、0 FAIL。race job 本身待 push 后在 CI 验证。
+- 关联：`ADR-016`（presence 内存状态与并发）、`ADR-010`（单写队列）、`PHASE1-PLAN.md:75`（被本条更正的因果）、`P3-PLAN.md §4`。
+
+## ADR-059 最小压测集合：核心场景基线而非容量验收
+
+- 状态：已采纳，v0.5.0 / P3-M4 落地。
+- 背景：设计稿 §6 要求逐步压测 100/300/500/1000 连接并验证 1 Mbps 约束，但用户 2026-11-20 明确"压测用最小集合、对核心场景稳定测试即可"。仓库此前 benchmark 为 0；`/healthz` 与 `Writer.Depth/Cap/Commits`、`presence.Registry` 已暴露观测钩子（`write.go:160-165`），但无可执行压测。
+- 决策：
+  1. 新增 4 个同包 `*_bench_test.go`（复用私有 test helper，零新增导出 API）：场景1 SSH 连接建立/拆除（8/50 并发）、场景2 浏览列表读多（16/64）、场景3 写队列背压（`WithQueueSize(8)`，8/32 并发，`ErrQueueFull` 视为预期背压）、场景4 并发读+渲染+presence（100 会话）。
+  2. 用 Go `testing.B`，`-benchtime=3s -count=3` 取中位数；`scripts/bench.sh` 封装参数。**不进 CI 默认 job**（共享 runner 延迟噪声大、避免时长失控），用 `workflow_dispatch` 或发版前本地跑。
+  3. 判定从绝对阈值过渡到"相对基线劣化 ≤20%"，避免机器噪声误判；首次实测数据转为回归基线。
+  4. **诚实口径**：本集合给的是核心闭环在回环环境下的功能正确性、并发安全性与相对延迟基线，**不构成** 1 Mbps / 1000 在线验收证据。1000 在线与 1 Mbps 仍是设计目标（设计稿 §1.2/§6、MVP-DELIVERY A3），需后续在目标机器、真实网络、提升后的 `MaxConns` 配置下分档实测。未验证项：1 Mbps 真实上下行、扇出 6/60 MB/s、公网 RTT/丢包、小时级长稳、压测下 kill-9/WAL 恢复。
+- 理由：用户已真实部署并开放 SSH 体验，最缺的是"核心闭环没有性能回归"的保证，不是 1000 在线的容量证书。最小集合能用现成钩子快速落地（总时长 1–2 分钟），且把不确定的容量口径诚实留在目标侧，不制造虚假验收。
+- 代价 / 边界：内存 fake 下的场景2/4 不覆盖真实 SQLite 读延迟与网络传输；场景3 的背压率接近 100% 是小队列刻意设计（验证快速失败而非吞吐）；SSH 场景上限 50 < 默认 `MaxConns=100`，不触及满员拒绝路径。
+- 验证：`go test -run '^$' -bench ...` 四场景实跑通过（本地 200ms benchtime 冒烟：SSH ~3ms/握手、ListThreads ~220ns/op、写队列背压 ~99.8% 符合预期、渲染 ~1.1µs/op）；全量 `go build/vet/test` 全绿、0 FAIL；格式门禁零输出。
+- 关联：`ADR-058`（-race 与压测是不同维度）、设计稿 §1.2/§6、`P3-PLAN.md §5`。
+
+## ADR-060 自动备份调度模板与恢复流程补齐 FTS 步骤
+
+- 状态：已采纳，v0.5.0 / P3-M5 落地。
+- 背景：`sqlite.Backup/VerifyBackup/Restore`（`backup.go:62/99/157`）与 `scripts/backup.sh`/`restore.sh` 早已可用，演练记录完整（OPS §5），但仓库**无任何 cron/systemd/timer 文件**——OPS §9.5 明确"首次部署默认不建立每日 cron/timer，由用户拍板"。另发现 OPS §4 恢复流程六步**漏了 `fts-rebuild`**，而 §3 与 ADR-033 要求恢复后必须重建 FTS 索引，否则 `/search` 返回空。
+- 决策：
+  1. 新增 `deploy/motd-backup.service`（oneshot，`EnvironmentFile=` 注入 `MOTD_DB_PATH/MOTD_BACKUP_DIR/MOTDCTL_BIN`）与 `deploy/motd-backup.timer`（`OnCalendar=*-*-* 03:00:00`、`Persistent=true`）。仅为**模板**，需部署方复制到 `/etc/systemd/system/` 并按实际路径替换 `<ENV_FILE>` 后启用——不擅自替用户开启调度。
+  2. 增强 `scripts/backup.sh`：解析 `motdctl backup` 输出的 `backup=<path>`，紧接着执行 `motdctl verify <backup-file>`；任一失败非零退出，便于 cron/timer 的 `systemctl --failed` 与告警发现。备份的成功标准是"能恢复"（OPS §2），至少要能 verify。
+  3. OPS §4 恢复流程在"恢复"与"启动"之间插入**必须**的 `motdctl fts-rebuild --db data/motd.db`（输出 `indexed=N`），并在抽查步补做一次 `/search` 确认索引恢复；演练记录引用从 §4 改为 §5（原写作 §4 自身，是笔误）。
+  4. 保留策略**不自动删除**（OPS §6），需人工清理；RPO≤24h / RTO≤15min 口径不变，是否收紧到小时级仍由用户拍板。
+- 理由：备份工具链完整但缺调度与验收闭环——"生成了文件"不等于"备份成功"。timer 模板让部署方有据可依，脚本内 verify 让失败可见；补 fts-rebuild 消除"恢复了但搜索空"的隐性故障。
+- 代价 / 边界：`deploy/` 下是模板不是生效配置，`<ENV_FILE>` 为占位符需替换；VACUUM INTO 整库重写的 IO 峰值与 `ErrQueueFull` 风险仍在（OPS §7，切换 Online Backup API 条件未满足）；异地备份未纳入本版本。
+- 验证：`bash -n scripts/backup.sh` 语法通过；用隔离数据源实跑 `backup.sh`，先输出 `backup=`/`sha256=`/`size=`，随后 verify 输出 `integrity=ok` 与五张表计数，退出码 0，证明验收闭环成立。全量 `go build/vet/test` 全绿、0 FAIL；格式门禁零输出。
+- 关联：`ADR-033`（fts-rebuild 必要性）、`ADR-010`（写队列边界）、OPS §2/§4/§6/§9.5、`P3-PLAN.md §6`。

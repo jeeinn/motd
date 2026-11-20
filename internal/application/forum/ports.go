@@ -234,6 +234,10 @@ type WriteTx interface {
 	// 根本不存在的目标返回 ErrNotFound。与判权一起落在同一事务快照内。
 	UnhideThread(ctx context.Context, threadID int64) error
 	UnhidePost(ctx context.Context, postID int64) error
+	// AdjustKarma 调整用户 karma（v0.5.0 / ADR-057）。与业务写在同一事务内提交，
+	// delta 为带符号增量。等级只由 karma 派生用于显示，绝不作为权限谓词（ADR-014）。
+	// 计分规则见 P3-PLAN §3.2：主题+2 / 回复+1 / 被赞+1 / 被踩不扣 / 改票按差 / 删内容不回退。
+	AdjustKarma(ctx context.Context, userID int64, delta int64) error
 	// AppendOutbox 在业务写事务内追加一条领域事件（R12）。
 	// 必须与业务写同提交、同回滚；event_id 唯一，重复事件静默去重。
 	// 投递绝不在这里做——handler 只能在事务提交后由 Outbox 调度器调用。

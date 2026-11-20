@@ -50,6 +50,12 @@ type StatusReader interface {
 	Status(ctx context.Context, userID int64) (domainuser.Status, error)
 }
 
+// KarmaReader 读取用户 karma（v0.5.0 / ADR-057）。独立端口而非扩 StatusReader，
+// 避免所有只关心状态的调用方与测试 fake 被迫实现无关方法。karma 只用于显示等级。
+type KarmaReader interface {
+	Karma(ctx context.Context, userID int64) (int64, error)
+}
+
 // AchievementService 校验并执行成就申请。
 type AchievementService struct {
 	store AchievementStore

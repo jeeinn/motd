@@ -145,7 +145,7 @@ func emptyScreen() viewmodel.Screen {
 
 func (p *pageController) viewContext(sess pageSession) forum.ViewContext {
 	principal := sess.Principal()
-	return forum.ViewContext{
+	vc := forum.ViewContext{
 		Online:    p.online(),
 		Active:    p.active(),
 		Guest:     !principal.IsUser(),
@@ -153,6 +153,17 @@ func (p *pageController) viewContext(sess pageSession) forum.ViewContext {
 		Context:   p.nodeSlug,
 		Notice:    p.notice,
 	}
+	// v0.5.0 / ADR-057：karma 由 DB 现值派生显示等级。用可选接口断言而非扩
+	// StatusReader，避免所有只关心状态的调用方与测试 fake 被迫实现无关方法。
+	// 未实现的 reader（如测试 fake）保持 karma=0，等级 L1（既有行为）。
+	if principal.IsUser() {
+		if kr, ok := p.users.(appuser.KarmaReader); ok {
+			if karma, err := kr.Karma(context.Background(), principal.UserID); err == nil {
+				vc.Karma = karma
+			}
+		}
+	}
+	return vc
 }
 
 func (p *pageController) online() int {

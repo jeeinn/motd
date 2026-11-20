@@ -40,3 +40,25 @@ jobs:
 
       - name: Test
         run: go test -count=1 ./...
+
+  # v0.5.0 / P3-M3：竞态检测独立于常规门禁。
+  # 本机 Windows 无 gcc 跑不了 -race；Linux runner 预装 gcc，纯 Go 依赖开 CGO 无额外成本。
+  # 初期不设为 required check，观察 2-3 轮稳定后再提为门禁（见 ADR-058）。
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test with race detector
+        env:
+          CGO_ENABLED: "1"
+          GORACE: "halt_on_error=1"
+        run: go test -race -count=1 -timeout 15m ./...

@@ -19,6 +19,15 @@ func NewUserStatusReader(pools *Pools) *UserStatusReader {
 	return &UserStatusReader{pools: pools}
 }
 
+// Karma 读取用户声望值（v0.5.0 / ADR-057），用于状态栏派生显示等级。
+func (r *UserStatusReader) Karma(ctx context.Context, userID int64) (int64, error) {
+	var karma int64
+	if err := r.pools.QueryRowContext(ctx, `SELECT karma FROM users WHERE id = ?`, userID).Scan(&karma); err != nil {
+		return 0, err
+	}
+	return karma, nil
+}
+
 func (r *UserStatusReader) Status(ctx context.Context, userID int64) (domainuser.Status, error) {
 	var raw string
 	err := r.pools.QueryRowContext(ctx, `SELECT status FROM users WHERE id = ?`, userID).Scan(&raw)

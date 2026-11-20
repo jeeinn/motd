@@ -22,7 +22,7 @@ type forumRuntime struct {
 	Service  *forum.Service
 	Bus      *events.DomainBus
 	Outbox   *forum.Outbox
-	Store    *appuser.MemoryAchievementStore
+	Store    *sqlite.AchievementStore // v0.5.0：成就持久化；内存占位实现已移除
 	Presence *presence.Registry
 	Plugins  []registry.Plugin
 }
@@ -38,7 +38,8 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer,
 ) (*forumRuntime, error) {
 	repos := sqlite.NewForumRepos(pools, writer)
 
-	store := appuser.NewMemoryAchievementStore() // P0 占位：不写 SQLite
+	// v0.5.0：成就落 SQLite，进程重启不丢（ADR-056）。写经唯一写队列，读走读池。
+	store := sqlite.NewAchievementStore(pools, writer)
 	gate := appuser.NewAchievementService(store, sqlite.NewUserStatusReader(pools), time.Now)
 	pluginCtx := registry.Context{
 		Read:         forum.NewPublicQuery(repos),

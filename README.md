@@ -7,7 +7,7 @@
 
 SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览、发帖、回复；所有交互都在终端内完成，无需浏览器。
 
-- 版本：`v0.4.3`（2026-11-20）
+- 版本：`v0.5.0`（2026-11-20）
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
@@ -52,7 +52,7 @@ ssh -p 2222 guest@jeeinn.com
 安装（Go 1.26.3+）：
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.4.3   # 生成 server 二进制
+go install github.com/jeeinn/motd/cmd/server@v0.5.0   # 生成 server 二进制
 ```
 
 或从源码构建并启动（Windows 下把 `-o motd` 改为 `-o motd.exe`）：

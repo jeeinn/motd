@@ -1,0 +1,15 @@
+# v0.5.0 / P3-M5：每日备份定时器模板。
+# 部署：与 motd-backup.service 一起复制到 /etc/systemd/system/（0644 root:root），
+# systemctl daemon-reload && systemctl enable --now motd-backup.timer。
+# 默认每日 03:00（OPS §2 初值）；保留策略不自动删除，见 OPS §6。
+[Unit]
+Description=motd daily backup timer
+Documentation=https://github.com/jeeinn/motd
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=motd-backup.service
+
+[Install]
+WantedBy=timers.target

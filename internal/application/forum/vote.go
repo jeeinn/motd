@@ -99,6 +99,21 @@ func (s *Service) applyVote(ctx context.Context, actor Actor, targetType vote.Ta
 		if err := tx.AdjustScore(ctx, threadID, delta); err != nil {
 			return err
 		}
+		// v0.5.0 / ADR-057：karma 只认 upvote，被踩不扣作者。
+		// 按 upvote 状态差计算，改票（up↔down）与撤票（up→0）都精确同步。
+		karmaDelta := voteKarma(to) - voteKarma(current)
+		if karmaDelta != 0 {
+			owner, err := s.voteOwner(ctx, tx, targetType, targetID)
+			if err != nil {
+				return err
+			}
+			// 给自己投票不给 karma（与 threads.score 允许自投票不同，避免自刷声望）。
+			if owner != actor.UserID {
+				if err := tx.AdjustKarma(ctx, owner, karmaDelta*karmaPerUpvote); err != nil {
+					return err
+				}
+			}
+		}
 		ev = event.DomainEvent{
 			ID:         fmt.Sprintf("vote:%d:%s:%d", actor.UserID, targetType, targetID),
 			Type:       event.EventVoteCast,
@@ -122,6 +137,26 @@ func (s *Service) applyVote(ctx context.Context, actor Actor, targetType vote.Ta
 		s.afterCommit(ctx, ev)
 	}
 	return res, nil
+}
+
+// voteKarma 把投票值映射为"是否赞"：只有 upvote 给作者 karma，downvote/撤票均为 0。
+func voteKarma(v vote.Value) int64 {
+	if v > 0 {
+		return 1
+	}
+	return 0
+}
+
+// voteOwner 取投票目标的作者 ID，用于 karma 记到目标作者而非投票者。
+func (s *Service) voteOwner(ctx context.Context, tx WriteTx, targetType vote.TargetType, targetID int64) (int64, error) {
+	switch targetType {
+	case vote.TargetThread:
+		return tx.ThreadOwner(ctx, targetID)
+	case vote.TargetPost:
+		return tx.PostOwner(ctx, targetID)
+	default:
+		return 0, ErrInvalidVoteTarget
+	}
 }
 
 // voteThreadID 解析投票目标对应的主题：thread 目标就是自己，post 目标取其所属主题。

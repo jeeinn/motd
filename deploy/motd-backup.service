@@ -1,0 +1,18 @@
+# v0.5.0 / P3-M5：每日备份单元模板。
+# 部署：复制到 /etc/systemd/system/motd-backup.service（0644 root:root），
+# 按实际路径替换 <ENV_FILE> 后 systemctl daemon-reload。
+# 注意：scripts/backup.sh 只单独读 MOTD_DB_PATH / MOTD_BACKUP_DIR / MOTDCTL_BIN 三项，
+# 不加载整个 .env；这里用 EnvironmentFile= 注入（OPS §2/§9.5）。
+[Unit]
+Description=motd daily SQLite backup (VACUUM INTO + sha256)
+Documentation=https://github.com/jeeinn/motd
+
+[Service]
+Type=oneshot
+User=motd
+Group=motd
+WorkingDirectory=/opt/motd
+EnvironmentFile=<ENV_FILE>
+# backup.sh 在生成备份后立即 motdctl verify；任一失败即非零退出，
+# 单元记为失败，便于 systemctl --failed 与告警发现（OPS §2 备份验收口径）。
+ExecStart=/opt/motd/scripts/backup.sh
