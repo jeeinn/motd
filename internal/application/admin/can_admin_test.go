@@ -37,7 +37,7 @@ func TestCanAdmin(t *testing.T) {
 func TestCanAdminDoesNotMutateWhitelist(t *testing.T) {
 	wl := map[string]struct{}{testAdminFP: {}}
 	_ = CanAdmin(testAdminFP, wl)
-	_ = CanAdmin("SHA256:" + strings.Repeat("C", 43), wl)
+	_ = CanAdmin("SHA256:"+strings.Repeat("C", 43), wl)
 	if len(wl) != 1 {
 		t.Fatalf("谓词不得改写白名单，实际 %v", wl)
 	}

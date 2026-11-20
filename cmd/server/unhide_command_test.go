@@ -17,7 +17,7 @@ import (
 func TestUnhideCommandRestoresReplyByID(t *testing.T) {
 	ctx, h, pools, writer := setupHideRuntime(t)
 	tid, firstID, replyID := setupDeleteThread(t, ctx, writer, 1) // 作者 alice(1)
-	sess := hideSession(2)                                       // bob(2) 指纹在白名单
+	sess := hideSession(2)                                        // bob(2) 指纹在白名单
 	pc := h.newPageController(sess)
 	if err := pc.showDetail(ctx, sess, tid); err != nil {
 		t.Fatal(err)

@@ -81,7 +81,7 @@ func runHideCommand(t *testing.T, ctx context.Context, h *inputHandler, pc *page
 func TestHideCommandHidesCurrentThread(t *testing.T) {
 	ctx, h, pools, writer := setupHideRuntime(t)
 	tid, firstID, replyID := setupDeleteThread(t, ctx, writer, 1) // 作者 alice(1)
-	sess := hideSession(2)                               // bob(2) 指纹在白名单
+	sess := hideSession(2)                                        // bob(2) 指纹在白名单
 	pc := h.newPageController(sess)
 	if err := pc.showDetail(ctx, sess, tid); err != nil {
 		t.Fatal(err)
@@ -108,8 +108,8 @@ func TestHideCommandHidesCurrentThread(t *testing.T) {
 func TestHideCommandHidesReplyByID(t *testing.T) {
 	ctx, h, pools, writer := setupHideRuntime(t)
 	tid, firstID, replyID := setupDeleteThread(t, ctx, writer, 1) // 作者 alice(1)
-	spamID := insertReply(t, ctx, writer, tid, 1)                // 另一条 alice 的回复
-	sess := hideSession(2)                                // bob(2) 在白名单
+	spamID := insertReply(t, ctx, writer, tid, 1)                 // 另一条 alice 的回复
+	sess := hideSession(2)                                        // bob(2) 在白名单
 	pc := h.newPageController(sess)
 	if err := pc.showDetail(ctx, sess, tid); err != nil {
 		t.Fatal(err)

@@ -29,9 +29,9 @@ const (
 	unhideThreadMessage     = "已恢复主题"
 	unhidePostMessage       = "已恢复回复"
 
-	unthreadBadIDMessage   = "主题 ID 必须是正整数"
-	unthreadThreadMessage  = "已恢复主题"
-	unthreadNeedIDMessage  = "请提供要恢复的主题 ID"
+	unthreadBadIDMessage  = "主题 ID 必须是正整数"
+	unthreadThreadMessage = "已恢复主题"
+	unthreadNeedIDMessage = "请提供要恢复的主题 ID"
 )
 
 func (p *pageController) hide(ctx context.Context, sess pageSession, args []string) error {

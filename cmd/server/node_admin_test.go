@@ -82,14 +82,14 @@ func (rt *forumRuntime) newPageControllerForTest() *pageController {
 
 func TestNodeCommandArgBoundaries(t *testing.T) {
 	cases := map[string]error{
-		"/node":                      command.ErrArgCount,
-		"/node list extra":           command.ErrArgCount,
-		"/node create /dev/x":        command.ErrArgCount,
+		"/node":                       command.ErrArgCount,
+		"/node list extra":            command.ErrArgCount,
+		"/node create /dev/x":         command.ErrArgCount,
 		"/node create /dev/x n extra": command.ErrArgCount,
-		"/node rename /dev/x":        command.ErrArgCount,
-		"/node archive":              command.ErrArgCount,
-		"/node archive /dev/x extra": command.ErrArgCount,
-		"/node unknown":              command.ErrUnknownCommand,
+		"/node rename /dev/x":         command.ErrArgCount,
+		"/node archive":               command.ErrArgCount,
+		"/node archive /dev/x extra":  command.ErrArgCount,
+		"/node unknown":               command.ErrUnknownCommand,
 	}
 	for line, want := range cases {
 		_, err := command.Default().Parse(line)

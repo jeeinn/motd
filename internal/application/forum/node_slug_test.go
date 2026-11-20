@@ -16,17 +16,17 @@ func TestValidateSlugAcceptsADR048Shapes(t *testing.T) {
 
 func TestValidateSlugRejectsInvalid(t *testing.T) {
 	cases := map[string]string{
-		"":                       "空串",
-		"dev/ai":                 "缺前导斜杠",
-		"/dev/ai/":               "结尾斜杠",
-		"/dev//ai":               "连续斜杠",
-		"/dev/ai/x":              "三段",
-		"/Dev/ai":                "大写",
-		"/dev-ai":                "连字符",
-		"/dev_ai":                "下划线",
-		"/dev/ai中文":             "非 ASCII",
-		"/dev/\x1b[2J":           "控制字符",
-		"/" + strings.Repeat("a", 33): "段超长",
+		"":                                   "空串",
+		"dev/ai":                             "缺前导斜杠",
+		"/dev/ai/":                           "结尾斜杠",
+		"/dev//ai":                           "连续斜杠",
+		"/dev/ai/x":                          "三段",
+		"/Dev/ai":                            "大写",
+		"/dev-ai":                            "连字符",
+		"/dev_ai":                            "下划线",
+		"/dev/ai中文":                          "非 ASCII",
+		"/dev/\x1b[2J":                       "控制字符",
+		"/" + strings.Repeat("a", 33):        "段超长",
 		"/" + strings.Repeat("a", 63) + "/b": "整体超长",
 	}
 	for slug, name := range cases {

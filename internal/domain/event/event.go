@@ -34,11 +34,11 @@ type DomainEvent struct {
 	OccurredAt time.Time
 	// ActorID 对 EventAdminAction 可以为 0（白名单内的访客管理员）：
 	// 该类事件的主体是下面的 AdminFingerprint，Validate 对此有专门分支。
-	ActorID    int64
-	NodeID     int64
-	ThreadID   int64
-	PostID     int64
-	FirstPost  bool
+	ActorID   int64
+	NodeID    int64
+	ThreadID  int64
+	PostID    int64
+	FirstPost bool
 
 	// 以下四个字段只属于 EventAdminAction，其它事件保持零值。
 	// 指纹来自已认证会话（Principal.KeyFingerprint），不是命令参数。
