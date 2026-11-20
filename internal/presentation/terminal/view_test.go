@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -159,6 +160,174 @@ func TestRenderScreenDetailShowsBodyAndReplies(t *testing.T) {
 }
 
 // v0.2.1：标题与正文之间必须有固定虚线，且不改动用户正文的任何一个字节。
+// lineContaining 返回 stripSGR 后包含 sub 的第一行；找不到返回空串。
+// 测试用它锁定「某一行」而不是整屏，避免状态栏/页脚里的数字干扰断言。
+func lineContaining(out, sub string) string {
+	for _, line := range strings.Split(stripSGR(out), "\n") {
+		if strings.Contains(line, sub) {
+			return line
+		}
+	}
+	return ""
+}
+
+// rowCommandID 从渲染行里抠出 " id=<n>" 的 n，模拟用户复制该数字当命令参数。
+func rowCommandID(line string) (int64, bool) {
+	i := strings.Index(line, " id=")
+	if i < 0 {
+		return 0, false
+	}
+	rest := line[i+len(" id="):]
+	if j := strings.IndexByte(rest, ' '); j >= 0 {
+		rest = rest[:j]
+	}
+	id, err := strconv.ParseInt(rest, 10, 64)
+	return id, err == nil
+}
+
+// v0.3.2 格式契约（golden）：CreatedAt=0 去掉时间后输出完全确定。
+// 前缀形状、顺序或分隔符任一改动都会让本断言失败，防止后续改动悄悄破坏
+// 「帖子 ID 与作者 #ID、赞数 [N] 三者形态不同」的约定。
+func TestMetaFixedRowIDFormatContract(t *testing.T) {
+	row := viewmodel.Row{Index: 1, ID: 123, Meta: viewmodel.RowMeta{AuthorID: 1}}
+	cases := []struct {
+		kind viewmodel.ScreenKind
+		want string
+	}{
+		{viewmodel.ScreenThreads, " id=123 #1"},
+		{viewmodel.ScreenThreadDetail, " id=123 #1"},
+		{viewmodel.ScreenSearchResults, " id=123 #1"},
+		{viewmodel.ScreenNodes, " #1"}, // node ID 不是 /delete 目标，刻意不展示
+	}
+	for _, c := range cases {
+		if got := metaFixed(row, c.kind); got != c.want {
+			t.Errorf("kind=%d: metaFixed=%q, want %q", c.kind, got, c.want)
+		}
+	}
+}
+
+// 无 ID / 负 ID 的系统行不显示 id=。
+func TestMetaFixedOmitsNonPositiveID(t *testing.T) {
+	for _, id := range []int64{0, -1} {
+		row := viewmodel.Row{ID: id, Meta: viewmodel.RowMeta{AuthorID: 2}}
+		for _, kind := range []viewmodel.ScreenKind{
+			viewmodel.ScreenThreads, viewmodel.ScreenThreadDetail, viewmodel.ScreenSearchResults,
+		} {
+			got := metaFixed(row, kind)
+			if strings.Contains(got, "id=") {
+				t.Errorf("kind=%d ID=%d 不应展示 id=，实际 %q", kind, id, got)
+			}
+		}
+	}
+}
+
+// 主题列表每行都能看到主题 ID，且能直接当 /open 的参数；与作者 #ID、赞数 [N] 不混淆。
+func TestRenderScreenThreadsShowsThreadID(t *testing.T) {
+	s := baseScreen(viewmodel.ScreenThreads)
+	s.Rows = []viewmodel.Row{
+		{Index: 1, ID: 101, Score: 0, Title: "唯一标题甲", Meta: viewmodel.RowMeta{AuthorID: 7}},
+		{Index: 2, ID: 202, Score: 3, Title: "唯一标题乙", Meta: viewmodel.RowMeta{AuthorID: 7}},
+	}
+	s.Selection.FocusedIndex = 1
+
+	out, err := RenderScreen(s, 80)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	assertOnlySGR(t, out)
+	for _, want := range []string{"id=101", "id=202"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("主题列表缺少 %q: %q", want, stripSGR(out))
+		}
+	}
+	line := lineContaining(out, "唯一标题甲")
+	if !strings.Contains(line, "#7") {
+		t.Errorf("作者 ID 丢失: %q", line)
+	}
+	if strings.Contains(line, "#101") {
+		t.Errorf("主题 ID 被误写成作者 ID: %q", line)
+	}
+	if id, ok := rowCommandID(line); !ok || id != 101 {
+		t.Errorf("行内 ID 不是可直接使用的十进制参数: %q", line)
+	}
+	// 赞数仍用 [N]，没被新格式顶掉。
+	if !strings.Contains(lineContaining(out, "唯一标题乙"), "[3]") {
+		t.Error("赞数 [N] 格式被 ID 显示破坏")
+	}
+}
+
+// 详情页每条回复显示回复 ID，可直接当 /delete <id> 的参数；作者与回复同为 42 时仍可区分。
+func TestRenderScreenDetailShowsReplyID(t *testing.T) {
+	s := baseScreen(viewmodel.ScreenThreadDetail)
+	s.Detail = viewmodel.Detail{ID: 3, Title: "主题锚点", Body: "正文锚点"}
+	s.Rows = []viewmodel.Row{
+		{Index: 1, ID: 42, Body: "回复锚点甲", Meta: viewmodel.RowMeta{AuthorID: 42}},
+		{Index: 2, ID: 98765, Body: "回复锚点乙", Meta: viewmodel.RowMeta{AuthorID: 8}},
+	}
+	s.Selection.FocusedIndex = 1
+
+	out, err := RenderScreen(s, 80)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	assertOnlySGR(t, out)
+	line := lineContaining(out, "回复锚点甲")
+	if strings.Count(line, "id=42") != 1 || strings.Count(line, "#42") != 1 {
+		t.Fatalf("作者 #42 与回复 id=42 必须各出现一次且形态不同: %q", line)
+	}
+	if id, ok := rowCommandID(line); !ok || id != 42 {
+		t.Errorf("回复 ID 不是可直接使用的 /delete 参数: %q", line)
+	}
+	if id, ok := rowCommandID(lineContaining(out, "回复锚点乙")); !ok || id != 98765 {
+		t.Errorf("大数值回复 ID 解析失败: %q", stripSGR(out))
+	}
+}
+
+// 检索结果列表同样显示主题 ID。
+func TestRenderScreenSearchResultsShowsThreadID(t *testing.T) {
+	s := baseScreen(viewmodel.ScreenSearchResults)
+	s.Rows = []viewmodel.Row{{Index: 1, ID: 555, Body: "检索锚点"}}
+	s.Selection.FocusedIndex = 1
+
+	out, err := RenderScreen(s, 80)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	assertOnlySGR(t, out)
+	if id, ok := rowCommandID(lineContaining(out, "检索锚点")); !ok || id != 555 {
+		t.Errorf("检索结果未显示可用的主题 ID: %q", stripSGR(out))
+	}
+}
+
+// 负向：ID 是本地数值，只经 RenderSystem；带敌意标题时不得因新增 ID 而产生
+// 任何新转义/控制字符（ADR-014 三层守卫 / ADR-019 终端白名单）。
+func TestRowIDIntroducesNoControlCharacters(t *testing.T) {
+	hostile := "标题\x1b[2J\x1b]52;c;YWJj\x07 \r id=666"
+	row := viewmodel.Row{Index: 1, ID: 777, Score: 1, Title: hostile, Meta: viewmodel.RowMeta{AuthorID: 9}}
+	s := baseScreen(viewmodel.ScreenThreads)
+	s.Rows = []viewmodel.Row{row}
+	s.Selection.FocusedIndex = 1
+
+	out, err := RenderScreen(s, 80)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	assertOnlySGR(t, out)
+	for _, bad := range []string{"\x1b[2J", "\x1b]52", "\r", "\x07"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("泄露控制字符 %q: %q", bad, out)
+		}
+	}
+	// 系统 ID 只由本地数值拼成、形状固定且经 RenderSystem；用户文本里的
+	// "id=666" 是惰性可见文本，不会被当成系统 ID（真正的 ID 是元信息里的 777）。
+	if got, want := metaFixed(row, viewmodel.ScreenThreads), " id=777 #9"; got != want {
+		t.Errorf("metaFixed=%q, want %q", got, want)
+	}
+	if !strings.Contains(stripSGR(out), "id=777 #9") {
+		t.Errorf("系统 ID 应原样渲染进元信息: %q", stripSGR(out))
+	}
+}
+
 func TestRenderScreenDetailHasSeparatorBetweenTitleAndBody(t *testing.T) {
 	s := baseScreen(viewmodel.ScreenThreadDetail)
 	s.Detail = viewmodel.Detail{ID: 3, Title: "标题锚点", Body: "正文锚点"}

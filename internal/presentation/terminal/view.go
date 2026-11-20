@@ -283,8 +283,18 @@ func emptyHint(k viewmodel.ScreenKind) string {
 }
 
 // metaFixed 只拼本地数值与固定字符，绝不拼接任何外部文本。
+//
+// v0.3.2：加入行实体 ID，格式固定为 " id=<十进制>"。选这个形状是为了与
+// 既有两类编号彻底区分——作者用 "#<ID>"（如 #1），主题列表赞数用 "[<分数>]"
+// （如 [0]）；"id=" 既不带 # 也不带方括号，用户可直接把等号后的数字当作
+// /open / /delete 的参数，不会与作者 ID 或分数混淆。
+// ID 来自 viewmodel.Row.ID 的本地 int64，经 sys() 走 RenderSystem，
+// 不进 RenderUser、不触碰任何外部数据路径，也不引入新控制序列（ADR-014/019）。
 func metaFixed(r viewmodel.Row, k viewmodel.ScreenKind) string {
 	var parts []string
+	if showRowID(k) && r.ID > 0 {
+		parts = append(parts, fmt.Sprintf(" id=%d", r.ID))
+	}
 	if r.Meta.AuthorID > 0 {
 		parts = append(parts, fmt.Sprintf(" #%d", r.Meta.AuthorID))
 	}
@@ -298,6 +308,22 @@ func metaFixed(r viewmodel.Row, k viewmodel.ScreenKind) string {
 		parts = append(parts, " ")
 	}
 	return strings.Join(parts, "")
+}
+
+// showRowID 报告该页面的 Row.ID 是否是用户可操作的帖子/回复 ID。
+//   - 主题列表：Row.ID = thread.ID，可用 /open <id> 打开；
+//   - 主题详情：Row.ID = post.ID，可用 /delete <id> 删该回复；
+//   - 检索结果：Row.ID = thread.ID，回车可直接打开。
+//
+// 版块列表的 Row.ID 是 node.ID，既不是 /delete 目标也不在本次诉求内，
+// 刻意不展示，避免用户拿它去试 /delete 而被拒绝。
+func showRowID(k viewmodel.ScreenKind) bool {
+	switch k {
+	case viewmodel.ScreenThreads, viewmodel.ScreenThreadDetail, viewmodel.ScreenSearchResults:
+		return true
+	default:
+		return false
+	}
 }
 
 // formatTime 按进程展示时区格式化 Unix 秒。格式串刻意保持 MM-DD HH:MM：
