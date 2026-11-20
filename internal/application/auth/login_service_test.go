@@ -203,6 +203,9 @@ type loginClient struct {
 	userErr   error
 	emailsErr error
 
+	// mu 保护计数器与 lastToken：并发登录测试（TestLoginConcurrent）中多个
+	// goroutine 同时在 GetUser 里写这些字段，需加锁才能通过 -race。
+	mu          sync.Mutex
 	userCalls   int
 	emailsCalls int
 	deviceCalls int
@@ -212,29 +215,37 @@ type loginClient struct {
 }
 
 func (c *loginClient) RequestDeviceCode(context.Context) (DeviceCode, error) {
+	c.mu.Lock()
 	c.deviceCalls++
+	c.mu.Unlock()
 	return DeviceCode{}, errors.New("P0-17 不应调用 RequestDeviceCode")
 }
 
 func (c *loginClient) PollAccessToken(context.Context, string) (AccessToken, error) {
+	c.mu.Lock()
 	c.pollCalls++
+	c.mu.Unlock()
 	return AccessToken{}, errors.New("P0-17 不应调用 PollAccessToken")
 }
 
 func (c *loginClient) GetUser(_ context.Context, token string) (GitHubUser, error) {
+	c.mu.Lock()
 	c.userCalls++
 	c.lastToken = token
 	if c.store.inWriteTxn() {
 		c.netInWrite = true
 	}
+	c.mu.Unlock()
 	return c.user, c.userErr
 }
 
 func (c *loginClient) GetEmails(_ context.Context, _ string) ([]GitHubEmail, error) {
+	c.mu.Lock()
 	c.emailsCalls++
 	if c.store.inWriteTxn() {
 		c.netInWrite = true
 	}
+	c.mu.Unlock()
 	return c.emails, c.emailsErr
 }
 

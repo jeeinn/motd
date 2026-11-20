@@ -92,9 +92,9 @@ func TestNoIdlePathWithoutInputOrHeartbeat(t *testing.T) {
 	if err := reg.Connect("s-no-idle", presence.KindSSH, 0); err != nil {
 		t.Fatal(err)
 	}
-	orig := sessionMaxLifetime
-	sessionMaxLifetime = 10 * time.Second // 远大于观察窗口，排除硬上限
-	t.Cleanup(func() { sessionMaxLifetime = orig })
+	orig := sessionMaxLifetime.Load()
+	sessionMaxLifetime.Store(int64(10 * time.Second)) // 远大于观察窗口，排除硬上限
+	t.Cleanup(func() { sessionMaxLifetime.Store(orig) })
 
 	ch := newRecordingChannel()
 	s := newLifetimeSession(t, reg, "s-no-idle", ch)
@@ -115,9 +115,9 @@ func TestMaxLifetimeClosesDespiteHeartbeat(t *testing.T) {
 	ch := newRecordingChannel()
 
 	// 临时缩短硬上限，测试后恢复（生产值 6h 不可测）。
-	orig := sessionMaxLifetime
-	sessionMaxLifetime = 150 * time.Millisecond
-	t.Cleanup(func() { sessionMaxLifetime = orig })
+	orig := sessionMaxLifetime.Load()
+	sessionMaxLifetime.Store(int64(150 * time.Millisecond))
+	t.Cleanup(func() { sessionMaxLifetime.Store(orig) })
 
 	s := newLifetimeSession(t, reg, "s-lifetime", ch)
 

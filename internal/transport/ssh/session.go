@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
@@ -62,8 +63,15 @@ const sessionHeartbeatInterval = 10 * time.Second
 // sessionMaxLifetime 是会话绝对存活上限，兜底「客户端静默消失、SSH 层未感知
 // 断开」的连接——这类连接进程内心跳仍在跑、SSH 层收不到断开信号，只有绝对
 // 上限能收掉，避免占用 MaxConns 槽位。这是会话生存期的唯一约束。
-// 用 var 而非 const 仅为测试可注入短时长；生产代码不修改它。
-var sessionMaxLifetime = 6 * time.Hour
+// 用 atomic.Int64（纳秒）而非 const 仅为测试可注入短时长；生产代码只在初始化
+// 写入一次。用 atomic 是因为测试的 t.Cleanup 恢复值可能与上一个测试遗留的
+// AfterFunc timer 回调并发（race detector 实测捕获），裸 var 会 data race。
+var sessionMaxLifetime atomic.Int64
+
+func init() { sessionMaxLifetime.Store(int64(6 * time.Hour)) }
+
+// getSessionMaxLifetime 读取绝对上限（测试与 newSession 共用，避免裸变量读写）。
+func getSessionMaxLifetime() time.Duration { return time.Duration(sessionMaxLifetime.Load()) }
 
 // 超时关闭前下发的固定文案：纯固定文本，无用户数据、无 ANSI，
 // 与 sshLoginBanner 同属服务端可信固定路径（ADR-019）。CRLF 收尾。
@@ -99,7 +107,7 @@ func newSession(id string, ch gossh.Channel, fp, pk string, p auth.Principal, re
 		principal: p, reg: reg,
 		done: make(chan struct{}),
 	}
-	s.lifetime = time.AfterFunc(sessionMaxLifetime, func() { s.closeWithReason(lifetimeCloseNotice) })
+	s.lifetime = time.AfterFunc(getSessionMaxLifetime(), func() { s.closeWithReason(lifetimeCloseNotice) })
 	s.hb = time.NewTicker(sessionHeartbeatInterval)
 	go s.heartbeatLoop()
 	return s
