@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -80,6 +81,13 @@ func (h *inputHandler) withForum(svc *forum.Service, users appuser.StatusReader,
 
 func newInputHandler() *inputHandler {
 	return &inputHandler{reg: command.Default()}
+}
+
+// withCommands 注入合并了彩蛋命令的注册表（v0.5.1 / P3-M6）。
+// 测试的无参构造仍用 defaultRegistry，彩蛋只在真实装配中生效。
+func (h *inputHandler) withCommands(reg *command.Registry) *inputHandler {
+	h.reg = reg
+	return h
 }
 
 // withLogin 注入 P0-17 登录事务。P0-19 拿到状态机的 PollResult.Token 后调用
@@ -414,10 +422,20 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 		}
 		switch inv.Name {
 		case "quit":
+			// v0.5.1：约 12% 概率在退出时多说一句固定彩蛋文案（不回显任何用户数据）。
+			if rand.IntN(8) == 0 {
+				writeEgg(sess, command.Farewell())
+			}
 			_, _ = io.WriteString(sess, "再见\r\n")
 			return outcomeQuit
 		case "help":
 			_, _ = io.WriteString(sess, h.reg.Help())
+		case "fortune", "cowsay", "xkcd", "blame", "sudo":
+			// v0.5.1 / P3-M6：彩蛋都是固定语料，经安全渲染路径输出。
+			// 参数（如 /blame @user）只做个数校验，绝不回显原文（ADR-026）。
+			writeEgg(sess, h.eggText(inv.Name)+"\r\n")
+		case "karma":
+			writeEgg(sess, h.runKarma(sess.Principal())+"\r\n")
 		case "keys":
 			_, _ = io.WriteString(sess, h.runKeys(ctx, sess.Principal(), inv))
 		case "key":
@@ -482,6 +500,75 @@ func (h *inputHandler) runLogout(ctx context.Context, sess *sshd.Session) string
 	default:
 		return "已注销当前账号\r\n"
 	}
+}
+
+// writeEgg 经安全渲染路径输出彩蛋固定文案（ADR-019 / ADR-026）。
+// RenderSystem 只允许 \n、不允许 \r，故先规范化换行再渲染，最后统一转 CRLF。
+// 渲染失败时退化为不输出——绝不把原始文本裸写到终端。
+func writeEgg(sess io.Writer, text string) {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	rendered, err := safe.RenderSystem(normalized, safe.StylePlain)
+	if err == nil {
+		_, _ = io.WriteString(sess, toCRLF(rendered))
+	}
+}
+
+// eggText 返回彩蛋固定文案（v0.5.1 / P3-M6）。纯常量语料，不含用户数据。
+func (h *inputHandler) eggText(name string) string {
+	switch name {
+	case "fortune":
+		return command.Fortune()
+	case "cowsay":
+		return command.Cowsay()
+	case "xkcd":
+		return command.XKCD()
+	case "blame":
+		return command.Blame()
+	case "sudo":
+		return command.Sudo()
+	default:
+		return "" // 不可达：switch 分支只把已知彩蛋名传进来
+	}
+}
+
+// runKarma 显示当前用户的 karma / 等级 / 距下一级的进度（v0.5.1）。
+// 复用 M2 的 KarmaReader 可选接口——等级只显示、不做权限（ADR-014）。
+func (h *inputHandler) runKarma(p auth.Principal) string {
+	if !p.IsUser() {
+		return "请先 /login github 登录后查看声望"
+	}
+	kr, ok := h.users.(appuser.KarmaReader)
+	if !ok {
+		return "声望查询尚未就绪"
+	}
+	karma, err := kr.Karma(context.Background(), p.UserID)
+	if err != nil {
+		return "声望查询失败，请稍后重试"
+	}
+	level, next := karmaLevel(karma)
+	return fmt.Sprintf("声望 %d · 等级 L%d · %s", karma, level, progressDesc(level, next))
+}
+
+// karmaLevel 与 domain/user.Level 的阈值对齐（L2=10 / L3=50 / L4=200）。
+// next=0 表示已达最高等级。
+func karmaLevel(karma int64) (level int, next int64) {
+	switch {
+	case karma < 10:
+		return 1, 10
+	case karma < 50:
+		return 2, 50
+	case karma < 200:
+		return 3, 200
+	default:
+		return 4, 0
+	}
+}
+
+func progressDesc(level int, next int64) string {
+	if next == 0 {
+		return "已达最高等级"
+	}
+	return fmt.Sprintf("距 L%d 还需 %d 声望", level+1, next)
 }
 
 // runKeys 不带参数时列出当前账号未吊销的公钥；带一个指纹参数时查单钥详情

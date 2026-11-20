@@ -963,3 +963,19 @@
 - 代价 / 边界：`deploy/` 下是模板不是生效配置，`<ENV_FILE>` 为占位符需替换；VACUUM INTO 整库重写的 IO 峰值与 `ErrQueueFull` 风险仍在（OPS §7，切换 Online Backup API 条件未满足）；异地备份未纳入本版本。
 - 验证：`bash -n scripts/backup.sh` 语法通过；用隔离数据源实跑 `backup.sh`，先输出 `backup=`/`sha256=`/`size=`，随后 verify 输出 `integrity=ok` 与五张表计数，退出码 0，证明验收闭环成立。全量 `go build/vet/test` 全绿、0 FAIL；格式门禁零输出。
 - 关联：`ADR-033`（fts-rebuild 必要性）、`ADR-010`（写队列边界）、OPS §2/§4/§6/§9.5、`P3-PLAN.md §6`。
+
+## ADR-061 v0.5.1 彩蛋系统接入与命令合并
+
+- 状态：已采纳，v0.5.1 / P3-M6 落地。
+- 背景：P0 为插件链路可验证，demo 插件在 `init()` 登记了 `/fortune`（`demo.go:25`）并订阅 `PostCreated` 申请 `first_post` 成就，但两套注册表彼此独立——插件命令名带 `/`、`command.validateCommand` 拒绝 `/`，且 `Plugin.Commands` 从未合并进 `command.Default()`，所以 `/fortune` 在解析阶段即 `ErrUnknownCommand`。同时 `night_owl` / `first_vote` 两个成就码自 0001 就在白名单里，却无任何事件钩子触发。用户 2026-11-20 拍板：v0.5.1 做推荐组合 9 项（命令 6 + 状态 2 + 退出彩蛋 1），`/xkcd` 走本地清单，状态类纳入并接已有成就码。
+- 决策：
+  1. **命令合并**：`command.WithCommands(extra)` 在内置表上合并额外命令；转换在 cmd 装配层 `eggRegistry()` 完成（剥前导 `/`、`Description→Summary`），并以 `command.EggCommands()` 兜底防止插件元数据与命令清单漂移——`command` 不 import `plugin`、`plugin` 不 import `application/command`（ADR-015），只有 cmd 同时看到两者。`inputHandler.withCommands()` 注入，`newInputHandler()` 无参构造仍用默认表，既有会话层测试零改动。
+  2. **彩蛋内容**：`internal/application/command/eggs.go` 全部为本地常量语料——`/fortune`（20 条箴言）、`/cowsay`（ASCII 牛）、`/xkcd`（12 条本地标题，**不联网**，避免失败态与新依赖）、`/blame`（固定甩锅文案，参数只做个数校验绝不回显）、`/sudo`（假提权失败，呼应白名单+审计）、`/karma`（复用 M2 `KarmaReader` 显示声望/等级，等级仅显示）。`/quit` 约 12% 概率多说一句告别语。
+  3. **安全路径**：`writeEgg()` 先规范化 `\r`→`\n`，经 `safe.RenderSystem(text, StylePlain)`（ADR-019 可信路径）再 `toCRLF` 输出；RenderSystem 拒绝 `\r`，故不能裸传含 CRLF 的语料。渲染失败退化为不输出，绝不裸写原文。彩蛋不改库、不改计分。
+  4. **状态类成就**：新建 `internal/plugin/social` 订阅 `PostCreated`（发帖时刻转到 `MOTD_DISPLAY_TIMEZONE` 后在 [2,5) → `night_owl`，见下方 patch）与 `VoteCast`（首次被投票 → `first_vote`）。`VoteCast.ActorID` 是**投票者**而非作者，故扩展插件 `ReadOnlyQuery` 加 `ThreadOwnerID/PostOwnerID`（只返回整数 ID、无 PII），`forum.PublicQuery` 用既有 `ThreadReader.GetThread` / `PostReader.PostAuthor` 实现；自投票不解锁；查不到作者（内容已软删）时静默跳过——成就不是关键路径，不能让插件读失败导致 outbox 事件投递失败重试。
+  5. 无新迁移、无新成就码（复用 0001 白名单里的 `night_owl` / `first_vote`）、无网络依赖。
+- 理由：彩蛋是"外围消费者"，必须通过受限端口接入，不因彩蛋把 SDK 或数据库句柄引入领域内核（设计稿 §1.3 原则三）。本地清单让 `/xkcd` 零网络失败态；把状态类彩蛋接到既有成就码，让"彩蛋→成就"闭环真正生效而不新增 schema。
+- 代价 / 边界：动态数字雨 `/matrix`、连续签到 7 天（需迁移）、Konami 码解锁 `/dev/null`（需输入序列检测）三项高风险/需迁移项延后 v0.5.2；彩蛋文案是固定语料，重复触发内容不变。
+- **patch（用户 2026-11-20 建议，同日落地）**：`night_owl` 时段从 UTC 改为按 `MOTD_DISPLAY_TIMEZONE` 计算——`OccurredAt.In(c.Location).Hour()`，与用户在终端看到的时间一致。实现：`registry.Context` 加可选 `Location *time.Location`（nil 回落 UTC 保持零值安全），cmd 装配层注入 `terminal.DisplayLocation()`（main 已在 `newForumRuntime` 之前 SetDisplayLocation），插件不反向依赖 presentation 层。测试用 `18:30Z` 在 Asia/Shanghai（本地 02:30）解锁、UTC（18 点）不解锁证明时区生效。
+- 验证：`eggs_test.go` 3 项（合并/重名拒绝/语料无 ESC）、`social_test.go` 3 项（时段边界、投票给作者而非投票者、自投票不给）、`cmd/server/egg_test.go` 4 项（固定文案、安全渲染、注入、等级阈值）；全量 `go build/vet/test` 绿、0 FAIL，测试 914 → 924。
+- 关联：`P3-PLAN.md §7`（M6）、`ADR-015`（插件权限）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-014`（等级仅显示）。

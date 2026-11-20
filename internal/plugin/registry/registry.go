@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/domain/event"
@@ -25,6 +26,11 @@ type Command struct {
 // 实现由 application 层提供，插件拿不到 *sql.DB / *sql.Rows。
 type ReadOnlyQuery interface {
 	ThreadTitle(ctx context.Context, threadID int64) (string, error)
+	// ThreadOwnerID / PostOwnerID 返回内容作者 ID（v0.5.1 first_vote 成就用）。
+	// VoteCast 事件的 ActorID 是投票者，拿不到被投内容的作者，故需这两个只读查询。
+	// 只返回整数 ID，不暴露邮箱、指纹或任何 PII。
+	ThreadOwnerID(ctx context.Context, threadID int64) (int64, error)
+	PostOwnerID(ctx context.Context, postID int64) (int64, error)
 }
 
 // Context 是派发给插件的受限能力集合。
@@ -32,6 +38,11 @@ type ReadOnlyQuery interface {
 type Context struct {
 	Read         ReadOnlyQuery
 	Achievements user.AchievementGate
+	// Location 是进程展示时区（MOTD_DISPLAY_TIMEZONE，v0.5.1 patch），
+	// 供插件按用户可见的本地时区判断时间类彩蛋（如 night_owl）。
+	// 由 cmd 装配层从 terminal.DisplayLocation() 注入——插件不反向依赖
+	// presentation 层。nil 时插件应回落 UTC（保持既有测试与零值安全）。
+	Location *time.Location
 }
 
 // Handler 处理订阅的领域事件。

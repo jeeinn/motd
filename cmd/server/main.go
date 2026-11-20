@@ -24,6 +24,7 @@ import (
 	"github.com/jeeinn/motd/internal/domain/event"
 	emailinfra "github.com/jeeinn/motd/internal/infrastructure/email"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
+	"github.com/jeeinn/motd/internal/plugin/registry"
 	"github.com/jeeinn/motd/internal/presentation/terminal"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
 )
@@ -209,9 +210,14 @@ func run() error {
 	// P0-18 公钥绑定：Revoker 是 SSH Server（它握有全部在线 Session）。
 	// Server 依赖 Handler、Handler 又要用 KeyBindingService，因此先建 handler、
 	// 再建 Server，最后用 setter 把用例回填，打破装配循环。
+	// v0.5.1 / P3-M6：把彩蛋命令并入命令注册表（插件命令带 /，需转换后合并）。
+	eggReg, err := eggRegistry(registry.All())
+	if err != nil {
+		return fmt.Errorf("装配彩蛋命令: %w", err)
+	}
 	handler := newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login).
 		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
-		withSecurity(gate)
+		withSecurity(gate).withCommands(eggReg)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:     cfg.SSHAddr,
 		DataDir:  cfg.DataDir,

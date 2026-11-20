@@ -130,6 +130,19 @@ var defaultRegistry = mustNew(defaultCommands)
 // Default 返回内置的 8 条 P0 命令。命令表是编译期常量，校验失败属程序 bug。
 func Default() *Registry { return defaultRegistry }
 
+// WithCommands 在内置命令表之上合并额外命令（彩蛋），返回新的不可变注册表。
+// 额外命令由 cmd 装配层从插件描述转换而来——command 包不 import plugin，
+// 避免 application → plugin 的反向依赖（ADR-015）。重名/非法定义仍由 New 拒绝。
+func WithCommands(extra []Command) (*Registry, error) {
+	if len(extra) == 0 {
+		return defaultRegistry, nil
+	}
+	defs := make([]Command, 0, len(defaultCommands)+len(extra))
+	defs = append(defs, defaultCommands...)
+	defs = append(defs, extra...)
+	return New(defs)
+}
+
 func mustNew(defs []Command) *Registry {
 	r, err := New(defs)
 	if err != nil {

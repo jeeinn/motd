@@ -3,19 +3,58 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/admin"
 	"github.com/jeeinn/motd/internal/application/auth"
+	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
-	_ "github.com/jeeinn/motd/internal/plugin/demo" // 编译期注册：init() 把彩蛋插件放进注册表
+	_ "github.com/jeeinn/motd/internal/plugin/demo" // 编译期注册：首次发帖成就 + /fortune 彩蛋
 	"github.com/jeeinn/motd/internal/plugin/events"
 	"github.com/jeeinn/motd/internal/plugin/registry"
+	_ "github.com/jeeinn/motd/internal/plugin/social" // 编译期注册：夜行者 / 首次被投票成就
+	"github.com/jeeinn/motd/internal/presentation/terminal"
 )
+
+// eggRegistry 把编译期注册的插件命令转换成 command.Command 并合并进内置注册表。
+// 这是 cmd 装配层的职责：command 包不 import plugin，plugin 不 import application/command
+// （ADR-015），只有 cmd 同时看到两者。转换时剥掉插件命令的前导 "/"，因为
+// command.validateCommand 明确拒绝 "/"（P3-M6 / v0.5.1）。
+func eggRegistry(plugins []registry.Plugin) (*command.Registry, error) {
+	var eggs []command.Command
+	for _, p := range plugins {
+		for _, pc := range p.Commands {
+			name := strings.TrimPrefix(pc.Name, "/")
+			if name == "" {
+				continue
+			}
+			eggs = append(eggs, command.Command{
+				Name:    name,
+				Usage:   pc.Usage,
+				Summary: pc.Description,
+				MinArgs: 0,
+				MaxArgs: 0,
+			})
+		}
+	}
+	// 兜底：把 EggCommands 里声明但插件元数据未登记的命令一并合入，
+	// 避免两处清单漂移（demo 插件当前只登记 /fortune）。
+	seen := make(map[string]bool, len(eggs))
+	for _, e := range eggs {
+		seen[e.Name] = true
+	}
+	for _, c := range command.EggCommands() {
+		if !seen[c.Name] {
+			eggs = append(eggs, c)
+		}
+	}
+	return command.WithCommands(eggs)
+}
 
 // forumRuntime 是一次装配的产物，抽出来便于端到端集成测试直接复用真实链路。
 type forumRuntime struct {
@@ -42,8 +81,11 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer,
 	store := sqlite.NewAchievementStore(pools, writer)
 	gate := appuser.NewAchievementService(store, sqlite.NewUserStatusReader(pools), time.Now)
 	pluginCtx := registry.Context{
-		Read:         forum.NewPublicQuery(repos),
+		Read:         forum.NewPublicQuery(repos, repos),
 		Achievements: gate,
+		// v0.5.1 patch：注入 MOTD_DISPLAY_TIMEZONE，供 night_owl
+		// 按用户可见的本地时段判断（main 已在 newForumRuntime 之前 SetDisplayLocation）。
+		Location: terminal.DisplayLocation(),
 	}
 
 	bus := events.NewDomainBus()

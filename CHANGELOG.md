@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-11-20
+
+彩蛋系统版本。P3-M6 落地，打通「彩蛋→成就」闭环。无 schema 迁移、无新依赖、无新环境变量；测试 914 → 924。
+
+### Added
+
+- **六条彩蛋命令**：`/fortune`（本地箴言）、`/cowsay`（ASCII 牛）、`/xkcd`（本地 xkcd 风格标题，不联网）、`/blame`（固定甩锅文案，不回显参数）、`/sudo`（假提权失败，呼应白名单+审计）、`/karma`（复用 KarmaReader 显示声望与等级）；`/quit` 约 12% 概率多说一句告别语。全部经 `safe.RenderSystem` 可信路径输出（ADR-061）。
+- **状态类成就**：`night_owl`（02:00–05:00 **按 `MOTD_DISPLAY_TIMEZONE`** 发帖）与 `first_vote`（内容首次被投票，给作者不给投票者）两个既有成就码首次接通事件钩子；新建 `internal/plugin/social` 插件。
+- `command.WithCommands`：插件命令合并进注册表（cmd 装配层剥前导 `/`），`inputHandler.withCommands` 注入；`newInputHandler()` 无参构造不变，既有测试零改动。
+
+### Notes
+
+- 高风险/需迁移项延后 v0.5.2：动态数字雨 `/matrix`、连续签到 7 天（需迁移）、Konami 码解锁 `/dev/null`（需输入序列检测）。
+- 彩蛋不改库、不改计分；`/blame` 参数只做个数校验，绝不回显原文。
+
 ## [0.5.0] - 2026-11-20
 
 P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞态检测，最小压测集落地，备份调度可复制。无 schema 迁移、无新依赖、无新环境变量；测试 905 → 914。彩蛋命令（P3-M6）拆到 v0.5.1。
@@ -241,7 +256,8 @@ P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞�
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/jeeinn/motd/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jeeinn/motd/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jeeinn/motd/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jeeinn/motd/compare/v0.4.1...v0.4.2

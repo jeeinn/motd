@@ -17,7 +17,9 @@ type fakeQuery struct {
 	err   error
 }
 
-func (f fakeQuery) ThreadTitle(context.Context, int64) (string, error) { return f.title, f.err }
+func (f fakeQuery) ThreadTitle(context.Context, int64) (string, error)  { return f.title, f.err }
+func (f fakeQuery) ThreadOwnerID(context.Context, int64) (int64, error) { return 1, f.err }
+func (f fakeQuery) PostOwnerID(context.Context, int64) (int64, error)   { return 1, f.err }
 
 type fakeStatus struct{ status domainuser.Status }
 
