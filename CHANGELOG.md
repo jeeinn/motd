@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-11-20
+
+小修复版本，无 schema 迁移、无新依赖。
+
+### Changed
+
+- 主题列表与详情回复列表的作者栏由 `#<users.id>` 改为 `@<username>`（真实可读用户名）。中文用户名按显示宽度截断至 10 列、ASCII `~` 收尾；查不到 username 的历史行回退 `#ID`。分数 `[N]`、帖子 ID `id=`、`#` 等符号一律不变。
+- 回复数格式 ` N回复` 改为紧凑 ` rN`（**该字段生产路径尚未赋值，实际不显示**，按用户拍板暂搁计数投影）。
+- 新增 `UsernameReader.UsernamesByIDs` 只读端口，一屏一次批量取用户名；作者段走 `RenderUser` 净化链 + AST 守卫防误入 `RenderSystem`。
+
 ## [0.3.2] - 2026-11-20
 
 小修复版本，无 schema 迁移、无新依赖。
@@ -132,7 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/jeeinn/motd/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/jeeinn/motd/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/jeeinn/motd/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jeeinn/motd/compare/v0.2.1...v0.3.0

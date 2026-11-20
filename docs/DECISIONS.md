@@ -727,3 +727,21 @@
 - 代价 / 边界：二进制因内嵌 tzdata 略增数百 KB；时区是进程级策略、不随会话变化（若将来要多用户各自时区，需重设为 session 级并回到方案 a）；`-race` 因本机无 gcc 未跑，但并发读测试 `go test -count=20 -run TestDisplayLocationConcurrentRead` 稳定通过。
 - 验证：749 测试全绿（737 → +12）；config 5 用例（默认 / IANA / UTC / Local / 非法值 fail-fast）+ terminal 5 用例（不同 location 输出不同 / 格式串不变 / sec<=0 / 并发读）+ cmd/server 2 用例（/keys 时间按配置、后缀非硬编码）；E14「时间未带时区」/ E18「环境变量静默兜底」门禁 PASS；业务层 UTC 归一化 git diff 0 行。
 - 关联：`ADR-045`（.env 自动加载优先级）、`docs/PHASE2-PLAN.md`。
+
+## ADR-047 列表符号体系裁决与作者名投影（R11 翻转）
+
+- 状态：已采纳（2026-11-20，v0.3.3）
+- 背景：用户提出把分数 `[0]` 改 `▲0`、帖子 ID `id=xxx` 改 `[xxx]`、`#` 留作标签、作者 `#ID` 改 `@ID`，理由是"符合通用论坛标志、降低心智负担"。PM 与设计师独立论证后收敛。
+- 结论：
+  1. **否决分数 `▲` 化**：▲/▼ 在 Reddit/HN 是**可点击投票控件**，不是净分标签；只读行里用属假可供性。score 可为负（投票 value∈{-1,1}、`AdjustScore(delta)`），`▲-3` 语义自相矛盾。且 U+25B2 是 East Asian Ambiguous，CJK 终端占 2 列、en_US 占 1 列，会让 80 列定宽表漂移。**分数保持 `[N]`**；
+  2. **否决帖子 ID 改 `[109]`**：`id=` 的等号是"这是可复制命令参数"的功能提示，且 v0.3.2 刚建立该肌肉记忆；`[` 在本项目已是 UI chrome 通用符（`[%s]` 动作键、`[提示]`、markdown 链接），再挤进 ID 只会更糊。**保持 `id=109`**；
+  3. **`#` 不预留给标签**：无 tags 表/规划/排期；符号不是稀缺资源，标签真上线那天再挑 `#`。不写进 UI 与帮助，仅在本文留档；
+  4. **作者栏 `#7` → `@username`**（本轮唯一改动）：`#7`/`@7` 都是把 `users.id` 主键漏进 UI，换壳不解决"用户看不出是谁"。username（3–20 字符、NOCASE UNIQUE，ADR-005）才是稳定可读句柄——**翻转 R11「作者名投影留存价值未验证、0.x 不固化」**：当初是"无证据"，本次符号讨论构成第二个触发器（作者标识从锦上添花变功能必需）。
+- 实现边界：
+  - username 不进 domain（Thread/Post 无此字段）；新增只读端口 `UsernameReader.UsernamesByIDs`，sqlite 参数化批量查 `users`，一屏一次（非 N+1）、不按 status 过滤（历史帖作者仍显示）；
+  - application 组装 Screen 时填预留字段 `RowMeta.Author`（ADR-014 早已预留）；查不到留空；
+  - **信任域分离**：username 是用户数据，作者段在渲染循环里走 `ext()`→`RenderUser`；`metaID`/`metaTail` 仍为纯本地数值走 `sys()`→`RenderSystem`；删掉原来同时混拼的 `metaFixed`。新增 AST 守卫静态断言作者段不得进 `sys()`，并有 ANSI/双向控制符负向注入测试；
+  - CJK 截断：按显示宽度（汉字/emoji 2 列）在 rune 边界切，上限 10 列、ASCII `~` 收尾（禁 U+2026 同为 Ambiguous），先截断后净化；空 username 回退 `#ID`。
+- 代价 / 边界：标题可用列 46→38（名称化成本）；详情页顶部作者行本版不新增（遵循"其余符号不动"）；**回复数 `rN` 格式已改但生产路径 `RowMeta.Replies` 从未赋值、实际不显示**——用户拍板"暂搁"，不加计数投影，待后续单独实现。
+- 验证：768 测试全绿（755 → +13）；批量查询 spy 断言一次；ANSI 注入 `Author="\x1b[2J\r\x07\u202e"` 净化后无原始控制符；中文截断后 `utf8.ValidString` 且宽度≤10。
+- 关联：`ADR-005`（username 约束）、`ADR-014`（信任域与预留字段）、`ADR-019`（终端白名单）、`docs/P2-PLAN.md §10`（@提及推 P3）。
