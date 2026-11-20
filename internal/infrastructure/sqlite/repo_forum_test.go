@@ -117,6 +117,46 @@ func TestForumReposNodes(t *testing.T) {
 	}
 }
 
+// TestNodeStatusFiltering 锁定 ADR-048「归档不物理删」的读口径：
+// 归档节点从公开列表消失，但仍可经 slug 取到（历史帖详情页要显示版块名），
+// 且归档是可逆的 UPDATE，不是 DELETE FROM nodes。
+func TestNodeStatusFiltering(t *testing.T) {
+	e := newForumEnv(t)
+	ctx := e.ctx
+
+	if _, err := e.pools.writer.ExecContext(ctx,
+		`UPDATE nodes SET status = 'archived' WHERE id = ?`, e.nodeID); err != nil {
+		t.Fatalf("归档测试版块: %v", err)
+	}
+
+	list, err := e.repos.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("列出版块: %v", err)
+	}
+	for _, n := range list {
+		if n.ID == e.nodeID {
+			t.Fatalf("归档节点 id=%d 不应出现在公开列表", e.nodeID)
+		}
+	}
+	if len(list) != 5 {
+		t.Fatalf("归档 1 个自建节点后应只剩 5 个 seed 版块，实际 %d", len(list))
+	}
+
+	got, err := e.repos.GetNodeBySlug(ctx, "/test/node")
+	if err != nil || got.ID != e.nodeID {
+		t.Fatalf("历史帖详情页仍需能按 slug 取到归档版块: %+v, %v", got, err)
+	}
+
+	if _, err := e.pools.writer.ExecContext(ctx,
+		`UPDATE nodes SET status = 'active' WHERE id = ?`, e.nodeID); err != nil {
+		t.Fatalf("恢复版块: %v", err)
+	}
+	list, err = e.repos.ListNodes(ctx)
+	if err != nil || len(list) != 6 {
+		t.Fatalf("恢复 active 后应重新出现在列表，实际 %d, %v", len(list), err)
+	}
+}
+
 // TestThreadStatusFiltering 锁定 0004 引入的公开过滤口径：
 // GetThread / ListThreads 只读 active，deleted / hidden 主题不得泄漏。
 func TestThreadStatusFiltering(t *testing.T) {

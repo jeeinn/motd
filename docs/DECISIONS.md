@@ -745,3 +745,19 @@
 - 代价 / 边界：标题可用列 46→38（名称化成本）；详情页顶部作者行本版不新增（遵循"其余符号不动"）；**回复数 `rN` 格式已改但生产路径 `RowMeta.Replies` 从未赋值、实际不显示**——用户拍板"暂搁"，不加计数投影，待后续单独实现。
 - 验证：768 测试全绿（755 → +13）；批量查询 spy 断言一次；ANSI 注入 `Author="\x1b[2J\r\x07\u202e"` 净化后无原始控制符；中文截断后 `utf8.ValidString` 且宽度≤10。
 - 关联：`ADR-005`（username 约束）、`ADR-014`（信任域与预留字段）、`ADR-019`（终端白名单）、`docs/P2-PLAN.md §10`（@提及推 P3）。
+
+## ADR-048 节点三不变量：slug 规则 / 归档不物理删 / seed 不可变
+
+- 状态：已采纳（2026-11-20，P2-M0，补 P1 欠账）
+- 背景：`PHASE1-PLAN.md §2.10` 与决策台账 #6 承诺 P1 固化节点三不变量，但实际未落地（原计划占用 ADR-030，该编号实为「认证审计与限流的纯内存边界」；`nodes` 表亦无 `status` 列）。P2-M1 要做节点 CRUD，若欠账不补，物理删会撞 `threads.node_id` 的 FK，且没有归档语义。本 ADR 接当前最大 ADR-047 编号，不复用 030。
+- 结论：
+  1. **slug 规则**：形如 `/dev/ai`、`/etc/rant`、`/bin/help`。字符白名单仅 **ASCII 小写字母 `[a-z]`、数字 `[0-9]`、斜杠 `/`**——大写、连字符、下划线、空格、Unicode、emoji 一律拒绝；结构为绝对路径式：必须以 `/` 开头、**1–2 段**（`/help` 或 `/dev/ai`），段间单个 `/`，禁止结尾 `/` 与连续 `//`；每段 1–32 字符、整体 ≤64 字符。`slug` 在 `0001_init.sql` 已 UNIQUE，故大小写敏感问题因白名单无大写而不存在。**M0 只固化规则、不写 `ValidateSlug` 函数**——无调用者的校验函数是孤儿能力，M1 落地 CRUD 写路径时再实现并由写路径强制；
+  2. **归档不物理删**：`threads.node_id INTEGER NOT NULL REFERENCES nodes(id)`，有帖节点物理删会被 FK 拒绝。节点只取 `status IN ('active','archived')`，`0008_nodes_status.sql` 用 `DEFAULT 'active'` 常量自动回填历史行。归档是可逆 `UPDATE`，与 threads/posts 软删同构（`ADR-038`）：公开列表 `ListNodes` 带 `WHERE status = 'active'`，归档节点从列表消失、数据不丢；**物理删一律禁止**，由 archtest 静态守卫扫 `DELETE FROM nodes`。`GetNodeBySlug` 刻意不过滤 archived——历史帖详情页仍需显示所属版块名；
+  3. **seed 不可变**：`0002_seed_nodes.sql` 的 5 个 seed（`/dev/ai`、`/dev/rust`、`/dev/jobs`、`/etc/rant`、`/bin/help`）不可删、不可改名。`INSERT OR IGNORE` + slug UNIQUE 保证迁移重放或版本登记丢失时不会插入重复版块、也不会覆盖用户改名；M1 的 CRUD 命令需另加代码层守卫拦截对这 5 个 slug 的删/改名（M0 无 CRUD 命令面，故不在本轮实现），archtest 守卫 5 个 slug 原样存在。
+- 实现边界：
+  - M0 仅落地：本 ADR + `0008` + `ListNodes` 一行过滤 + archtest 守卫 + 隔离演练证据。**不做**节点 CRUD 命令、写端口、权限模型、`/node` 命令面（M1 范围）；
+  - `0008` 不加 `merged_into_id`——节点移动/合并已推 P3（`docs/P2-PLAN.md §4.6`），archtest 同步禁止该列提前进场；
+  - 不改 `selectNodes` 常量（与 `GetNodeBySlug` 共用），只在 `ListNodes` 的 SQL 追加过滤，避免影响按 slug 的历史读取路径。
+- 代价 / 边界：多一列与一个 CHECK；5 个 seed 当前全 active，`ListNodes` 加过滤对现有行为**零影响**（返回值完全一致）；归档节点仍占 slug UNIQUE 名额，未来若要复用 slug 需显式清理，属 M1+ 课题。`GetNodeBySlug` 不过滤 archived 是有意选择，代价是归档 slug 仍可按名直取，不做"彻底隐身"。
+- 验证：777 测试全绿（768 → +9：迁移回填/回滚 2、行为过滤 1、archtest 守卫与负向注入 6）；`go build ./... && go vet ./... && go test -count=1 ./...` 全绿；P0 工程门禁对 M0 改动文件零新增命中（与 HEAD 基线同为 54 处既有命中）；`v7→v8` 迁移、回滚精确回 v7、带数据 kill-9 + WAL 恢复三项隔离演练见 `docs/OPS.md §5` 2026-11-20 条。生产 `data/motd.db` 全程未触碰。
+- 关联：`PHASE1-PLAN.md §2.10`、`docs/P2-PLAN.md §1`（M0 欠账）/ `§4.6`（节点合并推 P3）、`ADR-038`（软删口径）、`ADR-030`（编号澄清：实为认证限流，非节点）。

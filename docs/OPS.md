@@ -286,6 +286,27 @@ chmod 600 .env
 
 **结论**：M1 三项迁移在带历史数据库上应用成功、效果符合 Spec、从迁移前备份回滚精确回到 v3（schema 与数据双一致）。全量 `go build`/`go vet`/`go test -count=1 ./...` 绿，测试函数 456→506。`ADR-028`（outbox）、`ADR-029`（数据完整性前置）已记录。崩溃态证据与中间产物保留在 `data/m1-drill-20261119/`。
 
+### 2026-11-20 11:18（P2-M0 节点 status 迁移 v7→v8 / 回滚 / kill-9 + WAL，隔离环境实际执行）
+
+> 目的：补 P1 欠账的 `0008_nodes_status.sql`（ADR-048）在**带历史数据的 v7 库**上应用、回滚、硬杀恢复三项验收。全程隔离 `X:/motd/data/m0-drill-20261120/`，独立端口 18090/22230，**未触碰生产 `data/motd.db` 与生产实例**（生产 PID 9292 保持运行；演练库 main 文件 mtime 保持 10:19:13、sha256 `9a0ce9ce23957c0f57036a19d27222b1c1d39a529f45fc6a12cca1780f6a83cb` 前后一致）。v7 源码由 `git archive HEAD` 导出编译，v8 源码为工作区副本，均不动 `.git` 与生产二进制。原始输出保留在同目录 `evidence/`，服务日志在 `logs/`。
+
+| 步骤 | 命令 / 工具 | 实测结果 |
+| --- | --- | --- |
+| v7 基线 | `m0verify-v7 init <隔离库>` | `init applied=[1 2 3 4 5 6 7]`；`schema_migrations=7`、`nodes=5`、`nodes.status=<column absent>`、`integrity=ok`、`journal_mode=wal` |
+| 造历史数据 | `m0verify-v7 seed <库> B1`（经 `sqlite.Open`→`Writer.Submit`→事务提交的生产同构写路径） | users=1 / threads=2 / posts=4；`mark[B1]=2`、`mark[B2]=0` |
+| 迁移前备份 | `motdctl-v7 backup --db <库> --dir <备份目录>` | `motd-20261120-111813.db`，sha256 `c9e3fdcfcdc86f66653762367a58398928a5ad8a2f5faae93ba3527412a6e155`，196608 B |
+| 备份校验 | `motdctl-v7 verify <备份>` | `integrity=ok`；`schema_migrations=7` 行、users=1 / nodes=5 / threads=2 / posts=4 |
+| 应用迁移 | 以 v8 二进制启动同一库（隔离端口 18090/22230） | 日志 `migrations_applied=1 applied_versions=[8]`；`/healthz` ok（`dev queue=0/256 online=0 active=0 commits=2 audit_depth=0 …`）；`schema_migrations=8` |
+| R 验证 | `m0verify-v8 inspect <库>` | `nodes.status[active]=5`（**5 个 seed 自动回填 active**）；threads/posts 2/4 完整；`mark[B1]=2` |
+| 迁移后写入 | 服务存活期间 `m0verify-v8 seed <库> B2`（WAL 窗口内） | users=2 / threads=4 / posts=8；`mark[B1]=2`、`mark[B2]=2`；主库 196608 B、WAL **197792 B**（事务在 WAL 未 checkpoint） |
+| 硬杀 | `taskkill /PID 29928 /F`（11:18:35.695） | PID 经 `Win32_Process.CommandLine` 二次校验为 `data/m0-drill-20261120/bin/server-v8.exe`，非生产 9292；18090 端口随即不再监听 |
+| WAL 恢复 | 直接打开 kill 后库 | `integrity=ok`、`schema_migrations=8`；users=2 / threads=4 / posts=8、`mark[B2]=2` —— **已提交事务全部重放**，硬杀不损坏迁移后库 |
+| 回滚 | `motdctl-v8 restore <迁移前备份> --target <新路径>` | 218 ms；`integrity=ok`；`schema_migrations=7`、`nodes.status=<column absent>`；users=1 / threads=2 / posts=4、`mark[B1]=2`、`mark[B2]=0`（schema 与数据双精确） |
+
+**结论**：`0008` 在带历史数据的 v7 库上迁移成功，5 个 seed 自动回填 active、业务数据无损；从迁移前备份回滚精确回到 v7；迁移后带数据硬杀 + WAL 重放完整，三项 DoD 全达成。全量 `go build ./...`/`go vet ./...`/`go test -count=1 ./...` 绿，测试函数 768→777（`0008` 回填与回滚 2、公开列表过滤 1、节点守卫与负向注入 6）。P0 工程门禁对 M0 改动文件零新增命中（与 HEAD 基线同为 54 处既有命中，均在未触碰代码）。`ADR-048` 已记录；演练证据与 v7/v8 源码副本保留在 `data/m0-drill-20261120/`。生产 `data/motd.db` 主文件 mtime 与 sha256 前后一致，未受演练影响。
+
+> RPO/RTO 口径沿用 2026-11-19 13:57 条（本次为迁移正确性演练，不构成生产备份策略变更）。节点归档为软删，M1 CRUD 落地时须由代码层守卫拦截 seed 删/改名，见 `ADR-048`。
+
 ## 6. 保留与清理（不自动删除）
 
 脚本只生成备份，**不做任何自动删除**。列出过期候选：

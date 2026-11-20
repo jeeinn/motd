@@ -73,13 +73,13 @@ func containsVersion(applied []int64, want int64) bool {
 }
 
 // TestMigrationOrderIsStable 防止新增迁移打乱版本号顺序，
-// 也顺带锁定「当前共 7 个迁移」这一事实（新增迁移时需同步更新）。
+// 也顺带锁定「当前共 8 个迁移」这一事实（新增迁移时需同步更新）。
 func TestMigrationOrderIsStable(t *testing.T) {
 	migrations, err := loadMigrations()
 	if err != nil {
 		t.Fatalf("读取迁移列表: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8}
 	if len(migrations) != len(want) {
 		t.Fatalf("迁移数量应为 %d，实际 %d（新增迁移请同步更新本断言）", len(want), len(migrations))
 	}

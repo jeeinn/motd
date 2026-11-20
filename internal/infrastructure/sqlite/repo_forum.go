@@ -62,8 +62,11 @@ func scanNode(s interface{ Scan(...any) error }) (node.Node, error) {
 	return n, err
 }
 
+// ListNodes 是公开版块列表：只返回 active。archived 节点从列表消失，但线程详情
+// 仍可经 GetNodeBySlug 取到版块名——历史帖所属节点被归档后不能让详情页失去版块标识。
+// 过滤条件写进 SQL（不在应用层查完再筛），archtest/node_invariants_test.go 静态守卫。
 func (r *ForumRepos) ListNodes(ctx context.Context) ([]node.Node, error) {
-	rows, err := r.pools.QueryContext(ctx, selectNodes+` ORDER BY id ASC`)
+	rows, err := r.pools.QueryContext(ctx, selectNodes+` WHERE status = 'active' ORDER BY id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("列出版块: %w", err)
 	}

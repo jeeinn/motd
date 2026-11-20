@@ -135,8 +135,8 @@ func TestThreadsStatusBackfillsHistoricalRows(t *testing.T) {
 	}
 }
 
-// TestFreshDatabaseReachesVersion7 锁定 P1-M3 FTS5 迁移后的基线版本。
-func TestFreshDatabaseReachesVersion7(t *testing.T) {
+// TestFreshDatabaseReachesVersion8 锁定 P2-M0 节点 status 迁移后的基线版本。
+func TestFreshDatabaseReachesVersion8(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
 	if _, err := Migrate(ctx, pools); err != nil {
@@ -146,8 +146,8 @@ func TestFreshDatabaseReachesVersion7(t *testing.T) {
 	if err := pools.reader.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 {
-		t.Fatalf("fresh 库迁移后版本应为 7，实际 %d", version)
+	if version != 8 {
+		t.Fatalf("fresh 库迁移后版本应为 8，实际 %d", version)
 	}
 }
 
