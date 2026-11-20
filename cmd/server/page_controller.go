@@ -427,6 +427,8 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.vote(ctx, sess, inv.Args[0])
 	case "delete":
 		return p.delete(ctx, sess, inv.Args)
+	case "hide":
+		return p.hide(ctx, sess, inv.Args)
 	case "search":
 		return p.showSearch(ctx, sess, strings.Join(inv.Args, " "), 1)
 	case "node":

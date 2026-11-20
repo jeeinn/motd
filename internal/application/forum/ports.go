@@ -204,6 +204,11 @@ type WriteTx interface {
 	SoftDeleteThread(ctx context.Context, threadID int64) error
 	// SoftDeletePost 只把 posts.status 置为 deleted：不物理删除、不级联。
 	SoftDeletePost(ctx context.Context, postID int64) error
+	// HideThread / HidePost 只把 status 置为 hidden（治理动作，区别于作者自删的 deleted）：
+	// 不物理删、不级联；已 hidden 重复调用是合法 no-op（幂等便于重试）；
+	// 目标不存在或已被作者删除返回 ErrNotFound。与判权一起落在同一事务快照内。
+	HideThread(ctx context.Context, threadID int64) error
+	HidePost(ctx context.Context, postID int64) error
 	// AppendOutbox 在业务写事务内追加一条领域事件（R12）。
 	// 必须与业务写同提交、同回滚；event_id 唯一，重复事件静默去重。
 	// 投递绝不在这里做——handler 只能在事务提交后由 Outbox 调度器调用。

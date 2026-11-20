@@ -33,6 +33,7 @@ type fakeState struct {
 	nodes        map[int64]node.Node
 	nodeStatus   map[int64]string
 	threads      map[int64]thread.Thread
+	threadStatus map[int64]string // 治理隐藏用：thread.Thread 没有 Status 字段
 	posts        map[int64]post.Post
 	users        map[int64]user.Status
 	votes        map[voteKey]vote.Value
@@ -47,6 +48,7 @@ func (s fakeState) clone() fakeState {
 		nodes:        make(map[int64]node.Node, len(s.nodes)),
 		nodeStatus:   make(map[int64]string, len(s.nodeStatus)),
 		threads:      make(map[int64]thread.Thread, len(s.threads)),
+		threadStatus: make(map[int64]string, len(s.threadStatus)),
 		posts:        make(map[int64]post.Post, len(s.posts)),
 		users:        make(map[int64]user.Status, len(s.users)),
 		votes:        make(map[voteKey]vote.Value, len(s.votes)),
@@ -63,6 +65,9 @@ func (s fakeState) clone() fakeState {
 	}
 	for k, v := range s.threads {
 		out.threads[k] = v
+	}
+	for k, v := range s.threadStatus {
+		out.threadStatus[k] = v
 	}
 	for k, v := range s.posts {
 		out.posts[k] = v
@@ -95,6 +100,7 @@ func newFakeRepos() *fakeRepos {
 		nodeStatus:   map[int64]string{1: "active", 2: "active"},
 		nextNodeID:   3,
 		threads:      map[int64]thread.Thread{},
+		threadStatus: map[int64]string{},
 		posts:        map[int64]post.Post{},
 		users:        map[int64]user.Status{1: user.StatusActive, 2: user.StatusActive},
 		votes:        map[voteKey]vote.Value{},
@@ -159,6 +165,10 @@ func (r *fakeRepos) GetThread(ctx context.Context, id int64) (thread.Thread, err
 	if !ok {
 		return thread.Thread{}, ErrNotFound
 	}
+	// 与真实仓储一致：隐藏 / 删除主题对公开详情不可见。
+	if s := r.state.threadStatus[id]; s != "" && s != "active" {
+		return thread.Thread{}, ErrNotFound
+	}
 	return t, nil
 }
 
@@ -172,6 +182,9 @@ func (r *fakeRepos) ListThreads(ctx context.Context, q ThreadQuery) ([]thread.Th
 	var out []thread.Thread
 	for _, t := range r.state.threads {
 		if t.NodeID != q.NodeID {
+			continue
+		}
+		if s := r.state.threadStatus[t.ID]; s != "" && s != "active" {
 			continue
 		}
 		if !q.After.IsZero() && !beforeThreadCursor(t, q) {
@@ -343,7 +356,10 @@ func (x *fakeTx) ArchiveNode(ctx context.Context, id int64) error {
 
 func (x *fakeTx) ThreadExists(ctx context.Context, threadID int64) (bool, error) {
 	_, ok := x.state.threads[threadID]
-	return ok, nil
+	if !ok {
+		return false, nil
+	}
+	return x.state.threadStatus[threadID] == "" || x.state.threadStatus[threadID] == "active", nil
 }
 
 func (x *fakeTx) RecentWriteStats(ctx context.Context, userID int64, since time.Time) (WriteStats, error) {
@@ -383,6 +399,7 @@ func (x *fakeTx) InsertThread(ctx context.Context, n NewThread) (int64, error) {
 		ID: id, NodeID: n.NodeID, UserID: n.UserID, Title: n.Title,
 		Score: n.Score, LastReplyAt: n.CreatedAt, CreatedAt: n.CreatedAt,
 	}
+	x.state.threadStatus[id] = "active"
 	return id, nil
 }
 
@@ -466,6 +483,9 @@ func (x *fakeTx) ThreadOwner(_ context.Context, threadID int64) (int64, error) {
 	if !ok {
 		return 0, ErrNotFound
 	}
+	if s := x.state.threadStatus[threadID]; s != "" && s != "active" {
+		return 0, ErrNotFound
+	}
 	return t.UserID, nil
 }
 
@@ -492,6 +512,28 @@ func (x *fakeTx) SoftDeletePost(_ context.Context, postID int64) error {
 	}
 	p.Status = post.StatusDeleted
 	x.state.posts[postID] = p
+	return nil
+}
+
+// 治理隐藏的内存语义：已 hidden 幂等成功；不存在 / 作者已删收敛为 ErrNotFound。
+func (x *fakeTx) HidePost(_ context.Context, postID int64) error {
+	p, ok := x.state.posts[postID]
+	if !ok || p.Status == post.StatusDeleted {
+		return ErrNotFound
+	}
+	p.Status = post.StatusHidden
+	x.state.posts[postID] = p
+	return nil
+}
+
+func (x *fakeTx) HideThread(_ context.Context, threadID int64) error {
+	if _, ok := x.state.threads[threadID]; !ok {
+		return ErrNotFound
+	}
+	if s := x.state.threadStatus[threadID]; s == "deleted" {
+		return ErrNotFound
+	}
+	x.state.threadStatus[threadID] = "hidden"
 	return nil
 }
 

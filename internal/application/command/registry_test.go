@@ -8,8 +8,9 @@ import (
 
 func TestDefaultRegistryHasP0Commands(t *testing.T) {
 	// P1-M2 追加 /logout，P1-M3 追加 /vote 与 /search，v0.2.1 追加 /delete；
-	// P1-M5 在 login 之后追加邮箱四命令；顺序固定（帮助文本由注册表生成）。
-	want := []string{"top", "open", "new", "reply", "delete", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "node", "node", "node", "node", "help", "quit"}
+	// P1-M5 在 login 之后追加邮箱四命令；P2-M1 追加 /node 四条；P2-M1b 追加 /hide。
+	// 顺序固定（帮助文本由注册表生成）。
+	want := []string{"top", "open", "new", "reply", "delete", "hide", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "node", "node", "node", "node", "help", "quit"}
 	all := Default().All()
 	if len(all) != len(want) {
 		t.Fatalf("命令应为 %d 条，实际 %d", len(want), len(all))
@@ -21,7 +22,7 @@ func TestDefaultRegistryHasP0Commands(t *testing.T) {
 	}
 	subs := []string{"list", "create", "rename", "archive"}
 	for i, sub := range subs {
-		if all[15+i].Sub != sub {
+		if all[16+i].Sub != sub {
 			t.Errorf("/node 第 %d 条子命令应为 %q，实际 %q", i, sub, all[15+i].Sub)
 		}
 	}

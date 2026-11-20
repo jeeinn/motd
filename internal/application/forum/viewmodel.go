@@ -65,6 +65,9 @@ func NoticeFromError(err error) viewmodel.Notice {
 		n.Kind, n.Code = viewmodel.NoticeWarning, "forbidden"
 	case errors.Is(err, ErrNotFound):
 		n.Kind, n.Code = viewmodel.NoticeWarning, "not_found"
+		// 固定文案：写事务会包一层「写入事务失败（不可重试）」，
+		// 治理隐藏也复用本哨兵（目标不存在 / 已删都不区分），不能把内部链回显给终端。
+		n.Message = ErrNotFound.Error()
 	case errors.Is(err, ErrNotOwner):
 		n.Kind, n.Code = viewmodel.NoticeWarning, "not_owner"
 		// 哨兵错误必须有稳定的对外文案：写事务会把错误包成

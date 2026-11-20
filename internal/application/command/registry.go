@@ -61,6 +61,8 @@ var defaultCommands = []Command{
 	{Name: "reply", Usage: "/reply", Summary: "回复当前主题", MaxArgs: 0},
 	// v0.2.1：无参删当前主题，带一个 id 则删当前主题下的该条回复（仅作者）。
 	{Name: "delete", Usage: "/delete [id]", Summary: "删除当前主题 / 指定回复（仅作者）", MinArgs: 0, MaxArgs: 1},
+	// P2-M1b：与 /delete 对称的治理口径。无参隐藏当前主题，带 id 隐藏回复（仅管理员）。
+	{Name: "hide", Usage: "/hide [id]", Summary: "隐藏当前主题 / 指定回复（仅管理员）", MinArgs: 0, MaxArgs: 1},
 	// MinArgs=0 是刻意的：/login 不带参数时不落到通用「参数个数不符」，
 	// 而是进入 handle 的 provider 白名单分支，给出支持的 provider 提示。
 	{Name: "login", Usage: "/login github | /login email", Summary: "GitHub Device Flow / 邮箱密码登录", MinArgs: 0, MaxArgs: 1, Aliases: []string{"signin"}},

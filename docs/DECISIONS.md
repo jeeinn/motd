@@ -761,3 +761,37 @@
 - 代价 / 边界：多一列与一个 CHECK；5 个 seed 当前全 active，`ListNodes` 加过滤对现有行为**零影响**（返回值完全一致）；归档节点仍占 slug UNIQUE 名额，未来若要复用 slug 需显式清理，属 M1+ 课题。`GetNodeBySlug` 不过滤 archived 是有意选择，代价是归档 slug 仍可按名直取，不做"彻底隐身"。
 - 验证：777 测试全绿（768 → +9：迁移回填/回滚 2、行为过滤 1、archtest 守卫与负向注入 6）；`go build ./... && go vet ./... && go test -count=1 ./...` 全绿；P0 工程门禁对 M0 改动文件零新增命中（与 HEAD 基线同为 54 处既有命中）；`v7→v8` 迁移、回滚精确回 v7、带数据 kill-9 + WAL 恢复三项隔离演练见 `docs/OPS.md §5` 2026-11-20 条。生产 `data/motd.db` 全程未触碰。
 - 关联：`PHASE1-PLAN.md §2.10`、`docs/P2-PLAN.md §1`（M0 欠账）/ `§4.6`（节点合并推 P3）、`ADR-038`（软删口径）、`ADR-030`（编号澄清：实为认证限流，非节点）。
+
+## ADR-049 管理入口与授权模型：指纹白名单
+
+- 状态：已采纳（2026-11-20，P2-M1 已落地，P2-M1b 补写决策记录；`hide` 治理同样复用本模型）
+- 背景：公开邮箱注册开放后，任何 active 账号都能发帖；但版块治理（create/rename/archive）与内容治理必须有管理入口。M1 实现时面临三种候选授权模型，需要把已落地的取舍显式固化，避免后续新增治理命令时另造第二套判定。
+- 结论：
+  1. **唯一凭证是服务端 SSH 会话公钥指纹白名单**（启动配置注入 `map[string]struct{}`，由 `forum.WithAdminWhitelist` 复制进 Service）。判定只有一个谓词：`admin.CanAdmin(fingerprint, whitelist)`；所有治理用例的唯一入口是 `Service.requireAdmin(actor)`，cmd 层只传 `Principal.KeyFingerprint`，不写任何权限表达式；
+  2. **判定先于账号状态**：`requireAdmin` 不查 `users.status`、不调 `actor.checkWrite()`。白名单里的访客（`UserID=0`）就是 bootstrap 管理员，账号冻结与否不影响治理权——这是为了解决「没有管理员账号就无法建第一个版块」的鸡生蛋；
+  3. **审计主体用指纹**：治理事件 `EventAdminAction` 的 `ActorID` 对访客管理员为 0，`AdminFingerprint` 承担「谁」的语义，`DomainEvent.Validate` 对此有专门分支，不因 `UserID=0` 丢事件；
+  4. **统一失败口径**：空白名单、名单外指纹、空指纹、格式非法一律 `ErrAdminDenied`「仅管理员可执行」，不区分原因、不回显输入；
+  5. `/node list|create|rename|archive` 与 P2-M1b 的 `/hide` 共用这条路径，没有第二套管理员判定，也没有「内容管理员」之类的并行角色。
+- 理由（三方论证）：
+  - **否决 `users.role` + RBAC**：需要新迁移、提权接口和「谁能授予角色」的再归零问题；账号冻结与治理权耦合后，冻结管理员会连带失去处理事故内容的能力，与 bootstrap 需求冲突。
+  - **否决 Web 管理后台**：要新增 session/cookie/CSRF 与第二条传输面，与本项目 SSH-first 的信任边界（ADR-019/ADR-024）不一致，且不能复用 SSH 认证阶段算出的指纹。
+  - **否决独立 CLI 在线入口**：需要另外分发凭据与通道，把攻击面从「已认证的 SSH 会话」扩大到「网络可达的管理端口」；收益（远程运维）当前没有需求。
+  - **采用白名单指纹**：指纹由认证阶段服务端持有，永远不来自命令参数，用户无法通过提供文本自我提权；配置即授权，变更走部署流程，审计可直接落指纹，零新表、零新依赖。
+- 代价 / 边界：新增或撤销管理员必须改配置并重启，无在线增删；换钥匙即失去治理权；无角色分级（全有或全无）；审计详情记指纹而非账号名，需要配置维护映射。`requireAdmin` 刻意不复用 `checkWrite`，意味着冻结账号仍可治理——这是有意的取舍，不是遗漏。
+- 验证：M1 的节点治理用例与 cmd 测试覆盖越权固定文案、名单外拒绝、访客 bootstrap、冻结账号可治理；M1b 复用同一谓词并加 AST 守卫：用例入口必须调 `requireAdmin`，`requireAdmin` 必须调 `CanAdmin` 且不得调 `checkWrite`，cmd 层不得出现 `CanAdmin(`，全项目 `CanAdmin` 定义数必须为 1，每条守卫配负向注入。812 测试基线全绿。
+- 关联：`ADR-019`（终端信任域）、`ADR-024`（命令单一事实来源）、`ADR-048`（节点不变量）、`ADR-050`（本模型在内容治理上的复用）。
+
+## ADR-050 内容治理：管理员隐藏而非删除
+
+- 状态：已采纳（2026-11-20，P2-M1b）
+- 背景：公开注册后，垃圾主题 / 回复有真实治理需求，但 `Delete` 用例的 `canModify` 只让作者删自己的内容，白名单管理员对他人内容无能为力。数据库早已预留 `posts.status CHECK (... 'hidden')`（0001）与 `threads.status CHECK (... 'hidden')`（0004），但没有任何写入路径，也没有命令面。
+- 结论：
+  1. **命令口径选 (a)**：`/hide` 无参隐藏当前打开的主题，`/hide <id>` 隐藏该主题下 ID 为 `<id>` 的回复，与 `/delete` 的心智模型对称。管理员要能处理整条垃圾主题，而不只是单条回复；作者自删仍由 `/delete` 独占，不把治理语义塞进它；
+  2. **hidden 与 deleted 是两种语义**：`deleted` 是作者自删（现有 `Delete` 用例不写治理审计），`hidden` 是管理员治理，固定命令名为 `post hide` / `thread hide`。两者都是软删（不物理删、不级联），审计因此能明确区分动作来源。公开可见性完全由存储层既有过滤保证：`ListPosts` 固定 `status='normal'`、`GetThread`/`ListThreads` 固定 `status='active'`、检索 JOIN 也带 `t.status='active'`，因此隐藏后自动从所有公开视图消失，无需新增过滤分支；
+  3. **零迁移**：复用现成 CHECK，写端口新增 `HidePost` / `HideThread`，SQL 只 `UPDATE ... SET status='hidden'`，带 `status IN ('normal','hidden')` / `IN ('active','hidden')` 幂等条件：重复隐藏不报错，作者已删或不存在的目标收敛为固定文案「对象不存在」，不回显 ID、不区分状态差异；
+  4. **权限与审计都复用现成单点**：用例入口只经 `requireAdmin`（ADR-049），管理员隐藏自己的内容也允许；审计事件复用 `adminActionEvent("post hide"|"thread hide", ...)` → outbox → `AuditBridge` → `auth_events`，目标以 `post:<id>` / `thread:<id>` 记在 `target` 字段，访客管理员的 `ActorID=0`、指纹进 `fingerprint`；
+  5. **明确不做**：审核流、批量隐藏、Web 管理端、用户举报入口、恢复命令。首版只解决「管理员能立刻处理一条垃圾内容」。
+- 理由：物理删会丢失证据与上下文，也无法与作者自删在审计上区分；新增 status 值或状态机需要迁移与回归面，而 hidden 已在 CHECK 里；把可见性交给既有查询过滤，比在用例层散落 `if hidden` 更不容易漏；权限若另写一套「内容管理员」判定，迟早与节点治理分叉，因此坚持单一谓词；审计链路已由 M1 打通，复用它零新依赖、零新表。
+- 代价 / 边界：隐藏内容仍占数据库行（FTS 影子表由 0007 触发器在同一事务里摘除），无 `unhide` 命令，恢复需数据层操作；`/hide <id>` 与 `/delete <id>` 一样按 ID 定位，命令层只要求处于主题详情页以保证导航确定，不额外校验该回复是否属于当前主题（治理权本身就覆盖全站内容）；审计 detail 的 `node_id` 为 0，因为隐藏用例不从命令参数解析版块；事件 ID 含纳秒时间戳，固定时钟的单测需让时钟前进，否则 outbox 幂等键会合并两次调用。
+- 验证：835 测试全绿（812 → +23：应用用例 8、真实 SQLite 集成 3、cmd 接线 6、archtest 守卫与负向注入 6），`go build ./... && go vet ./... && go test -count=1 ./...` 全绿。集成证据：隐藏后 DB `status='hidden'`（不是 deleted）、`ListPosts` 与检索均不再返回、回复行仍在且为 normal；`auth_events` 落一条 `command="post hide"` / `"thread hide"` 且 `target` 含目标 ID；白名单访客隐藏他人回复成功，`user_id` 为空而 `fingerprint` 落地。无新迁移、无新依赖、生产 `data/` 未触碰、未 commit。
+- 关联：`ADR-049`（授权模型单点复用）、`ADR-038`（软删口径）、`ADR-015`（outbox 时序）、`ADR-048`（节点不变量）。
