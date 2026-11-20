@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-20
+
+社区治理版本。P2 五个里程碑（M0/M1/M1b/M2/M3）合并一次发版，新增节点管理、内容治理、编辑与回复计数；迁移 0007 → 0009，ADR-048 → 053，测试 749 → 903。
+
+### Added
+
+- **节点（版块）管理**：管理员用 `/node list|create|rename|archive` 列出 / 创建 / 改名 / 归档版块。归档为软删（只改 `node.status`，不动 threads），历史帖详情页仍显示版块名；5 个 seed 节点可归档、不可改名。`MOTD_ADMIN_FINGERPRINTS` 公钥指纹白名单比对已认证会话指纹（拒绝用户提交文本），白名单为空则无人可管；治理动作经 outbox 写入 `auth_events` 审计（ADR-048/049）。
+- **内容治理**：管理员用 `/hide [id]` 隐藏他人主题或回复（hidden ≠ deleted，数据可恢复）；`/unhide [id]` 与 `/unthread <thread-id>` 恢复隐藏内容，解决误隐藏不可逆（ADR-050/053）。
+- **作者编辑**：`/edit [id]` 或无参编辑首帖，仅作者本人可改（复用 `canModify`，与治理权分离）；详情页显示「已编辑 MM-DD HH:MM」，服务端固定文案走 `RenderSystem`，不改投票语义、不推进 `last_reply_at`（ADR-051）。
+- **回复数显示**：主题列表真实显示紧凑 `rN`（此前格式就位但生产从未赋值）。读时批量聚合 `ReplyCountsByThreadIDs`，`COUNT-1` 去首帖，分页 20 行 EXPLAIN 走 `idx_posts_thread`（ADR-052）。
+
+### Changed
+
+- 帮助命令按角色归组展示：6 条管理员命令单独归组 + 固定说明行，不隐藏、不动权限架构。
+- 治理权单点收口 `requireAdmin`，与作者权 `canModify` 严格分离。
+
+### Fixed
+
+- 浏览态连按 `Esc` 不再向终端追加「（取消）」；编辑 / 命令 / 邮箱态的取消提示保留。
+- 作者栏 `@username`（v0.3.3）与治理命令审计的显示路径统一，中文用户名按显示宽度截断。
+
+### Notes
+
+- 已知限制沿用：白名单变更需重启生效（SIGHUP 热重载推 P3）；审计 queue full 时 DomainBus 去重可能吞重投；回复计数 `INDEXED BY` 索引名硬绑定（技术债）。
+
 ## [0.3.3] - 2026-11-20
 
 小修复版本，无 schema 迁移、无新依赖。
@@ -142,7 +167,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jeeinn/motd/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/jeeinn/motd/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/jeeinn/motd/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/jeeinn/motd/compare/v0.3.0...v0.3.1

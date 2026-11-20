@@ -1,53 +1,75 @@
-# Release Notes — v0.3.3
+# Release Notes — v0.4.0
 
 **发布日期**：2026-11-20
-**Git tag**：[`v0.3.3`](https://github.com/jeeinn/motd/releases/tag/v0.3.3)
+**Git tag**：`v0.4.0`（待打，代码与文档已就绪）
 **Module**：`github.com/jeeinn/motd`
 
-> 小修复版本。列表作者栏从数字 ID 改为可读的 `@username`。无 schema 迁移、无新依赖，测试从 755 增至 768。
+> 社区治理版本。P2 五个里程碑（M0/M1/M1b/M2/M3）合并一次发版：版块可管理、内容可修正、终端提交更可靠。迁移 0007 → 0009，ADR-048 → 053，测试 749 → 903（双口径实测一致）。无新依赖。
 
 ## 本版变化
 
-- **作者栏 `@username`**：主题列表与详情回复列表的作者从 `#7`（数据库主键）改为 `@alice`（真实用户名），用户第一次能看出"是谁发的"。这是用户与团队讨论符号体系后确认的唯一真收益点——分数 `[N]`、帖子 ID `id=109`、时间等其余符号全部保持不变。
+### 节点（版块）管理
 
-  渲染前后（strip SGR 后）：
-  ```
-  改前：>  2. [0] 另一个主题 id=109 #7 11-19 10:26
-  改后：>  2. [0] 另一个主题 id=109 @alice 11-19 10:26
-  ```
+管理员用 `/node list|create|rename|archive` 列出 / 创建 / 改名 / 归档版块。归档按软删处理——只改 `node.status`，不动 threads，历史帖详情页仍显示版块名，规避 `threads.node_id` 外键冲突。5 个 seed 节点可归档、不可改名（slug/name 保持稳定，0002 的 `INSERT OR IGNORE` 保证迁移重放不覆盖）。
 
-  **中文用户名**（显示宽度截断，上限 10 列，超出以 ASCII `~` 收尾）：
-  ```
-  >  1. [2] 中文作者测试 id=110 @中文用户~ 11-19 10:26
-  ```
-  **历史数据兜底**：查不到 username 时回退显示 `#42`，不留空段。
+权限来自 `MOTD_ADMIN_FINGERPRINTS`（逗号分隔的 `SHA256:` 公钥指纹），比对的是 **SSH 认证阶段算出的会话指纹**，绝不是用户命令文本——公开邮箱注册无法自我提权。白名单留空 = 无人可管；变更需重启生效（热重载推 P3）。不引入 `users.role` / RBAC，不做 Web 管理页，CLI 仅作灾后恢复补充。治理动作经 outbox 异步写入 `auth_events` 审计（谁 / 何时 / 命令 / 目标 / 结果）。
 
-- **安全实现**：username 来自 users 表、属于用户数据，写入 `RowMeta.Author` 后走 `RenderUser` 净化链（不是原来的 `RenderSystem` 本地数值路径）；一屏一次批量查询取用户名（非 N+1）；新增 AST 守卫静态断言作者段只能走 `ext()`、不得进 `sys()`，并有 ANSI 注入负向测试。
+### 内容治理
 
-## 明确未做
+`/hide [id]` 隐藏他人主题或回复，`hidden ≠ deleted`——是可治理的隐藏状态，不物理删数据。用户实测反馈"担心误隐藏无法恢复"后补 `/unhide [id]`（恢复当前主题/回复）与 `/unthread <thread-id>`（从任意页面恢复隐藏主题，解决 `/unhide` 无参对已隐藏主题不可达的问题）。命令复用与节点治理同一套 `requireAdmin` 权限与审计通道。6 条管理员命令在帮助里单独归组展示。
 
-- **回复数仍不显示**：此前格式 ` N回复` 在本版改为紧凑 ` rN`，但核实发现该字段在生产路径**从未被赋值**（历史上也从未真正显示过）。本版按用户拍板"暂搁"，不加回复计数投影；`rN` 格式已就位，待将来接通计数即生效。
-- 分数 `▲` 化、帖子 ID 改 `[109]`、`#` 预留给标签：**均否决/不做**（详见 `DECISIONS.md` 本次 ADR）。
-- 详情页顶部作者行：现有详情页不渲染作者位，本版不新增（遵循"其余符号不动"）。
+### 作者编辑
+
+`/edit [id]` 或无参编辑首帖，仅作者本人可操作（复用 `canModify` 单点所有权判定，与治理权严格分离）。详情页显示「已编辑 MM-DD HH:MM」，走 `RenderSystem` 固定路径、复用 `MOTD_DISPLAY_TIMEZONE`，不进用户内容净化链、不做第二套时区逻辑。策略为「已编辑标记」而非版本历史：保留原投票与回复，接受"投票对象可能是改前内容"的语义代价；编辑**不推进 `last_reply_at`**，避免改内容把旧帖顶到最新。
+
+### 回复数显示
+
+主题列表真实显示紧凑 `rN`（此前 v0.3.3 已就位格式，但 `RowMeta.Replies` 生产路径从未赋值、实际不显示）。本版读时批量聚合 `ReplyCountsByThreadIDs`，`COUNT-1` 去掉首帖得实际回复数；分页 20 行的 EXPLAIN 走 `idx_posts_thread`，无全表扫（可复现对照见 ADR-052）。选择读时聚合而非写时维护列，与项目"写事务稀缺"约束同向，零迁移、零写路径改动。
+
+### 用户实测反馈修复
+
+- 浏览态连按 `Esc` 不再向终端追加「（取消）」——改为静默 `actionNone`；编辑 / 命令 / 邮箱态的取消提示保留。
+- `/vote rm` "未生效"疑点经诊断确认非 bug：`/top` 后 `threadID` 清零，须先打开主题；守卫提示被吞属显示层，未改。
+
+## 升级说明
+
+从 v0.3.2 / v0.3.3 升级需执行两个新迁移（`0008_nodes_status`、`0009_edited_at`）：服务启动时自动应用，无需手工操作。建议先按 `OPS.md §2` 备份。v0.3.1 及更早版本同理，迁移会自动顺序补齐（0001 → 0009）。
+
+开启治理能力需在 `.env` 配置 `MOTD_ADMIN_FINGERPRINTS`（0600、不进仓库）：
+
+```bash
+ssh-keygen -lf ~/.ssh/id_rsa.pub
+# 把输出的 SHA256:... 指纹填入 .env，多个用逗号分隔
+MOTD_ADMIN_FINGERPRINTS=SHA256:<43 位 base64>
+```
 
 ## 安装与运行
 
 ```bash
-go install github.com/jeeinn/motd/cmd/server@v0.3.3
+go install github.com/jeeinn/motd/cmd/server@v0.4.0
 # 或从源码构建
 go build -o motd ./cmd/server && ./motd
 ```
 
-配置见 [README](README.md) 与 [`.env.sample`](.env.sample)。从 v0.3.2 升级无需迁移（仍止于 0007），替换二进制即可。
-
-## 变更明细
-
-见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.3.3]` 段落。
+配置见 [README](README.md) 与 [`.env.sample`](.env.sample)。
 
 ## 已知问题与限制
 
-沿用前版：限流计数纯内存；验证码 pepper 重启失效；`/recover` 对未注册邮箱回统一文案但实际不发信；正文超宽折行与行内左右移动不做；Ctrl+Enter 不可靠，正文提交用 `.` 或 Ctrl-D；窄终端下元信息会折行。
+- 白名单变更需重启才生效（SIGHUP 热重载推 P3）。
+- 审计缓冲 queue full 时，DomainBus 去重可能吞掉重投；`/healthz` 的 `audit_dropped > 0` 应立即告警。
+- 回复计数使用 `INDEXED BY` 锁计划，索引名硬绑定为技术债。
+- 沿用前版：限流计数纯内存；验证码 pepper 重启失效；`/recover` 对未注册邮箱回统一文案但实际不发信；正文超宽折行与行内左右移动不做；正文提交用 `.` 或 Ctrl-D；窄终端下元信息会折行。
+
+## 验证
+
+- `go build ./...` / `go vet ./...` 通过。
+- `go test -count=1 ./...` 全绿，0 FAIL；测试函数 **903**（`go test -list` 与 `grep '^func Test'` 双口径一致）。
+- 5 个里程碑 commit + 1 个实测修复 commit 共 7 个，隔离演练均用 `data/` 副本，生产库全程未触碰（见 `OPS.md §5`）。
 
 ## 破坏性变更
 
-无。
+无。全部新增命令与字段向后兼容；旧客户端不受影响。
+
+## 变更明细
+
+见仓库内 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.4.0]` 段落，技术决策见 [`DECISIONS.md`](docs/DECISIONS.md) 的 ADR-048 ~ 053。

@@ -196,7 +196,7 @@ chmod 600 .env
 
 - `/delete` 是**软删**：仅把 `threads.status` 或 `posts.status` 置为 `deleted`，不物理删除、不级联。无参删当前打开的主题（成功后回列表），带 `<id>` 删指定回复（成功后刷新详情）；必须在主题详情页使用，否则给固定提示。
 - 只有作者本人能删自己的内容；非作者、访客、目标不存在或已删，一律回「仅作者可删除」——统一文案，不泄露状态或事务细节。所有权判定集中在 application 层一个 `canModify` 函数，将来引入版主只在这一处加分支。
-- 被删主题下的**回复行保留在库**，但详情、列表与全文检索均不可见——检索的两条 SQL 都按所属主题 `status='active'` 过滤。运维从 DB 层手工改 `status` 时遵循同一口径：`deleted` 对公开读等价于不存在，`hidden` 预留给将来治理角色、当前无入口。
+- 被删主题下的**回复行保留在库**，但详情、列表与全文检索均不可见——检索的两条 SQL 都按所属主题 `status='active'` 过滤。运维从 DB 层手工改 `status` 时遵循同一口径：`deleted` 对公开读等价于不存在；`hidden` 自 v0.4.0 起由管理员 `/hide` / `/unhide` / `/unthread` 命令治理（详见上方「社区治理」小节），不再只是预留位。
 - FTS 索引由 0007 触发器在 `posts.status` 变更时同步；删除主题本身不动 posts 行，索引行仍在但被查询层过滤，这是预期行为，**无需用 `fts-rebuild` 清理**。无公开恢复入口（被删内容如需找回只能从 DB 层操作，属非目标）。
 - 本轮无新迁移（仍止于 0007），无需回填。冻结账号（status 非 active）当前仍可删自己内容，统一提示口径优先。
 
@@ -213,6 +213,43 @@ chmod 600 .env
 - **账号口径**：同一邮箱不会自动合并到已有账号（`primary_email` 无 UNIQUE 是结构性保证）；占用时提示「不会自动合并；如需变更归属请联系管理员处理」——当前无 `/unlink` 命令，变更归属只能从数据层处理。`/recover` 成功后该用户**全部 SSH 会话立即失效**，需用 `/login email` 重新登录。
 - **无新迁移**：`email_tokens` / `users` / `identities` / `local_credentials` 均已在 0001 建好，迁移仍止于 0007。发信在写事务**提交之后**执行（3s 写超时扛不住 SMTP），失败则 token 自然过期、不补偿删除。
 - 用户后期更换邮箱凭据：只改 `.env` 三行（USER / PASS / FROM），代码无需改动。
+
+### 社区治理（P2 / v0.4.0）
+
+**管理员配置 `MOTD_ADMIN_FINGERPRINTS`**（在 `.env` 里配置，见 `.env.sample`）：逗号分隔的 `SHA256:` 公钥指纹，留空 = 无人可管。获取方式 `ssh-keygen -lf ~/.ssh/id_rsa.pub`，把 `SHA256:...` 整串填入；多个管理员用逗号分隔。405 端口/HTTP 无管理端点——治理只走 SSH 命令。
+
+- **指纹来源**：比对的是 SSH **认证阶段服务端算出的会话指纹**，不是命令文本。公开注册用户无法自我提权；换钥等于自动失权。
+- **变更需重启**：白名单在启动时读入 `Config.AdminFingerprints`（`internal/config/admin.go`），运行中改 `.env` 不生效，必须重启服务。SIGHUP 热重载推 P3，当前不做。非法指纹（非 `SHA256:` 格式）启动即失败，不静默放行。
+- **权限单点**：所有治理命令经 `requireAdmin` 收口，与作者权 `canModify` 严格分离；访客与普通用户调用统一返回拒绝文案，不泄露命令细节。
+
+**节点（版块）管理**：
+
+| 命令 | 作用 | 约束 |
+| --- | --- | --- |
+| `/node list` | 列出全部版块，含 `active` / `archived` 状态 | 管理员 |
+| `/node create <slug> <name>` | 创建版块 | slug 走白名单 + 层级深度校验 |
+| `/node rename <slug> <name>` | 改名 | **seed 节点拒绝改名**（slug/name 保持稳定） |
+| `/node archive <slug>` | 归档版块 | seed 节点允许归档；只改 `node.status`，不动 threads |
+
+- **归档是软删**：只置 `node.status='archived'`，列表查询带 `status='active'` 过滤；历史帖详情页仍显示版块名（`GetNodeBySlug` 不过滤 archived）。绝不物理删节点——`threads.node_id` 有外键，有帖节点物理删会失败。
+- **迁移**：`0008_nodes_status.sql` 加 `status TEXT NOT NULL DEFAULT 'active'`。升级前建议备份（§2）；启动自动应用。v7→v8 迁移 / 回滚 / kill-9 + WAL 演练记录见 §5（2026-11-20，隔离环境，生产库未触碰）。
+
+**内容治理**：
+
+| 命令 | 作用 | 约束 |
+| --- | --- | --- |
+| `/hide [id]` | 隐藏当前主题 / 指定回复 | hidden ≠ deleted，可恢复 |
+| `/unhide [id]` | 恢复当前主题 / 指定回复 | 复用 `requireAdmin` |
+| `/unthread <thread-id>` | 从任意页面恢复被隐藏主题 | 解决 `/unhide` 无参对已隐藏主题不可达 |
+
+- `hidden` 是可治理状态、不是删除：被藏内容从列表 / 详情 / 检索不可见，但数据保留，可用恢复命令还原。这点与作者 `/delete` 的 `deleted` 语义不同——后者无公开恢复入口。
+- 所有治理动作经 outbox 异步写入 `auth_events`（谁 / 何时 / 命令 / 目标 / 结果），审计 queue full 时 fail-closed；`/healthz` 的 `audit_dropped > 0` 应立即告警。DomainBus 去重在 queue full 时可能吞掉重投，属已知限制。
+
+**作者编辑（`/edit [id]`）**：仅作者本人（复用 `canModify`），详情页显示「已编辑 MM-DD HH:MM」，时间走 `MOTD_DISPLAY_TIMEZONE`；编辑不推进 `last_reply_at`。迁移 `0009_edited_at.sql` 加 `edited_at`，启动自动应用。
+
+**回复数显示**：主题列表的 `rN` 由读时聚合 `ReplyCountsByThreadIDs` 计算（`COUNT-1` 去首帖），无迁移。使用 `INDEXED BY idx_posts_thread` 锁计划，索引名硬绑定为技术债——若将来重命名该索引，须同步改查询或 EXPLAIN 会退化全表扫。
+
+**帮助**：6 条管理员命令在帮助里单独归组 + 固定说明行，不隐藏、不动权限架构。
 
 ## 4. 恢复流程
 
