@@ -47,6 +47,64 @@ func TestReplyCountsByThreadIDsBatchProjection(t *testing.T) {
 	}
 }
 
+// 边界（lead 指定）：首帖被隐藏后，详情页把可见 Posts[0] 当正文，
+// 投影回复数必须继续等于详情页实际可见的回复行数（可见 normal 数 - 1）。
+func TestReplyCountAfterFirstPostHidden(t *testing.T) {
+	e := newForumEnv(t)
+	ctx := e.ctx
+	now := testBaseTime
+	writer := func() *forum.Service {
+		svc := forum.NewService(e.repos, forum.WithClock(func() time.Time { return now }))
+		now = now.Add(61 * time.Second)
+		return svc
+	}
+	viewer := forum.NewService(e.repos, forum.WithClock(func() time.Time { return testBaseTime }))
+	actor := forum.Actor{UserID: e.userID, Status: user.StatusActive}
+
+	threadID, err := writer().CreateThread(ctx, actor, forum.CreateThreadInput{
+		NodeID: e.nodeID, Title: "首帖被隐藏", Body: "原首帖正文",
+	})
+	if err != nil {
+		t.Fatalf("建主题: %v", err)
+	}
+	initial, err := viewer.GetThread(ctx, threadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPostID := initial.Posts[0].ID
+	for _, body := range []string{"回复一", "回复二"} {
+		if _, err := writer().CreatePost(ctx, actor, forum.CreatePostInput{
+			ThreadID: threadID, Body: body,
+		}); err != nil {
+			t.Fatalf("回复 %q: %v", body, err)
+		}
+	}
+
+	// 直接落库把首帖置 hidden：本测试只验计数口径，不验 hide 命令本身。
+	if _, err := e.pools.writer.ExecContext(ctx,
+		`UPDATE posts SET status = 'hidden' WHERE id = ?`, firstPostID); err != nil {
+		t.Fatalf("隐藏首帖: %v", err)
+	}
+
+	counts, err := e.repos.ReplyCountsByThreadIDs(ctx, []int64{threadID})
+	if err != nil {
+		t.Fatalf("批量查询回复数: %v", err)
+	}
+	if counts[threadID] != 1 {
+		t.Fatalf("隐藏首帖后应剩 1 条回复，实际 %d", counts[threadID])
+	}
+	sc, err := viewer.ScreenThreadDetail(ctx, threadID, forum.ViewContext{})
+	if err != nil {
+		t.Fatalf("详情屏: %v", err)
+	}
+	if sc.Detail.Body != "回复一" {
+		t.Fatalf("首帖隐藏后正文应取可见第一条，实际 %q", sc.Detail.Body)
+	}
+	if len(sc.Rows) != 1 || counts[threadID] != len(sc.Rows) {
+		t.Fatalf("投影回复数应等于详情页可见回复行数: count=%d rows=%d", counts[threadID], len(sc.Rows))
+	}
+}
+
 func TestReplyCountsByThreadIDsEmptyInput(t *testing.T) {
 	e := newForumEnv(t)
 	for _, ids := range [][]int64{nil, {}, {0, -1}} {
@@ -60,16 +118,9 @@ func TestReplyCountsByThreadIDsEmptyInput(t *testing.T) {
 	}
 }
 
-// EXPLAIN 断言验的是 replyCountsQuery 产出的生产 SQL 本身（与仓储共用构造器），
-// 因此任何把 INDEXED BY 去掉的改动都会在这里变红。小表上纯 IN 查询会选 SCAN posts，
-// 显式锁定索引后各规模都稳定 SEARCH posts USING INDEX idx_posts_thread。
-func TestReplyCountsQueryUsesThreadIndex(t *testing.T) {
-	e := newForumEnv(t)
-	q := replyCountsQuery(20)
-	args := make([]any, 20)
-	for i := range args {
-		args[i] = int64(i + 1) // EXPLAIN 也要求占位符有实参；取值不影响计划。
-	}
+// explainReplyCountsPlan 返回一条 SQL 的完整 EXPLAIN QUERY PLAN 文本。
+func explainReplyCountsPlan(t *testing.T, e *forumEnv, q string, args []any) string {
+	t.Helper()
 	rows, err := e.pools.reader.QueryContext(e.ctx, `EXPLAIN QUERY PLAN `+q, args...)
 	if err != nil {
 		t.Fatalf("查看执行计划: %v", err)
@@ -89,13 +140,41 @@ func TestReplyCountsQueryUsesThreadIndex(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	text := plan.String()
-	t.Logf("回复数批量查询执行计划:\n%s", text)
-	if !strings.Contains(text, "SEARCH posts USING INDEX idx_posts_thread") {
-		t.Errorf("执行计划未走 idx_posts_thread:\n%s", text)
+	return plan.String()
+}
+
+// EXPLAIN 断言验的是 replyCountsQuery 产出的生产 SQL 本身（与仓储共用构造器），
+// 因此任何把 INDEXED BY 去掉的改动都会在这里变红。
+// 同时打印「不锁索引」的对照计划：SCAN 是小表上的正确代价选择，不是缺陷；
+// INDEXED BY 消除的是计划漂移、不是 SCAN 本身，ADR-052 已如实记录。
+func TestReplyCountsQueryUsesThreadIndex(t *testing.T) {
+	e := newForumEnv(t)
+	// 复现 SQLite 的代价选择：灌入小规模数据并 ANALYZE 生成 sqlite_stat1。
+	// 没有统计信息时优化器会按默认估算直接选索引，看不到计划漂移。
+	tid := e.insertThread(t, "执行计划样本", 0, e.clock)
+	for i := 0; i < 15; i++ {
+		e.insertPost(t, tid, "样本正文", post.StatusNormal, e.clock+int64(i))
 	}
-	if strings.Contains(text, "SCAN posts") {
-		t.Errorf("执行计划出现 posts 全表扫描:\n%s", text)
+	if _, err := e.pools.writer.ExecContext(e.ctx, `ANALYZE`); err != nil {
+		t.Fatalf("收集统计信息: %v", err)
+	}
+
+	args := make([]any, 20)
+	for i := range args {
+		args[i] = int64(i + 1) // EXPLAIN 也要求占位符有实参；取值不影响计划。
+	}
+	prodQuery := replyCountsQuery(20)
+	prodPlan := explainReplyCountsPlan(t, e, prodQuery, args)
+	plainQuery := strings.Replace(prodQuery, "INDEXED BY idx_posts_thread ", "", 1)
+	plainPlan := explainReplyCountsPlan(t, e, plainQuery, args)
+
+	t.Logf("【对照·不锁索引·小表】\nSQL: %s\n%s", plainQuery, plainPlan)
+	t.Logf("【生产·INDEXED BY·小表】\nSQL: %s\n%s", prodQuery, prodPlan)
+	if !strings.Contains(prodPlan, "SEARCH posts USING INDEX idx_posts_thread") {
+		t.Errorf("执行计划未走 idx_posts_thread:\n%s", prodPlan)
+	}
+	if strings.Contains(prodPlan, "SCAN posts") {
+		t.Errorf("执行计划出现 posts 全表扫描:\n%s", prodPlan)
 	}
 }
 
