@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-11-20
+
+小修复版本，无 schema 迁移、无新依赖。
+
+### Added
+
+- 主题列表、主题详情回复列表、搜索结果显示 `id=<数字>`（实体 ID），可直接作 `/open` / `/delete` 参数。与作者 `#ID`、分数 `[N]` 三种编号互不混淆；版块列表的 node.ID 不显示（非删除目标，避免误操作）。
+
 ## [0.3.1] - 2026-11-20
 
 体验优化小版本，无 schema 迁移、无新依赖。
@@ -124,7 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/jeeinn/motd/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/jeeinn/motd/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jeeinn/motd/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jeeinn/motd/compare/v0.2.0...v0.2.1
