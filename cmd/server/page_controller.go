@@ -99,6 +99,7 @@ const (
 	composerTitleHint          = "新建主题：输入标题后按 Enter 确认（Esc 取消）"
 	composerBodyHint           = "回复：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
 	composerBodyAfterTitleHint = "标题已接收：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
+	composerEditHint           = "编辑：重新输入完整新正文（覆盖原文），Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
 	composerLimitHint          = "正文已达长度上限，请精简后继续（Esc 取消）"
 )
 
@@ -109,13 +110,14 @@ const (
 // 两阶段的输入都经 lineEcho 净化后回显，提交时由 forum.Service 校验；
 // 原始字节（KeyMsg.Raw / Text）永不直接进入输出流。
 type pageEditor struct {
-	stage    editorStage
-	creating bool            // true=新主题（需标题+正文），false=回复（只需正文）
-	runes    []rune          // 仅 stageTitle 使用：标题单行缓冲
-	body     *input.Composer // 仅 stageBody 使用：多行正文缓冲
-	title    string
-	nodeID   int64
-	threadID int64
+	stage      editorStage
+	creating   bool            // true=新主题（需标题+正文），false=回复（只需正文）
+	editPostID int64           // >0=编辑既有正文（重新输入全文），提交走 EditPost；0=发帖/回复
+	runes      []rune          // 仅 stageTitle 使用：标题单行缓冲
+	body       *input.Composer // 仅 stageBody 使用：多行正文缓冲
+	title      string
+	nodeID     int64
+	threadID   int64
 }
 
 func (h *inputHandler) newPageController(out io.Writer) *pageController {
@@ -427,6 +429,8 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.vote(ctx, sess, inv.Args[0])
 	case "delete":
 		return p.delete(ctx, sess, inv.Args)
+	case "edit":
+		return p.edit(ctx, sess, inv.Args)
 	case "hide":
 		return p.hide(ctx, sess, inv.Args)
 	case "search":
@@ -474,10 +478,52 @@ func (p *pageController) delete(ctx context.Context, sess pageSession, args []st
 	return p.showDetail(ctx, sess, p.threadID)
 }
 
-// deleteActor 只提供所有权判定需要的 UserID：访客保持零值，由 canModify 统一拒绝。
+// edit 的确切口径（P2-M2 / ADR-051）：与 /delete 对称，且必须重新输入完整新正文。
+//   - /edit        → 编辑当前主题正文（首帖）；
+//   - /edit <id>   → 编辑当前主题下 ID 为 <id> 的回复；首帖/回复统一走 posts 表。
+//
+// 两者都要求处于详情页（导航确定）。id 严格按十进制正整数解析（照 /delete），
+// 不回显原文。targetID 解析后先做**只读判权**（CanEditPost）再进入 composer，
+// 避免非作者白输一遍；提交时 EditPost 在写事务内再次判权（防 TOCTOU）。
+// 非作者 / 访客 / 目标不存在统一「仅作者可编辑」，不区分原因。
+func (p *pageController) edit(ctx context.Context, sess pageSession, args []string) error {
+	if p.service == nil {
+		return p.writeFixed(sess, "论坛服务尚未就绪")
+	}
+	if p.screen.Kind != viewmodel.ScreenThreadDetail || p.threadID <= 0 {
+		return p.writeFixed(sess, "请先打开一个主题再编辑")
+	}
+
+	targetID := int64(0)
+	if len(args) > 0 {
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil || id <= 0 {
+			return p.writeFixed(sess, "ID 必须是正整数")
+		}
+		targetID = id
+	} else {
+		// 无参 = 当前主题正文（首帖）。正文不在 Rows 里（Rows 从 Posts[1:] 起），
+		// 用只读用例取首帖 id，避免靠展示数据猜目标。
+		d, err := p.service.GetThread(ctx, p.threadID)
+		if err != nil {
+			return p.fail(sess, err)
+		}
+		if len(d.Posts) == 0 {
+			return p.writeFixed(sess, "主题正文不存在")
+		}
+		targetID = d.Posts[0].ID
+	}
+
+	if err := p.service.CanEditPost(ctx, p.ownerActor(ctx, sess), targetID); err != nil {
+		return p.fail(sess, err)
+	}
+	return p.startEditComposer(sess, targetID)
+}
+
+// ownerActor 只提供所有权判定需要的 UserID：访客保持零值，由 canModify 统一拒绝。
 // 刻意不复用 p.actor（它给访客 ErrReadOnly），否则访客与非作者会得到两种提示，
-// 破坏「仅作者可删除」的防枚举口径。
-func (p *pageController) deleteActor(ctx context.Context, sess pageSession) forum.Actor {
+// 破坏「仅作者可删除 / 仅作者可编辑」的防枚举口径。删除与编辑共用此构造。
+func (p *pageController) ownerActor(ctx context.Context, sess pageSession) forum.Actor {
 	principal := sess.Principal()
 	if !principal.IsUser() {
 		return forum.Actor{Guest: true}
@@ -489,6 +535,11 @@ func (p *pageController) deleteActor(ctx context.Context, sess pageSession) foru
 		}
 	}
 	return a
+}
+
+// deleteActor 保留为删除路径的语义化别名；权限构造与编辑同源（唯一 canModify）。
+func (p *pageController) deleteActor(ctx context.Context, sess pageSession) forum.Actor {
+	return p.ownerActor(ctx, sess)
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +578,23 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 		return p.writeFixed(sess, composerTitleHint)
 	}
 	return p.writeFixed(sess, composerBodyHint)
+}
+
+// startEditComposer 进入「编辑既有正文」态：复用 startComposer 的正文阶段
+// （Enter 换行、哨兵/Ctrl-D 提交、Esc 取消），但跳过标题阶段与发帖/回复的身份检查
+// （权限已由 edit 的 CanEditPost 前置判定），提交时走 EditPost 覆盖原文。
+// 正文从空缓冲开始——用户必须重新输入完整新正文，不做就地行编辑、不预填原文。
+func (p *pageController) startEditComposer(sess pageSession, postID int64) error {
+	e := &pageEditor{
+		stage: stageBody, creating: false, editPostID: postID,
+		threadID: p.threadID,
+		body:     input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes)),
+	}
+	e.body.Start()
+	p.editor = e
+	p.echo.setSecret(false)
+	_ = sess.SetState(presence.StateComposing)
+	return p.writeFixed(sess, composerEditHint)
 }
 
 // editorKey 是编辑态的单入口：取消键两阶段共用，其余按键按阶段分流。
@@ -666,13 +734,28 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 		return p.writeFixed(sess, composerBodyAfterTitleHint)
 	}
 
-	actor, err := p.actor(ctx, sess)
-	if err != nil {
-		return p.cancelEditorWithNotice(sess, err)
+	editing := e.editPostID > 0
+	// 编辑用 ownerActor（仅 UserID，不查状态、不给访客 ErrReadOnly），
+	// 与前置 CanEditPost、与删除路径同一口径；发帖/回复仍走 p.actor 的写准入。
+	var actor forum.Actor
+	if editing {
+		actor = p.ownerActor(ctx, sess)
+	} else {
+		var err error
+		actor, err = p.actor(ctx, sess)
+		if err != nil {
+			return p.cancelEditorWithNotice(sess, err)
+		}
 	}
 
 	var writeErr error
-	if e.creating {
+	if editing {
+		// 编辑：只覆盖既有正文，actor 仅用于 canModify 判权；EDIT 不查账号状态
+		// （与删除同口径：作者权不是治理权，前置 CanEditPost 已统一拒绝访客/非作者）。
+		writeErr = p.service.EditPost(ctx, actor, forum.EditPostInput{
+			PostID: e.editPostID, Body: text,
+		})
+	} else if e.creating {
 		_, writeErr = p.service.CreateThread(ctx, actor, forum.CreateThreadInput{
 			NodeID: e.nodeID, Title: e.title, Body: text,
 		})
@@ -689,6 +772,13 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 
 	if writeErr != nil {
 		return p.fail(sess, writeErr)
+	}
+	if editing {
+		p.notice = viewmodel.Notice{
+			Kind: viewmodel.NoticeSuccess, Code: "edited", Message: "已保存修改",
+		}
+		// 编辑不推进 last_reply_at：刷新详情页即可，列表排序不受影响。
+		return p.showDetail(ctx, sess, threadID)
 	}
 	p.notice = viewmodel.Notice{
 		Kind: viewmodel.NoticeSuccess, Code: "saved", Message: "已发布",

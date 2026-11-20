@@ -66,8 +66,9 @@ func TestNodesStatusBackfillsSeedRows(t *testing.T) {
 	if err := pools.reader.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 8 {
-		t.Fatalf("fresh 库迁移后版本应为 8，实际 %d", version)
+	// fresh 库会一路应用到最新（现为 9，含 P2-M2 的 0009）；0008 的回填断言在下方可独立核验。
+	if version != 9 {
+		t.Fatalf("fresh 库迁移后版本应为 9，实际 %d", version)
 	}
 	if !hasColumn(t, pools.writer, "nodes", "status") {
 		t.Fatal("0008 应用后 nodes 应有 status 列")

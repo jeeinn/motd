@@ -189,14 +189,15 @@ func (r *ForumRepos) ListThreads(ctx context.Context, q forum.ThreadQuery) ([]th
 // PostReader
 // ---------------------------------------------------------------------------
 
-const selectPosts = `SELECT id, thread_id, user_id, body_md, status, parent_post_id, created_at FROM posts`
+// edited_at 用 COALESCE 归一到 0（领域层 0 = 从未编辑），避免把 sql.NullInt64 泄漏出仓储。
+const selectPosts = `SELECT id, thread_id, user_id, body_md, status, parent_post_id, created_at, COALESCE(edited_at, 0) FROM posts`
 
 func scanPost(s interface{ Scan(...any) error }) (post.Post, error) {
 	var p post.Post
 	var parent sql.NullInt64
 	var status string
 	var created int64
-	err := s.Scan(&p.ID, &p.ThreadID, &p.UserID, &p.BodyMD, &status, &parent, &created)
+	err := s.Scan(&p.ID, &p.ThreadID, &p.UserID, &p.BodyMD, &status, &parent, &created, &p.EditedAt)
 	if err != nil {
 		return post.Post{}, err
 	}
@@ -236,6 +237,21 @@ func (r *ForumRepos) ListPosts(ctx context.Context, q forum.PostQuery) ([]post.P
 		out = out[:limit]
 	}
 	return out, hasMore, nil
+}
+
+// PostAuthor 供编辑入口进入 composer 前只读判权；只认 normal 内容，
+// 不存在 / 软删 / 隐藏一律 ErrNotFound，与 PostOwner 的口径一致。
+func (r *ForumRepos) PostAuthor(ctx context.Context, postID int64) (int64, error) {
+	var owner int64
+	err := r.pools.QueryRowContext(ctx,
+		`SELECT user_id FROM posts WHERE id = ? AND status = 'normal'`, postID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, forum.ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("查询内容作者: %w", err)
+	}
+	return owner, nil
 }
 
 // ---------------------------------------------------------------------------

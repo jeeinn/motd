@@ -34,4 +34,8 @@ type Post struct {
 	Status    Status
 	ParentID  *int64
 	CreatedAt time.Time
+	// EditedAt 是最近一次编辑的 Unix 秒；0 表示从未编辑（DB 的 edited_at IS NULL）。
+	// 放在领域对象里仅为把迁移 0009 的列带出仓储，供详情页标记使用；
+	// 不参与任何业务规则（谁能改、怎么改仍由 application/forum.EditPost 收口）。
+	EditedAt int64
 }

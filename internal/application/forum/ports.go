@@ -127,6 +127,10 @@ type ThreadReader interface {
 // PostReader 是内容的只读端口。实现必须过滤软删除（status <> 'normal'）。
 type PostReader interface {
 	ListPosts(ctx context.Context, q PostQuery) ([]post.Post, bool, error)
+	// PostAuthor 返回单条可见内容的作者 ID，不存在或 status<>'normal' 返回 ErrNotFound。
+	// 供编辑入口在进入 composer **之前**做只读判权（CanEditPost），复用 canModify 单一谓词；
+	// 真正的判权仍在 EditPost 的写事务内复核，防 TOCTOU。
+	PostAuthor(ctx context.Context, postID int64) (int64, error)
 }
 
 // SearchQuery 是正文检索的归一化参数：Query 已经过清洗，
@@ -204,6 +208,10 @@ type WriteTx interface {
 	SoftDeleteThread(ctx context.Context, threadID int64) error
 	// SoftDeletePost 只把 posts.status 置为 deleted：不物理删除、不级联。
 	SoftDeletePost(ctx context.Context, postID int64) error
+	// EditPost 只 UPDATE posts 的 body_md 与 edited_at，**绝不碰 status / created_at /
+	// last_reply_at**：编辑不推进主题活跃度（同投票 AdjustScore 的教训 ADR-029），
+	// 也不改变可见性。editedAt 是 Unix 秒（由用例的 now 提供）。历史行 edited_at IS NULL。
+	EditPost(ctx context.Context, postID int64, newBody string, editedAt int64) error
 	// HideThread / HidePost 只把 status 置为 hidden（治理动作，区别于作者自删的 deleted）：
 	// 不物理删、不级联；已 hidden 重复调用是合法 no-op（幂等便于重试）；
 	// 目标不存在或已被作者删除返回 ErrNotFound。与判权一起落在同一事务快照内。

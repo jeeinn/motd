@@ -135,8 +135,9 @@ func TestThreadsStatusBackfillsHistoricalRows(t *testing.T) {
 	}
 }
 
-// TestFreshDatabaseReachesVersion8 锁定 P2-M0 节点 status 迁移后的基线版本。
-func TestFreshDatabaseReachesVersion8(t *testing.T) {
+// TestFreshDatabaseReachesVersion9 锁定 P2-M2 编辑标记迁移后的基线版本。
+// 新加 0009_edited_at 后，fresh 库必须一路应用到 9，不能停在 8。
+func TestFreshDatabaseReachesVersion9(t *testing.T) {
 	ctx := context.Background()
 	pools := openTestPools(t)
 	if _, err := Migrate(ctx, pools); err != nil {
@@ -146,8 +147,8 @@ func TestFreshDatabaseReachesVersion8(t *testing.T) {
 	if err := pools.reader.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 8 {
-		t.Fatalf("fresh 库迁移后版本应为 8，实际 %d", version)
+	if version != 9 {
+		t.Fatalf("fresh 库迁移后版本应为 9，实际 %d", version)
 	}
 }
 

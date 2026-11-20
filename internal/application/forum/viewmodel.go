@@ -74,6 +74,11 @@ func NoticeFromError(err error) viewmodel.Notice {
 		// 「写入事务失败（不可重试）: ...」，直接 err.Error() 既暴露内部实现，
 		// 又破坏「仅作者可删除」的统一口径。
 		n.Message = ErrNotOwner.Error()
+	case errors.Is(err, ErrNotEditor):
+		// 编辑是作者权（canModify），与删除同构但动作文案不同（ADR-051）。
+		// 同样取哨兵固定文案，绝不回显 ID 或事务内部链。
+		n.Kind, n.Code = viewmodel.NoticeWarning, "not_editor"
+		n.Message = ErrNotEditor.Error()
 	case errors.Is(err, ErrInvalidSort), errors.Is(err, ErrInvalidCursor),
 		errors.Is(err, ErrInvalidLimit), errors.Is(err, ErrInvalidTitle),
 		errors.Is(err, ErrInvalidBody), errors.Is(err, ErrInvalidVote),
@@ -155,6 +160,8 @@ func (s *Service) ScreenThreadDetail(ctx context.Context, threadID int64, v View
 		detail.Body = first.BodyMD
 		detail.AuthorID = first.UserID
 		detail.CreatedAt = first.CreatedAt.Unix()
+		// 正文存在首帖，编辑标记也读首帖；0（DB NULL）= 从未编辑，详情页不显示标记。
+		detail.EditedAt = first.EditedAt
 		rows = detailRows(d.Posts[1:], v.RowOffset)
 	}
 	if err := s.fillRowAuthors(ctx, rows, &detail); err != nil {

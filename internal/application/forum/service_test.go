@@ -235,6 +235,15 @@ func (r *fakeRepos) ListPosts(ctx context.Context, q PostQuery) ([]post.Post, bo
 	return out, hasMore, nil
 }
 
+// PostAuthor 与真实仓储一致：只认 normal 内容，其余返回 ErrNotFound。
+func (r *fakeRepos) PostAuthor(ctx context.Context, postID int64) (int64, error) {
+	p, ok := r.state.posts[postID]
+	if !ok || p.Status != post.StatusNormal {
+		return 0, ErrNotFound
+	}
+	return p.UserID, nil
+}
+
 // UsernamesByIDs 是只读投影端口的内存实现，同时记录调用次数以证明非 N+1。
 func (r *fakeRepos) UsernamesByIDs(_ context.Context, ids []int64) (map[int64]string, error) {
 	r.usernameCalls = append(r.usernameCalls, append([]int64(nil), ids...))
@@ -511,6 +520,19 @@ func (x *fakeTx) SoftDeletePost(_ context.Context, postID int64) error {
 		return ErrNotFound
 	}
 	p.Status = post.StatusDeleted
+	x.state.posts[postID] = p
+	return nil
+}
+
+// EditPost 的内存语义：只改 BodyMD 与 EditedAt，绝不碰 Status/CreatedAt 与所属主题时间。
+// 条件更新：不存在或非 normal 返回 ErrNotFound（与真实 SQL 的 requireOneRow 对齐）。
+func (x *fakeTx) EditPost(_ context.Context, postID int64, newBody string, editedAt int64) error {
+	p, ok := x.state.posts[postID]
+	if !ok || p.Status != post.StatusNormal {
+		return ErrNotFound
+	}
+	p.BodyMD = newBody
+	p.EditedAt = editedAt
 	x.state.posts[postID] = p
 	return nil
 }

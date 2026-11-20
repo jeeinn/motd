@@ -176,6 +176,8 @@ type Pagination struct {
 
 // Detail 是详情屏的主体内容（主题本身）。回复列表仍放在 Rows。
 // Author 与 RowMeta.Author 同源，均为未净化的 username 投影。
+// EditedAt 是正文（首帖）最近一次编辑的 Unix 秒，0 = 从未编辑；
+// 仅详情页正文下方展示「已编辑」标记用，列表行不带（80 列已紧）。
 type Detail struct {
 	ID        int64
 	Title     string
@@ -184,6 +186,7 @@ type Detail struct {
 	Author    string
 	Node      string
 	CreatedAt int64
+	EditedAt  int64
 }
 
 // Screen 是 application 层输出的一屏完整语义状态。

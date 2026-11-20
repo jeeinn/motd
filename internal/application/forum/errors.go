@@ -30,6 +30,10 @@ var (
 	ErrNotOwner = errors.New("仅作者可删除")
 	// ErrInvalidDeleteTarget 表示删除目标类型不是 thread/post（内部调用错误，非用户文本）。
 	ErrInvalidDeleteTarget = errors.New("删除目标类型不合法")
+	// ErrNotEditor 是编辑权限的统一对外口径，与 ErrNotOwner 同构但动作不同：
+	// 非作者、访客、目标不存在一律返回它，固定文案「仅作者可编辑」，
+	// 不区分原因、不回显 ID、不泄漏目标存在性（P2-M2 / ADR-051）。
+	ErrNotEditor = errors.New("仅作者可编辑")
 	// ErrAdminDenied 是所有节点治理命令的统一对外口径：
 	// 访客、非 active 账号、指纹不在白名单，一律返回它，不区分原因、不回显输入。
 	ErrAdminDenied = errors.New("仅管理员可执行")

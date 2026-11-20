@@ -795,3 +795,19 @@
 - 代价 / 边界：隐藏内容仍占数据库行（FTS 影子表由 0007 触发器在同一事务里摘除），无 `unhide` 命令，恢复需数据层操作；`/hide <id>` 与 `/delete <id>` 一样按 ID 定位，命令层只要求处于主题详情页以保证导航确定，不额外校验该回复是否属于当前主题（治理权本身就覆盖全站内容）；审计 detail 的 `node_id` 为 0，因为隐藏用例不从命令参数解析版块；事件 ID 含纳秒时间戳，固定时钟的单测需让时钟前进，否则 outbox 幂等键会合并两次调用。
 - 验证：835 测试全绿（812 → +23：应用用例 8、真实 SQLite 集成 3、cmd 接线 6、archtest 守卫与负向注入 6），`go build ./... && go vet ./... && go test -count=1 ./...` 全绿。集成证据：隐藏后 DB `status='hidden'`（不是 deleted）、`ListPosts` 与检索均不再返回、回复行仍在且为 normal；`auth_events` 落一条 `command="post hide"` / `"thread hide"` 且 `target` 含目标 ID；白名单访客隐藏他人回复成功，`user_id` 为空而 `fingerprint` 落地。无新迁移、无新依赖、生产 `data/` 未触碰、未 commit。
 - 关联：`ADR-049`（授权模型单点复用）、`ADR-038`（软删口径）、`ADR-015`（outbox 时序）、`ADR-048`（节点不变量）。
+
+## ADR-051 编辑功能：已编辑标记而非版本历史
+
+- 状态：已采纳（2026-11-20，P2-M2）
+- 背景：`PHASE2-PLAN.md §3` 早已拍板编辑策略为「已编辑标记」，但此前只落地了删除（v0.2.1）与内容治理（P2-M1b），编辑一直欠账。编辑触及 ViewModel 显示契约（需按 ADR-014 三层守卫评估），且「谁能改」必须与治理权（ADR-049/050）分清。本 ADR 从当前最大编号 050 顺延，不复用旧号。
+- 结论：
+  1. **保留原投票与全部回复，只改正文并加「已编辑」标记**：接受"投票对象可能是改前内容"的语义代价；首版不做富文本、版本历史 / diff、审核流、就地行编辑。用户拍板 `/edit <id>` 重新走 composer 输入**完整新正文**提交覆盖，不做行内编辑。
+  2. **权限是作者权，复用 `canModify`，不复用 `requireAdmin`**：入口 `canModify(actor.UserID, owner)`（`delete.go` 的唯一所有权判定）原样复用；管理员不能编辑他人内容——这与 M1b 的管理员隐藏是两条不同权限。非作者 / 访客 / 目标不存在统一 `ErrNotEditor`「仅作者可编辑」，不区分原因、不回显 ID。进入 composer 前 `CanEditPost`（只读端口 `PostAuthor`）做体验前置判权，提交时 `EditPost` 在写事务内用 `PostOwner` 再判一次（防 TOCTOU），两处都走同一个 `canModify`。
+  3. **`edited_at` 落在 posts 表，不落 threads**：正文存在首帖（首帖也是 posts 一行），主题正文的标记读首帖，回复的标记读回复行，统一 `0009_edited_at.sql` 加列（`INTEGER`、`NULL` = 从未编辑、无 DEFAULT，历史行天然 NULL 无需回填）。领域 `post.Post.EditedAt`（Unix 秒，0=未编辑）只负责把列带出仓储，`selectPosts` 用 `COALESCE(edited_at,0)` 归一。
+  4. **只 UPDATE `body_md, edited_at`，绝不碰 `status / created_at / last_reply_at`**：编辑不改变可见性、不伪造新帖时间、**不推进 `last_reply_at`**（否则 SortLatest 把旧主题顶到最新，同投票 `AdjustScore` 的教训 ADR-029 / ADR-032）。作者编辑自己的内容是普通写，**不写审计事件**（与 ADR-050 的管理员 hidden 治理动作区分）。0007 的 `posts_fts_update` 触发器随本次 UPDATE 重建索引，检索即时可见新正文。
+  5. **展示走 RenderSystem，列表行不加**：`viewmodel.Detail.EditedAt`（Unix 秒）由 `ScreenThreadDetail` 从首帖填；`view.go` 在正文 `ext()` 之后、`── 回复 ──` 之前加固定行 `已编辑 <formatTime>`，`sys()`→`RenderSystem`、StyleDim，时间复用 `MOTD_DISPLAY_TIMEZONE` 的 `formatTime`（MM-DD HH:MM，与列表一致），不进用户内容净化链（ADR-014 三层守卫）。列表行不加任何标记（80 列已紧，用户拍板）。
+  6. **命令口径与 `/delete` 对称**：`/edit` 无参编辑当前主题正文（首帖）、`/edit <id>` 编辑指定回复；都要求处于详情页。注册表 `MinArgs 0 MaxArgs 1`；id 只按十进制正整数解析，不回显原文。无参必须重新输入完整正文（空缓冲起），不预填原文。
+- 理由：选「已编辑标记」而非版本历史，是因为保留投票 / 回复脉络的实现相对简单，且用户已接受语义代价；version diff / 审核流会引入表、迁移、状态机与回归面，首版收益不足。权限坚持单一 `canModify`，是因为作者编辑与管理员治理若各写一套判定，迟早分叉并出现越权。`edited_at` 放 posts 而非 threads，是因为正文本就存首帖，放 threads 会引入"两份真相"。不推进 `last_reply_at` 是为了不破坏 SortLatest 的语义。固定文案走 `RenderSystem` 而非 `RenderUser`，是因为时间由服务端本地数值格式化，属可信文本，进用户净化链既无谓又可能误伤。
+- 代价 / 边界：`/edit <id>` 与 `/delete <id>` 一样按 ID 定位，命令层只要求详情页，不额外校验该 post 是否属于当前主题（作者权只认内容作者，跨主题同作者内容也可改）；编辑后的投票对象语义可能滞后（已接受的代价），不做回滚入口；`edited_at` 只记最近一次，无历史；`CanEditPost` 与 `EditPost` 之间存在 TOCTOU 窗口，前置判权仅为体验，信任决策以写事务内复核为准；冻结账号编辑与删除同口径——`canModify` 只看 `UserID`，不查账号状态（作者权不是发帖准入）。
+- 验证：全量测试全绿（835 → 860，+25：应用用例 6、迁移 3、真实 SQLite 集成 2、view 3、cmd 接线 7、archtest 守卫与负向注入 4），`go build ./... && go vet ./... && go test -count=1 ./...` 通过；E 类工程门禁对新增 `posts` UPDATE 零命中。集成证据：真实 SQLite 编辑后 `body_md` 更新、`edited_at` 非 NULL、`GetThread` 与新 FTS 命中均见新正文、`status/created_at/last_reply_at` 三者不变、列表排序不变、`ScreenThreadDetail.Detail.EditedAt` 取首帖。无新依赖、生产 `data/` 未触碰、未 commit。
+- 关联：`ADR-014`（ViewModel 三层守卫与信任域）、`ADR-019`（终端安全渲染两路径）、`ADR-029`/`ADR-032`（`AdjustScore` 不推进 `last_reply_at` 的教训）、`ADR-046`（`MOTD_DISPLAY_TIMEZONE`）、`ADR-049`/`ADR-050`（治理权单点，与作者权区分）、`PHASE2-PLAN.md §3`（编辑策略已拍板）。

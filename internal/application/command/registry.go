@@ -61,6 +61,9 @@ var defaultCommands = []Command{
 	{Name: "reply", Usage: "/reply", Summary: "回复当前主题", MaxArgs: 0},
 	// v0.2.1：无参删当前主题，带一个 id 则删当前主题下的该条回复（仅作者）。
 	{Name: "delete", Usage: "/delete [id]", Summary: "删除当前主题 / 指定回复（仅作者）", MinArgs: 0, MaxArgs: 1},
+	// P2-M2：与 /delete 对称的作者权。无参重新输入当前主题正文（首帖），
+	// 带 id 则重新输入指定回复全文（仅作者）。MinArgs=0 让无参进入 handler 解析首帖。
+	{Name: "edit", Usage: "/edit [id]", Summary: "编辑当前主题正文 / 指定回复（仅作者）", MinArgs: 0, MaxArgs: 1},
 	// P2-M1b：与 /delete 对称的治理口径。无参隐藏当前主题，带 id 隐藏回复（仅管理员）。
 	{Name: "hide", Usage: "/hide [id]", Summary: "隐藏当前主题 / 指定回复（仅管理员）", MinArgs: 0, MaxArgs: 1},
 	// MinArgs=0 是刻意的：/login 不带参数时不落到通用「参数个数不符」，

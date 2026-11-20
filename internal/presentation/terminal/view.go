@@ -68,6 +68,16 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 			}
 			b.WriteByte('\n')
 		}
+		// P2-M2 / ADR-051：正文下方「已编辑 MM-DD HH:MM」标记，仅详情页出现。
+		// 文案前缀是编译期固定串，时间由服务端从 EditedAt（本地数值）按展示时区
+		// 格式化（formatTime，与列表同一口径），整段走 sys()→RenderSystem，不进用户
+		// 内容净化链（ADR-014 三层守卫）；EditedAt<=0（从未编辑）时整行不输出。
+		if s.Detail.EditedAt > 0 {
+			if err := sys(&b, "已编辑 "+formatTime(s.Detail.EditedAt), safe.StyleDim); err != nil {
+				return "", err
+			}
+			b.WriteByte('\n')
+		}
 		if err := sys(&b, "── 回复 ──", safe.StyleDim); err != nil {
 			return "", err
 		}

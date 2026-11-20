@@ -13,14 +13,14 @@ import (
 // P1-M4 文案硬约束：正文提交只有「哨兵 . / Ctrl-D」两条，Enter 只换行。
 // Ctrl+Enter 在通用 SSH 字节流层与 Enter 不可区分，P1 绝不能把它写进主提示。
 func TestComposerHintsNeverMentionCtrlEnter(t *testing.T) {
-	hints := []string{composerTitleHint, composerBodyHint, composerBodyAfterTitleHint, composerLimitHint}
+	hints := []string{composerTitleHint, composerBodyHint, composerBodyAfterTitleHint, composerEditHint, composerLimitHint}
 	for _, h := range hints {
 		lower := strings.ToLower(h)
 		if strings.Contains(lower, "ctrl+enter") || strings.Contains(lower, "ctrl-enter") {
 			t.Fatalf("提示文案禁止出现 Ctrl+Enter: %q", h)
 		}
 	}
-	for _, h := range []string{composerBodyHint, composerBodyAfterTitleHint} {
+	for _, h := range []string{composerBodyHint, composerBodyAfterTitleHint, composerEditHint} {
 		if !strings.Contains(h, input.SubmitSentinel) || !strings.Contains(h, "Ctrl-D") || !strings.Contains(h, "Enter 换行") {
 			t.Fatalf("正文提示必须同时含哨兵 / Ctrl-D / Enter 换行语义: %q", h)
 		}
