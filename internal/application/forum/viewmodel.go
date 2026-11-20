@@ -134,6 +134,9 @@ func (s *Service) ScreenThreads(ctx context.Context, q ListThreadsQuery, v ViewC
 	if err := s.fillRowAuthors(ctx, rows, nil); err != nil {
 		return viewmodel.Screen{}, err
 	}
+	if err := s.fillRowReplyCounts(ctx, rows); err != nil {
+		return viewmodel.Screen{}, err
+	}
 	sc := screenOf(viewmodel.ScreenThreads, rows, v)
 	sc.Pagination.HasMore = page.HasMore
 	sc.Pagination.NextCursor = page.NextCursor
@@ -223,6 +226,33 @@ func (s *Service) fillRowAuthors(ctx context.Context, rows []viewmodel.Row, deta
 	}
 	if detail != nil && detail.AuthorID > 0 {
 		detail.Author = names[detail.AuthorID]
+	}
+	return nil
+}
+
+// fillRowReplyCounts 一次批量查询把回复数投影到主题列表行的 RowMeta.Replies。
+// 与 fillRowAuthors 同构（ADR-014 / ADR-052）：计数是展示投影，不进领域模型；
+// 查询失败上抛，绝不静默显示 r0——「查失败」和「确实 0 回复」必须是两件事。
+// 只在 ScreenThreads 调用：详情页 Rows 是回复列表、搜索屏不显示回复数。
+func (s *Service) fillRowReplyCounts(ctx context.Context, rows []viewmodel.Row) error {
+	ids := make([]int64, 0, len(rows))
+	for _, r := range rows {
+		if r.ID > 0 {
+			ids = append(ids, r.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	counts, err := s.repos.ReplyCountsByThreadIDs(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("投影回复数: %w", err)
+	}
+	for i := range rows {
+		if rows[i].ID > 0 {
+			rows[i].Meta.Replies = counts[rows[i].ID]
+		}
 	}
 	return nil
 }

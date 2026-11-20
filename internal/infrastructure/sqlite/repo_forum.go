@@ -307,6 +307,70 @@ func (r *ForumRepos) UsernamesByIDs(ctx context.Context, ids []int64) (map[int64
 }
 
 // ---------------------------------------------------------------------------
+// ReplyCountReader (P2-M3 / ADR-052)
+// ---------------------------------------------------------------------------
+
+// replyCountsQuery 由仓储与 EXPLAIN 测试共用，确保执行计划验的就是生产实际跑的 SQL。
+func replyCountsQuery(n int) string {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", n), ",")
+	return `SELECT thread_id, COUNT(*) FROM posts INDEXED BY idx_posts_thread WHERE thread_id IN (` +
+		placeholders + `) AND status = 'normal' GROUP BY thread_id`
+}
+
+// ReplyCountsByThreadIDs 一次批量统计一屏主题的回复数（非 N+1）。
+// 口径与详情页一致：只认 status='normal'，内容数减 1（首帖作正文不算回复），下限 0；
+// 软删 / 隐藏的回复自动排除。ids 去重、跳过非正 ID，参数全走 ? 占位符。
+//
+// INDEXED BY idx_posts_thread 是必需的：SQLite 是代价优化器，在 posts 只有几十行时
+// 即便索引存在也会为 `thread_id IN (...)` 选 SCAN posts；显式锁定后小表 / 大表都稳定
+// 走 SEARCH posts USING INDEX idx_posts_thread。代价是索引名硬绑定——索引若被改名或
+// 删除，查询会直接报错而不是静默退化成全表扫，这是可接受的 fail-fast。
+func (r *ForumRepos) ReplyCountsByThreadIDs(ctx context.Context, ids []int64) (map[int64]int, error) {
+	out := make(map[int64]int, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	args := make([]any, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return out, nil
+	}
+
+	rows, err := r.pools.QueryContext(ctx, replyCountsQuery(len(args)), args...)
+	if err != nil {
+		return nil, fmt.Errorf("批量查询回复数: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var threadID int64
+		var count int
+		if err := rows.Scan(&threadID, &count); err != nil {
+			return nil, fmt.Errorf("扫描回复数: %w", err)
+		}
+		if count > 0 {
+			count-- // 首帖是正文（详情页 Posts[0]）；没有可见内容时下限 0。
+		}
+		out[threadID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历回复数: %w", err)
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
 // UnitOfWork / WriteTx
 // ---------------------------------------------------------------------------
 

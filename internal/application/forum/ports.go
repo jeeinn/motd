@@ -164,6 +164,16 @@ type UsernameReader interface {
 	UsernamesByIDs(ctx context.Context, ids []int64) (map[int64]string, error)
 }
 
+// ReplyCountReader 是回复数投影的只读端口（P2-M3 / ADR-052）。
+// 与 UsernameReader 同构：领域对象 Thread 不持有计数列，展示所需的回复数
+// 在组装 Screen 时按 thread ID 一次批量投影进 RowMeta.Replies，不污染领域模型。
+type ReplyCountReader interface {
+	// ReplyCountsByThreadIDs 返回 thread_id → 回复数。ids 为空时必须返回空 map 且不查库。
+	// 口径与主题详情页一致：只统计 status='normal' 的内容，首帖作正文展示故减 1，
+	// 下限 0。0 回复的主题值为 0（view 层 rN 格式在 N>0 时才显示）。
+	ReplyCountsByThreadIDs(ctx context.Context, ids []int64) (map[int64]int, error)
+}
+
 // WriteTx 是**单个事务内**的受限写入句柄。
 // 用例闭包只能拿到它，拿不到 *sql.Tx / *sql.DB；一个业务用例对应一次 UnitOfWork.Write。
 // 权限与限流查询也放在这里，保证「检查 + 写入」在同一事务快照内，不留 TOCTOU 窗口。
@@ -236,5 +246,6 @@ type Repos interface {
 	PostReader
 	SearchReader
 	UsernameReader
+	ReplyCountReader
 	UnitOfWork
 }

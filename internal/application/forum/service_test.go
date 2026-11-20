@@ -89,6 +89,9 @@ type fakeRepos struct {
 	usernames       map[int64]string
 	failUsernames   error
 	usernameCalls   [][]int64 // 每次投影查询收到的 ids 副本，供「一次批量」断言
+	replyCounts     map[int64]int
+	failReplyCounts error
+	replyCountCalls [][]int64 // 回复数投影的调用记录，证明非 N+1
 }
 
 func newFakeRepos() *fakeRepos {
@@ -254,6 +257,21 @@ func (r *fakeRepos) UsernamesByIDs(_ context.Context, ids []int64) (map[int64]st
 	for _, id := range ids {
 		if name, ok := r.usernames[id]; ok {
 			out[id] = name
+		}
+	}
+	return out, nil
+}
+
+// ReplyCountsByThreadIDs 是只读投影端口的内存实现，同时记录调用次数以证明非 N+1。
+func (r *fakeRepos) ReplyCountsByThreadIDs(_ context.Context, ids []int64) (map[int64]int, error) {
+	r.replyCountCalls = append(r.replyCountCalls, append([]int64(nil), ids...))
+	if r.failReplyCounts != nil {
+		return nil, r.failReplyCounts
+	}
+	out := make(map[int64]int, len(ids))
+	for _, id := range ids {
+		if count, ok := r.replyCounts[id]; ok {
+			out[id] = count
 		}
 	}
 	return out, nil

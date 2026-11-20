@@ -273,3 +273,94 @@ func TestScreenThreadsAuthorProjectionError(t *testing.T) {
 		t.Fatalf("投影查询失败必须上抛，不得静默丢失作者: %v", err)
 	}
 }
+
+// 回复数投影（P2-M3 / ADR-052）：一屏一次批量查询，计数按 thread ID 落到 RowMeta.Replies。
+
+func TestScreenThreadsProjectsReplyCountsInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	repos := newFakeRepos()
+	for i, title := range []string{"无回复", "三条回复", "十二条回复"} {
+		repos.addThread(thread.Thread{
+			ID: int64(i + 1), NodeID: 1, UserID: 1, Title: title,
+			LastReplyAt: testBase.Add(time.Duration(i) * time.Second), CreatedAt: testBase,
+		})
+	}
+	repos.replyCounts = map[int64]int{1: 0, 2: 3, 3: 12}
+	s := NewService(repos)
+
+	sc, err := s.ScreenThreads(ctx, ListThreadsQuery{
+		NodeID: 1, Sort: SortLatest, Limit: 10,
+	}, testViewContext())
+	if err != nil {
+		t.Fatalf("构造主题屏: %v", err)
+	}
+	got := make(map[string]int)
+	for _, r := range sc.Rows {
+		got[r.Title] = r.Meta.Replies
+	}
+	if got["无回复"] != 0 || got["三条回复"] != 3 || got["十二条回复"] != 12 {
+		t.Fatalf("回复数投影错误: %+v", got)
+	}
+	if len(repos.replyCountCalls) != 1 {
+		t.Fatalf("一屏应恰好一次批量查询（非 N+1），实际 %d 次: %v",
+			len(repos.replyCountCalls), repos.replyCountCalls)
+	}
+	ids := repos.replyCountCalls[0]
+	if len(ids) != 3 {
+		t.Fatalf("批量查询应收到本屏 3 个 thread ID，实际 %v", ids)
+	}
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("主题屏未通过自洽校验: %v", err)
+	}
+}
+
+func TestScreenThreadsReplyCountProjectionError(t *testing.T) {
+	ctx := context.Background()
+	repos := newFakeRepos()
+	sentinel := errors.New("回复数查询失败")
+	repos.failReplyCounts = sentinel
+	repos.addThread(thread.Thread{ID: 1, NodeID: 1, UserID: 1, Title: "标题",
+		LastReplyAt: testBase, CreatedAt: testBase})
+	s := NewService(repos)
+
+	if _, err := s.ScreenThreads(ctx, ListThreadsQuery{NodeID: 1, Sort: SortLatest, Limit: 10}, testViewContext()); !errors.Is(err, sentinel) {
+		t.Fatalf("回复数投影查询失败必须上抛，不得静默显示 r0: %v", err)
+	}
+}
+
+func TestScreenThreadsEmptyPageSkipsReplyCountQuery(t *testing.T) {
+	ctx := context.Background()
+	repos := newFakeRepos()
+	s := NewService(repos)
+
+	sc, err := s.ScreenThreads(ctx, ListThreadsQuery{NodeID: 1, Sort: SortLatest, Limit: 10}, testViewContext())
+	if err != nil {
+		t.Fatalf("空列表: %v", err)
+	}
+	if len(sc.Rows) != 0 {
+		t.Fatalf("应为空屏: %+v", sc.Rows)
+	}
+	if len(repos.replyCountCalls) != 0 {
+		t.Fatalf("空列表不应触发回复数查询，实际 %v", repos.replyCountCalls)
+	}
+}
+
+func TestOnlyThreadListProjectsReplyCounts(t *testing.T) {
+	ctx := context.Background()
+	repos := newFakeRepos()
+	repos.addThread(thread.Thread{ID: 7, NodeID: 1, UserID: 1, Title: "标题",
+		LastReplyAt: testBase, CreatedAt: testBase})
+	repos.addPost(post.Post{ID: 1, ThreadID: 7, UserID: 1, BodyMD: "首帖", Status: post.StatusNormal, CreatedAt: testBase})
+	repos.addPost(post.Post{ID: 2, ThreadID: 7, UserID: 2, BodyMD: "回复 关键词", Status: post.StatusNormal, CreatedAt: testBase.Add(time.Second)})
+	s := NewService(repos)
+
+	if _, err := s.ScreenThreadDetail(ctx, 7, testViewContext()); err != nil {
+		t.Fatalf("详情屏: %v", err)
+	}
+	if _, err := s.ScreenSearchResults(ctx, SearchInput{Query: "关键词"}, testViewContext()); err != nil {
+		t.Fatalf("搜索屏: %v", err)
+	}
+	if len(repos.replyCountCalls) != 0 {
+		t.Fatalf("详情页 Rows 与搜索屏不应投影回复数，实际 %v", repos.replyCountCalls)
+	}
+}
