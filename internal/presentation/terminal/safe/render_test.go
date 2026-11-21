@@ -64,3 +64,40 @@ func TestUserAndSystemPathsAreDifferent(t *testing.T) {
 		t.Fatal("服务端路径应拒绝而非转义，两条路径语义必须不同")
 	}
 }
+
+// P4-T1：三个配色 Style 只映射为 SGR 前景，且只由 RenderSystem 消费。
+func TestSystemPaletteSGRMapping(t *testing.T) {
+	for _, tc := range []struct {
+		style Style
+		sgr   string
+	}{
+		{StyleAccent, "\x1b[34m"},
+		{StyleNotice, "\x1b[33m"},
+		{StyleError, "\x1b[31m"},
+	} {
+		got, err := RenderSystem("L3", tc.style)
+		if err != nil {
+			t.Fatalf("style=%d 服务端文本渲染失败: %v", tc.style, err)
+		}
+		want := tc.sgr + "L3" + "\x1b[0m"
+		if got != want {
+			t.Errorf("style=%d 期望 %q，实际 %q", tc.style, want, got)
+		}
+	}
+	// StyleCode 的 36 是行内代码语义，必须保持原样、不被新配色复用。
+	if got := openANSI(StyleCode); got != "\x1b[36m" {
+		t.Errorf("StyleCode 不得改为 UI 色: %q", got)
+	}
+}
+
+// P4-T1：用户 Markdown 无论怎么写，都不可能选中新增的三种配色。
+func TestUserMarkdownNeverSelectsSystemPalette(t *testing.T) {
+	raw := "**粗体** `代码` [链接](https://example.com) \x1b[31m红\x1b[0m"
+	out := RenderUser(raw, Options{})
+	assertOnlySGR(t, out)
+	for _, palette := range []string{"\x1b[34m", "\x1b[33m", "\x1b[31m"} {
+		if strings.Contains(out, palette) {
+			t.Errorf("用户内容选中了系统配色 %q: %q", palette, out)
+		}
+	}
+}

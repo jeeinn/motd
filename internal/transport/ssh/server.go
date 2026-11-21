@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
@@ -79,12 +80,50 @@ func (c Config) validate() error {
 	return nil
 }
 
+// Bandwidth 是进程级 SSH 字节计数（P4-T2）：纯内存原子累加，
+// 不写 SQLite、不改领域模型、不进 ViewModel、不下发终端。
+// tx = 服务端发给客户端，rx = 客户端发给服务端。
+//
+// 只有 Session.Read/Write 会累加，healthz 只读取；计数在进程重启后归零。
+type Bandwidth struct {
+	tx atomic.Uint64
+	rx atomic.Uint64
+}
+
+// AddTx 累加发送字节。非正数直接忽略（io.Writer 契约下 n 不会为负）。
+func (b *Bandwidth) AddTx(n int) {
+	if n > 0 {
+		b.tx.Add(uint64(n))
+	}
+}
+
+// AddRx 累加接收字节。非正数直接忽略（io.Reader 契约下 n 不会为负）。
+func (b *Bandwidth) AddRx(n int) {
+	if n > 0 {
+		b.rx.Add(uint64(n))
+	}
+}
+
+// Tx 返回进程启动以来服务端发出的字节数快照。
+func (b *Bandwidth) Tx() uint64 { return b.tx.Load() }
+
+// Rx 返回进程启动以来服务端收到的字节数快照。
+func (b *Bandwidth) Rx() uint64 { return b.rx.Load() }
+
+// processBandwidth 是绕过 Server 直接构造 Session 的调用方（主要是单测）
+// 的默认计数源，保证任何 Session 的读写都有明确的累加目标，不做 nil 判断。
+var processBandwidth Bandwidth
+
+// ProcessBandwidth 返回进程级兜底计数器，供不装配 Server 的调用方读取。
+func ProcessBandwidth() *Bandwidth { return &processBandwidth }
+
 // Server 是单进程 SSH 入口。一个连接一个 goroutine 树，退出必须回收。
 type Server struct {
 	cfg             Config
 	signer          gossh.Signer
 	hostFingerprint string
 	serverConfig    *gossh.ServerConfig
+	bw              Bandwidth // 进程级 tx/rx 聚合，供 /healthz 读取
 
 	slots chan struct{}
 	mu    sync.Mutex
@@ -140,6 +179,10 @@ func New(cfg Config) (*Server, error) {
 }
 
 func (s *Server) HostKeyFingerprint() string { return s.hostFingerprint }
+
+// Bandwidth 返回本 Server 的进程级带宽计数器，供 /healthz 读取。
+// 计数只在内存里原子累加，不触发任何数据库写入。
+func (s *Server) Bandwidth() *Bandwidth { return &s.bw }
 
 // Addr 返回实际监听地址；Addr 配 :0 时供测试取随机端口。
 // listener 在 New 阶段已绑定，因此这里是纯读，不会阻塞。
@@ -379,6 +422,9 @@ func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth
 	defer s.cfg.Presence.Disconnect(id)
 
 	sess := newSession(id, ch, fp, pk, p, s.cfg.Presence, remoteIP)
+	// 把会话的字节流挂到 Server 级聚合计数器上。此后所有 Read/Write
+	// 都经 atomic.Pointer 读取该指针，与可能提前触发的关闭定时器无竞态。
+	sess.setBandwidth(&s.bw)
 	s.trackSession(sess, true)
 	defer s.trackSession(sess, false)
 	defer sess.Close()

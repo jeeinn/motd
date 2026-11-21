@@ -223,9 +223,26 @@ func renderStatusBar(b *strings.Builder, s viewmodel.Screen, width int) error {
 	if !sb.Identity.Guest {
 		identity = "已登录"
 	}
-	if err := sys(b, fmt.Sprintf("online=%d active=%d | %s | karma=%d L%d",
-		sb.Online, sb.Active, identity, sb.Karma, sb.Level), safe.StyleDim); err != nil {
-		return err
+	// P4-T1：状态栏只在 L3/L4 时拆段着色，面积仅覆盖等级两字符。等级档位由
+	// application 用 domain/user.Level(karma) 派生后存进 StatusBar.Level（1–4），
+	// Renderer 只读这个语义值，不在这里重算领域规则、不引入 domain 依赖。
+	// L1/L2 保持 Dim 且整行一次渲染（与既有输出逐字节一致）；L3/L4 的前半段
+	// 仍走 Dim，等级标签走 Accent（深蓝）。"L%d" 文字标签始终保留——
+	// 颜色不单独承载语义。
+	levelText := fmt.Sprintf("L%d", sb.Level)
+	if sb.Level >= 3 {
+		if err := sys(b, fmt.Sprintf("online=%d active=%d | %s | karma=%d ",
+			sb.Online, sb.Active, identity, sb.Karma), safe.StyleDim); err != nil {
+			return err
+		}
+		if err := sys(b, levelText, safe.StyleAccent); err != nil {
+			return err
+		}
+	} else {
+		if err := sys(b, fmt.Sprintf("online=%d active=%d | %s | karma=%d %s",
+			sb.Online, sb.Active, identity, sb.Karma, levelText), safe.StyleDim); err != nil {
+			return err
+		}
 	}
 	b.WriteByte('\n')
 
@@ -239,15 +256,31 @@ func renderStatusBar(b *strings.Builder, s viewmodel.Screen, width int) error {
 		b.WriteByte('\n')
 	}
 	if sb.Notice.Kind != viewmodel.NoticeNone && sb.Notice.Message != "" {
-		if err := sys(b, "[提示] ", safe.StyleDim); err != nil {
+		prefix, style := noticePrefix(sb.Notice.Kind)
+		if err := sys(b, prefix, style); err != nil {
 			return err
 		}
+		// 消息正文来自外部数据，必须继续走 ext()/RenderUser 净化链。
+		// 配色只落在固定前缀上，用户文本即使含 SGR 注入也不会选中 UI 色。
 		if err := ext(b, sb.Notice.Message, width); err != nil {
 			return err
 		}
 		b.WriteByte('\n')
 	}
 	return nil
+}
+
+// noticePrefix 按提示语义返回固定前缀文字与样式（P4-T1）。
+// 只处理服务端编译期常量，不接收任何用户文本，因此用户无法借 Kind 染色正文。
+func noticePrefix(kind viewmodel.NoticeKind) (string, safe.Style) {
+	switch kind {
+	case viewmodel.NoticeError:
+		return "[错误] ", safe.StyleError
+	case viewmodel.NoticeWarning:
+		return "[提示] ", safe.StyleNotice
+	default:
+		return "[提示] ", safe.StyleDim
+	}
 }
 
 // sys 只接服务端固定文本或由本地数值拼成的文本。
