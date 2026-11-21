@@ -1,8 +1,9 @@
 # P3 阶段计划（稳定运营 + 占位缺口收口）
 
-> 状态：**M1→M5 已实施完成（v0.5.0 待发版），M6 拆 v0.5.1 未做**。用户 2026-11-20 确认：① karma 计分规则按 §3.2 表；② 彩蛋 M6 拆 v0.5.1；③ 按 M1→M5 顺序实施，每题走"验证逻辑 → 自测 → ADR → 结构化汇报"。ADR-056~060 已记。**未 commit / tag / push / Release**，等用户发版确认（见 AGENTS.md §5）。
+> 状态：**P3 全部完成（M1→M6 六项均已实施、发版）**。2026-11-21 收口：M1~M5 随 v0.5.0 发布；M6 彩蛋先落 v0.5.1 内容（未单独发 tag），与 0.6.0 扩展（签到/数字雨/Konami 解锁）一并随 **v0.6.0** 发布。全流程遵守"验证逻辑 → 自测 → ADR → 结构化汇报"，发版均经用户当次明确确认。ADR-056~062 已记，全部 commit / tag / push / Release 完成。
 > 基线：v0.4.3（2026-11-20），测试 905，迁移止于 0009，ADR 止于 055。
-> 依据：`docs/design/命令行论坛整体设计方案-评审稿v0.2.md`（原始稿）、`docs/P2-PLAN.md`（Recent plan 2）、`docs/DECISIONS.md` ADR-001~055、代码核实。
+> 收口账本：测试 **935**（+30），迁移止于 **0010**，ADR 止于 **062**，版本 v0.5.0 → v0.6.0。待执行观察项见 §11。
+> 依据：`docs/design/命令行论坛整体设计方案-评审稿v0.2.md`（原始稿）、`docs/P2-PLAN.md`（Recent plan 2）、`docs/DECISIONS.md` ADR-001~062、代码核实。
 
 ## 0. 结论先行
 
@@ -26,9 +27,9 @@
 | **P0** | CI 加 `-race` job | S | 并发正确性 | P3-M3 |
 | **P1** | 最小压测集合（4 核心场景） | M | 稳定运营 | P3-M4 |
 | **P1** | 自动备份调度 + cron/systemd 模板 + FTS 复核 | M | 稳定运营 | P3-M5 |
-| P1 | 彩蛋命令接入（5 条，含 /xkcd 网络） | M | A 类缺口 | P3-M6（待定） |
-| **待拍板** | 带宽监控的运行时指标 | S | 稳定运营 | 视 M4 结果定 |
-| **不做** | 节点合并 / 热重载 / 分权 / @提及 / Web 面 / Passkey | — | 见 §5 | — |
+| P1 | 彩蛋命令接入（最终 6 条本地命令，/xkcd 走本地清单不联网） | M | A 类缺口 | P3-M6 ✅ |
+| **不做** | 带宽监控的运行时指标（M4 后判定最小压测不需要字节级计量，留 P4；见 ADR-059） | — | 稳定运营 | P4 |
+| **不做** | 节点合并 / 热重载 / 分权 / @提及 / Web 面 / Passkey | — | 见 §8 | — |
 
 目标（可验收）：
 1. 用户看到的 karma / 等级 / 成就**是真实的、重启不丢的**；
@@ -129,7 +130,9 @@
 
 ### 5.4 带宽监控（视 M4 结果定）
 
-`/healthz` 已暴露 `queue`、`online`、`active`、`commits`、`audit_*`（`main.go:327-350`），但没有字节级带宽计量。最小做法是在探针加 `tx_bytes/rx_bytes` 原子计数（Session.Write/Read 处累加、纯内存），不改领域模型。**是否做取决于 M4 是否需要带宽数据**；若不需要，本阶段明确不做，留 P4。
+`/healthz` 已暴露 `queue`、`online`、`active`、`commits`、`audit_*`（`main.go:327-350`），但没有字节级带宽计量。最小做法是在探针加 `tx_bytes/rx_bytes` 原子计数（Session.Write/Read 处累加、纯内存），不改领域模型。
+
+**结论（M4 后判定）**：最小压测不需要字节级带宽数据，本阶段**明确不做，留 P4**。ADR-059 已把"未验证项"（1 Mbps 真实上下行、1000 在线资源账本、扇出带宽、公网 RTT/丢包、长稳、压测下 kill-9/WAL）列为诚实口径，不制造虚假验收。
 
 ## 6. P3-M5：自动备份调度
 
@@ -149,23 +152,22 @@
 5. **保留策略不自动删除**（OPS §6），需人工清理；RPO/RTO 是否收紧到小时级由用户拍板（OPS `:311`）。
 6. 无新迁移、无 Go 代码行为变更；ADR-059 记录调度方案与 FTS 步骤补齐。
 
-## 7. P3-M6（待定）：彩蛋命令接入
+## 7. P3-M6 ✅ 已完成：彩蛋命令接入
 
-### 7.1 现状（代码核实）
+### 7.1 立项时的现状（代码核实，历史记录）
 
-- 命令注册表 `application/command/registry.go`：`defaultCommands`（`:68-113`），命令名**不含前导 `/`**，`validateCommand`（`:180`）拒绝 `/` 开头；`Group` 仅排版。
-- 插件命令 `plugin/registry.Command`（`registry.go:18-22`）名字**带 `/`**，注释"P0 只登记不执行"；demo 在 `init()` 登记 `/fortune`（`demo.go:20-30`）。
-- **为何不生效**：两套注册表独立——`Plugin.Commands` 从未合并进 `command.Default()`（`wiring.go:56-65` 只用 `DomainEvent`），且格式不兼容（带 `/` 会被 `validateCommand` 拒），`/fortune` 在 Parse 阶段即 `ErrUnknownCommand`。`demo_test.go:83-100` 只验"已登记"。
-- 网络需求：`/fortune` `/cowsay` `/matrix` `/blame` 纯本地；仅 `/xkcd` 需 HTTP（与"网络调用在写事务外"约定不冲突——只读展示、不写库）。
+- 命令注册表 `application/command/registry.go`：`defaultCommands`，命令名**不含前导 `/`**，`validateCommand` 拒绝 `/` 开头；`Group` 仅排版。
+- 插件命令 `plugin/registry.Command` 名字**带 `/`**，注释"P0 只登记不执行"；demo 在 `init()` 登记 `/fortune`。
+- **为何不生效**：两套注册表独立——`Plugin.Commands` 从未合并进 `command.Default()`，且格式不兼容（带 `/` 会被 `validateCommand` 拒），`/fortune` 在 Parse 阶段即 `ErrUnknownCommand`。
 
-### 7.2 DoD（若用户确认纳入 P3）
+### 7.2 实施结果（用户 2026-11-20 拍板纳入；分两阶段发布）
 
-1. 新增纯函数 `command.MergeDefaults(pluginCmds)`：剥前导 `/`、`Description→Summary`、补 MinArgs/MaxArgs，装配期注入 `inputHandler.reg`。
-2. `ssh_handler.go` 的 switch 增彩蛋分支（或 `map[string]eggHandler`）；逻辑放 application/plugin 层，输出经 `safe.SanitizeText`，只回固定文案、不回显参数（ADR-026）；`/blame` 严禁回显真实个人信息；`/xkcd` 失败给固定文案。
-3. `/xkcd` 用 `application` 端口 + `infrastructure` HTTP 实现 + `httptest.Server` 注入，10s 有界超时（仿 `infrastructure/github`）。
-4. 测试：`registry_test.go`（合并/Group/Parse）、`ssh_handler_test.go`、5 条命令解析分发测试、`archtest/plugin_test.go` 守 plugin 不 import infrastructure。
-5. 注意 `Help()` 输出变化会冲击 `login_overlay_test.go` 等固定文案断言。
-6. ADR-060 记录彩蛋接入与命令合并口径。
+1. **命令合并**：实际落地为 `command.WithCommands(extra)` + cmd 装配层 `eggRegistry()`（剥前导 `/`、`Description→Summary`、`EggCommands()` 兜底防漂移），经 `inputHandler.withCommands()` 注入。**未采用**原计划的 `MergeDefaults` 命名；原因是依赖方向约束——command 不 import plugin，转换只能在 cmd 装配层（ADR-015）。
+2. **六条本地彩蛋命令**（非原计划 5 条）：`/fortune` `/cowsay` `/xkcd` `/blame` `/sudo` `/karma`，另加 `/quit` 退出彩蛋。全部固定语料，经 `safe.RenderSystem` 输出，不回显参数（ADR-026）。
+3. **`/xkcd` 走本地清单**（12 条编号+标题），**未做** HTTP 实现——用户拍板"本地清单"，避免网络失败态与新依赖。原 DoD 的 `application` 端口 + `httptest.Server` 方案作废。
+4. **状态类成就**：新建 `plugin/social` 订阅 `PostCreated` / `VoteCast`；扩展 `ReadOnlyQuery` 加作者 ID 查询（只返回整数、无 PII）；`night_owl` 时段按 `MOTD_DISPLAY_TIMEZONE` 计算（用户 2026-11-20 追加要求）。
+5. **0.6.0 扩展**（用户 2026-11-21 追加）：0010 迁移 + 每日签到 `streak_7` 成就、合规 `/matrix` 滚动雨帘、Konami 码按用户解锁 `/dev/null`（`ViewContext.UnlockedHiddenNodes` 注入方案）。
+6. 决策记录：彩蛋接入 **ADR-061**，扩展三项 **ADR-062**；后续多色/节日主题评估见 `docs/ROADMAP.md R-01`。
 
 ## 8. 明确不做（本阶段）
 
@@ -194,20 +196,26 @@
 | R7 | 压测基线受机器噪声影响 | `-count=3` 取中位数 + 相对劣化 ≤20% 判定 |
 | R8 | 自动备份 VACUUM INTO IO 峰值触发 ErrQueueFull | 保留策略不自动删除；Online Backup API 切换条件（OPS §7）仍未满足，不改 |
 
-## 10. 版本节奏（建议，待拍板）
+**风险收口（2026-11-21）**：R1 已按 §3.2 表经用户确认后实施（ADR-057）；R2 真实发生——race job 首次上线即抓到 4 处 data race（3 处测试假对象 + 1 处 `session.go` 生产代码真 bug），全部修复后 CI 全绿，并去掉 `halt_on_error=1` 让 detector 一轮报全（ADR-058）；R3/R4 未发生，测试同步更新通过；R5 已通过 `backup.sh` 内 verify + 模板 `EnvironmentFile=` 收口（ADR-060）；R6 已在 OPS §4 补 fts-rebuild 步骤（ADR-060）。R7/R8 为持续观察项。
+
+## 10. 版本节奏（已执行完毕）
 
 | 版本 | 内容 | 状态 |
 | --- | --- | --- |
-| v0.4.3 | 运维双形态与智能体部署指南（纯文档） | **已发布** |
-| **v0.5.0** | P3-M1 成就 + M2 karma + M3 race job + M4 压测 + M5 备份 | 实施中 |
-| v0.5.1 | P3-M6 彩蛋接入 | **已确认拆分到本版** |
+| v0.4.3 | 运维双形态与智能体部署指南（纯文档） | **已发布**（P3 基线） |
+| **v0.5.0** | P3-M1 成就 + M2 karma + M3 race job + M4 压测 + M5 备份 | **已发布**（2026-11-20） |
+| v0.5.1 | P3-M6 彩蛋接入（6 命令 + 2 状态成就） | 已实施，**未单独发 tag**——内容随 v0.6.0 一并发布 |
+| **v0.6.0** | P3-M6 扩展：签到 7 天成就 + 合规数字雨 + Konami 解锁 /dev/null | **已发布**（2026-11-21） |
 | P4 | @提及 / 浏览器 TUI / RSS/API / Passkey / Web 面 / 节点合并 | 不排期 |
 
-> 发版前必须用户确认（AGENTS.md §5）；本文档本身此刻也**未提交**。
+> 三次发版（v0.5.0 / v0.6.0）均经用户当次明确确认，CI check + race 两 job 全绿后打 tag、建 Release（AGENTS.md §5）。本文档已随 0.6.0 之后的文档更新提交。
 
-## 11. 下一步（等用户拍板）
+## 11. 收口状态与遗留观察项
 
-1. **确认 karma 计分规则**（§3.2 表）——这是唯一阻塞 M2 的产品口径。
-2. **确认彩蛋 M6 是否进 v0.5.0** 还是拆 v0.5.1（或不做）。
-3. 确认后按 M1 → M2 → M3 → M4 → M5 顺序实施，每题：验证逻辑 → 自测 → ADR → 结构化汇报。
-4. 里程碑回访：v0.5.0 上线后 48 小时回来核对 CI race job 状态与备份首跑结果。
+**P3 实施已全部完成**，以下为待执行的观察/后续事项（不再是阻塞项）：
+
+1. **里程碑回访（待执行）**：核对当前版本（v0.6.0）上线后 CI 的 race job 连续运行状态；确认备份 timer 首次执行成功且 `motdctl verify` 通过（OPS §2）。
+2. **race job 转 required（待评估）**：目前非 required，已连续多轮全绿；观察 2–3 轮稳定后可提为强制门禁（ADR-058）。
+3. **容量验收（未做，非欠账）**：1 Mbps / 1000 在线分档实测需目标机器与真实网络环境；按用户 2026-11-20 拍板，本阶段只做最小压测集，诚实口径见 ADR-059 / `ROADMAP.md R-03`。
+4. **带宽监控留 P4**：M4 后判定不需要字节级计量（§5.4）。
+5. **后续方向见 `docs/ROADMAP.md`**：终端多色扩展（含节日主题，R-01）、延后彩蛋（R-02）。
