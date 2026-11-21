@@ -52,6 +52,9 @@ type inputHandler struct {
 	forum    *forum.Service
 	users    appuser.StatusReader
 	presence *presence.Registry
+	// onLogin 是登录成功后的副作用钩子（签到），由 cmd 装配层注入（v0.6.0）。
+	// 只在会话升级成功后调用；nil 时零影响，保持既有测试零改动。
+	onLogin func(context.Context, int64)
 }
 
 // withSecurity 注入认证安全门（限流 + 审计的 fail-closed 入口）。
@@ -81,6 +84,12 @@ func (h *inputHandler) withForum(svc *forum.Service, users appuser.StatusReader,
 
 func newInputHandler() *inputHandler {
 	return &inputHandler{reg: command.Default()}
+}
+
+// withLoginHook 注入登录成功后的签到钩子（v0.6.0）。
+func (h *inputHandler) withLoginHook(fn func(context.Context, int64)) *inputHandler {
+	h.onLogin = fn
+	return h
 }
 
 // withCommands 注入合并了彩蛋命令的注册表（v0.5.1 / P3-M6）。
@@ -133,12 +142,13 @@ func (h *inputHandler) newLoginFlow() (*loginFlow, bool) {
 		status.Active = h.presence.Active()
 	}
 	return &loginFlow{
-		device: h.deviceAuth,
-		login:  h.login,
-		keys:   h.keys,
-		gate:   h.gate,
-		view:   loginPresenter{status: status},
-		now:    time.Now,
+		device:  h.deviceAuth,
+		login:   h.login,
+		keys:    h.keys,
+		gate:    h.gate,
+		view:    loginPresenter{status: status},
+		now:     time.Now,
+		onLogin: h.onLogin,
 	}, true
 }
 
@@ -380,6 +390,16 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 }
 
 func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageController, m input.KeyMsg, cl *commandLine) handleOutcome {
+	// v0.6.0：浏览态监听 Konami 码（↑↑↓↓←→←→BA）。命令输入/编辑态不拦截，
+	// 避免吞掉方向键的原有语义；访客也不解锁（解锁需落用户记录）。
+	if !cl.active && pc.editor == nil && sess.Principal().IsUser() {
+		if pc.konami.Feed(m) {
+			if pc.onUnlock != nil {
+				_ = pc.onUnlock(ctx, sess.Principal().UserID)
+			}
+			pc.konami.Reset()
+		}
+	}
 	// applyKey 保持纯状态机；回显在调用侧按「前后长度」推导是否真的删除了字符。
 	wasEditing, beforeLen := cl.active, len(cl.runes)
 	action, line, pasteLen := applyKey(cl, m)
@@ -430,6 +450,10 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 			return outcomeQuit
 		case "help":
 			_, _ = io.WriteString(sess, h.reg.Help())
+		case "matrix":
+			// v0.6.0：滚动雨帘。限帧率、固定行数，只用 SGR 绿色 + 普通字符，
+			// 不触碰被 ADR-027 禁止的 ED 清屏 / CUP 定位 / 备用屏序列。
+			h.runMatrix(ctx, sess)
 		case "fortune", "cowsay", "xkcd", "blame", "sudo":
 			// v0.5.1 / P3-M6：彩蛋都是固定语料，经安全渲染路径输出。
 			// 参数（如 /blame @user）只做个数校验，绝不回显原文（ADR-026）。
@@ -462,7 +486,7 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 				} else {
 					pc.invalidateScreen()
 					pc.clearEmailFlow() // 若已有邮箱流程未结束，先复位其 secret 掩码
-					pc.emailFlow = newEmailFlow(emailFlowLogin, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false)
+					pc.emailFlow = newEmailFlow(emailFlowLogin, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false, h.onLogin)
 				}
 				return outcomeContinue
 			}
@@ -510,6 +534,33 @@ func writeEgg(sess io.Writer, text string) {
 	rendered, err := safe.RenderSystem(normalized, safe.StylePlain)
 	if err == nil {
 		_, _ = io.WriteString(sess, toCRLF(rendered))
+	}
+}
+
+// runMatrix 输出固定行数的滚动雨帘（v0.6.0）。
+// 合规约束：只经 safe.RenderSystem 的 SGR 样式白名单上色，帧内容是 MatrixFrame()
+// 生成的固定字符集，不含 ESC；不用 ED 清屏 / CUP 光标定位 / 备用屏（ADR-027）。
+// 帧率固定 ~50ms/行、总行数固定，ctx 取消（连接断开）立即停。
+func (h *inputHandler) runMatrix(ctx context.Context, sess io.Writer) {
+	const (
+		lines    = 24
+		frameGap = 50 * time.Millisecond
+	)
+	ticker := time.NewTicker(frameGap)
+	defer ticker.Stop()
+	for i := 0; i < lines; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		rendered, err := safe.RenderSystem(command.MatrixFrame(), safe.StyleCode)
+		if err != nil {
+			return // 安全渲染失败立即停，绝不裸写
+		}
+		if _, err := io.WriteString(sess, rendered+"\r\n"); err != nil {
+			return
+		}
 	}
 }
 

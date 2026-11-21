@@ -22,6 +22,7 @@ func EggCommands() []Command {
 		{Name: "blame", Usage: "/blame @user", Summary: "把锅甩给某个倒霉蛋（玩笑）", MinArgs: 1, MaxArgs: 1},
 		{Name: "sudo", Usage: "/sudo", Summary: "尝试提权（注定失败）", MaxArgs: 0},
 		{Name: "karma", Usage: "/karma", Summary: "查看自己的声望与等级", MaxArgs: 0},
+		{Name: "matrix", Usage: "/matrix", Summary: "看一小段数字雨（按 Ctrl-C 可中断）", MaxArgs: 0},
 	}
 }
 

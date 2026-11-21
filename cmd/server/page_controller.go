@@ -28,6 +28,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/presentation/terminal"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
@@ -67,6 +68,11 @@ type pageController struct {
 	searchPage  int
 	notice      viewmodel.Notice
 	editor      *pageEditor
+	// v0.6.0：Konami 码检测与解锁回调（每会话一份状态机）。
+	konami   command.KonamiDetector
+	onUnlock func(context.Context, int64) error
+	// unlockedNode 返回该用户已解锁的隐藏节点（未解锁返回 nil），供 showNodes 注入。
+	unlockedNode func(context.Context, int64) (*node.Node, error)
 	// 行编辑回显器：与页面状态一样每会话一份（ADR-026）。
 	echo *lineEcho
 	// 上一屏占用的行数（ADR-027）。>0 表示屏幕连续、可原地重绘；

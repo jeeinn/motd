@@ -87,12 +87,17 @@ type emailFlow struct {
 	// 第一次输入存 firstPwd，confirm=true 时进入二次输入；两次一致才提交 service。
 	firstPwd string
 	confirm  bool
+	// onLogin 是登录成功（UpgradeToUser 之后）的签到钩子（v0.6.0），nil 时跳过。
+	onLogin func(context.Context, int64)
 }
 
 // newEmailFlow 创建一条流程并输出第一步提示。svc 为空由调用方拦截，
 // 这里不做静默降级。
-func newEmailFlow(kind emailFlowKind, svc *auth.EmailAuthService, sess emailSession, echo *lineEcho, pending, purpose *string, code string, recover bool) *emailFlow {
+func newEmailFlow(kind emailFlowKind, svc *auth.EmailAuthService, sess emailSession, echo *lineEcho, pending, purpose *string, code string, recover bool, onLogin ...func(context.Context, int64)) *emailFlow {
 	f := &emailFlow{kind: kind, svc: svc, sess: sess, echo: echo, pending: pending, purpose: purpose, code: code, recover: recover, ipHash: sess.RemoteIPHash()}
+	if len(onLogin) > 0 {
+		f.onLogin = onLogin[0]
+	}
 	f.showStep()
 	return f
 }
@@ -250,6 +255,9 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 			_, _ = io.WriteString(f.sess, emailTextFailed+"\r\n")
 			return true
 		}
+		if f.onLogin != nil {
+			f.onLogin(ctx, res.UserID)
+		}
 		_, _ = io.WriteString(f.sess, emailTextLoggedin+"\r\n")
 		return true
 	}
@@ -281,7 +289,7 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 		}
 		pc.invalidateScreen()
 		pc.clearEmailFlow() // 若旧流程尚未结束就被新命令取代，先复位其 secret 掩码
-		pc.emailFlow = newEmailFlow(kind, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false)
+		pc.emailFlow = newEmailFlow(kind, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false, h.onLogin)
 	case "verify":
 		if pc.pendingEmail == "" {
 			_, _ = io.WriteString(sess, emailTextNoPending+"\r\n")
@@ -297,7 +305,7 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 			return
 		}
 		recover := pc.pendingPurpose == auth.EmailPurposeRecover
-		pc.emailFlow = newEmailFlow(emailFlowVerify, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, inv.Args[0], recover)
+		pc.emailFlow = newEmailFlow(emailFlowVerify, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, inv.Args[0], recover, h.onLogin)
 	case "resend":
 		if pc.pendingEmail == "" {
 			_, _ = io.WriteString(sess, emailTextNoPending+"\r\n")

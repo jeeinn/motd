@@ -20,6 +20,7 @@ import (
 
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/presence"
+	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/config"
 	"github.com/jeeinn/motd/internal/domain/event"
 	emailinfra "github.com/jeeinn/motd/internal/infrastructure/email"
@@ -215,9 +216,22 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("装配彩蛋命令: %w", err)
 	}
+	// v0.6.0：签到 service（登录成功后的副作用）。
+	checkInStore := sqlite.NewCheckInStore(pools, writer)
+	checkInSvc := appuser.NewCheckInService(checkInStore, rt.Gate, time.Now, cfg.DisplayLocation)
+	onLogin := func(ctx context.Context, userID int64) {
+		res, err := checkInSvc.CheckIn(ctx, userID)
+		if err != nil {
+			logger.Warn("签到写入失败", "user_id", userID, "error", err)
+			return
+		}
+		if res.Unlocked {
+			logger.Info("用户达成连续签到成就", "user_id", userID, "streak", res.Streak)
+		}
+	}
 	handler := newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login).
 		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
-		withSecurity(gate).withCommands(eggReg)
+		withSecurity(gate).withCommands(eggReg).withLoginHook(onLogin)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:     cfg.SSHAddr,
 		DataDir:  cfg.DataDir,

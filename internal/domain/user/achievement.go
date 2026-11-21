@@ -6,14 +6,16 @@ type AchievementCode string
 
 const (
 	AchievementFirstPost AchievementCode = "first_post" // 首次发帖
-	AchievementNightOwl  AchievementCode = "night_owl"  // 深夜发帖（P1 启用）
-	AchievementFirstVote AchievementCode = "first_vote" // 首次被投票（P1 启用）
+	AchievementNightOwl  AchievementCode = "night_owl"  // 深夜发帖
+	AchievementFirstVote AchievementCode = "first_vote" // 首次被投票
+	AchievementStreak7   AchievementCode = "streak_7"   // 连续签到 7 天（v0.6.0）
 )
 
 var validAchievementCodes = map[AchievementCode]bool{
 	AchievementFirstPost: true,
 	AchievementNightOwl:  true,
 	AchievementFirstVote: true,
+	AchievementStreak7:   true,
 }
 
 func (c AchievementCode) Valid() bool { return validAchievementCodes[c] }

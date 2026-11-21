@@ -79,7 +79,7 @@ func TestMigrationOrderIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取迁移列表: %v", err)
 	}
-	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}
+	want := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 	if len(migrations) != len(want) {
 		t.Fatalf("迁移数量应为 %d，实际 %d（新增迁移请同步更新本断言）", len(want), len(migrations))
 	}

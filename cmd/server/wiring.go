@@ -62,6 +62,7 @@ type forumRuntime struct {
 	Bus      *events.DomainBus
 	Outbox   *forum.Outbox
 	Store    *sqlite.AchievementStore // v0.5.0：成就持久化；内存占位实现已移除
+	Gate     appuser.AchievementGate  // v0.6.0：成就申请通道，供签到 service 复用
 	Presence *presence.Registry
 	Plugins  []registry.Plugin
 }
@@ -129,6 +130,7 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer,
 		Bus:      bus,
 		Outbox:   outbox,
 		Store:    store,
+		Gate:     gate,
 		Presence: presence.New(), // 纯内存；SSH 入口在 M3 才往里登记连接
 		Plugins:  plugins,
 	}, nil
