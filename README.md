@@ -128,8 +128,8 @@ internal/
   domain/                user / node / thread / post / vote —— 纯业务模型，不依赖上层
   infrastructure/        sqlite / github / email —— 外部实现
   presentation/          terminal（分层安全渲染）/ browser（规划中）
-  plugin/                registry / events / demo —— 编译期注册、事件分化
-docs/                    版本说明与发布文档
+  plugin/                registry / events / demo / social —— 编译期注册、事件分化
+docs/                    版本说明、发布文档、eggs.md（彩蛋清单）、ROADMAP.md（路线图）
 scripts/                 备份恢复脚本
 ```
 
