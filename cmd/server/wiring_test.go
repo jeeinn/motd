@@ -45,7 +45,10 @@ func setupRuntime(t *testing.T) (context.Context, *forumRuntime) {
 		t.Fatalf("准备测试用户: %v", err)
 	}
 
-	rt, err := newForumRuntime(pools, writer, nil, nil, nil)
+	// 固定白天时刻：避免墙钟落在 02:00–05:00（UTC）时 social 插件额外解锁
+	// night_owl，让"首帖只解锁 first_post"的断言变成随机的（v0.6.0 实测 bug）。
+	fixedNoon := func() time.Time { return time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC) }
+	rt, err := newForumRuntime(pools, writer, nil, nil, nil, fixedNoon)
 	if err != nil {
 		t.Fatalf("装配运行时: %v", err)
 	}

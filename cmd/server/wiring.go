@@ -72,15 +72,23 @@ type forumRuntime struct {
 // 装配边界：cmd 是唯一可以同时看到 application / plugin / infrastructure 的地方；
 // application 不 import plugin（DomainEventSink 由 DomainBus 结构化匹配实现），
 // plugin 不 import infrastructure（受限上下文由 cmd 注入）。
+// nowFn 是可选时钟注入（测试用）：不传时用 time.Now。
+// 测试必须传固定的白天时刻，否则 night_owl 成就会随墙钟在 02:00–05:00 窗口内
+// 意外解锁第二个成就，让"首次发帖只解锁 first_post"的断言间歇失败。
 func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer,
 	onPublishError func(event.DomainEvent, error),
 	adminFingerprints map[string]struct{}, auditLogger *auth.AuditLogger,
+	nowFn ...func() time.Time,
 ) (*forumRuntime, error) {
+	now := time.Now
+	if len(nowFn) > 0 && nowFn[0] != nil {
+		now = nowFn[0]
+	}
 	repos := sqlite.NewForumRepos(pools, writer)
 
 	// v0.5.0：成就落 SQLite，进程重启不丢（ADR-056）。写经唯一写队列，读走读池。
 	store := sqlite.NewAchievementStore(pools, writer)
-	gate := appuser.NewAchievementService(store, sqlite.NewUserStatusReader(pools), time.Now)
+	gate := appuser.NewAchievementService(store, sqlite.NewUserStatusReader(pools), now)
 	pluginCtx := registry.Context{
 		Read:         forum.NewPublicQuery(repos, repos),
 		Achievements: gate,
@@ -120,6 +128,7 @@ func newForumRuntime(pools *sqlite.Pools, writer *sqlite.Writer,
 		return nil, fmt.Errorf("装配 outbox 调度器: %w", err)
 	}
 	svc := forum.NewService(repos,
+		forum.WithClock(now),
 		forum.WithEventSink(bus),
 		forum.WithPublishObserver(obs),
 		forum.WithOutbox(outbox),
