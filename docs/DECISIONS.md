@@ -979,3 +979,17 @@
 - **patch（用户 2026-11-20 建议，同日落地）**：`night_owl` 时段从 UTC 改为按 `MOTD_DISPLAY_TIMEZONE` 计算——`OccurredAt.In(c.Location).Hour()`，与用户在终端看到的时间一致。实现：`registry.Context` 加可选 `Location *time.Location`（nil 回落 UTC 保持零值安全），cmd 装配层注入 `terminal.DisplayLocation()`（main 已在 `newForumRuntime` 之前 SetDisplayLocation），插件不反向依赖 presentation 层。测试用 `18:30Z` 在 Asia/Shanghai（本地 02:30）解锁、UTC（18 点）不解锁证明时区生效。
 - 验证：`eggs_test.go` 3 项（合并/重名拒绝/语料无 ESC）、`social_test.go` 3 项（时段边界、投票给作者而非投票者、自投票不给）、`cmd/server/egg_test.go` 4 项（固定文案、安全渲染、注入、等级阈值）；全量 `go build/vet/test` 绿、0 FAIL，测试 914 → 924。
 - 关联：`P3-PLAN.md §7`（M6）、`ADR-015`（插件权限）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-014`（等级仅显示）。
+
+## ADR-062 v0.6.0 彩蛋扩展：签到、合规数字雨与按用户解锁隐藏版块
+
+- 状态：已采纳，v0.6.0 落地。用户 2026-11-21 拍板：做完剩余彩蛋 4/10/11，按方案 2（ViewContext 注入）实现 /dev/null 按用户解锁，版本定 0.6.0。
+- 背景：v0.5.1 做了 6 条本地彩蛋命令 + 2 个状态成就，延后了三项高风险/需迁移项（动态 matrix、连续签到、Konami 隐藏版块）。本条收口这三项。
+- 决策：
+  1. **0010 迁移**：`daily_checkins(user_id, local_date)` UNIQUE 幂等、`user_node_unlocks(user_id, node_id)` UNIQUE、`/dev/null` 种子。**关键坑**：0008 给 nodes.status 加了 `CHECK(status IN ('active','archived'))`，`INSERT ... 'hidden'` 被 `INSERT OR IGNORE` 静默吞掉（迁移登记成功但种子没插）。解决：种子用 `status='archived'`（合法枚举、ListNodes 只查 active 故默认不可见），避免为彩蛋重建 nodes 表放宽 CHECK（ADR-048 三不变量）。隐藏节点识别按 **slug 精确匹配** `/dev/null`，不按 status——否则管理员归档的普通版块会被误当彩蛋节点。
+  2. **签到**：`application/user.CheckInService` 幂等记录本地日期（按 `MOTD_DISPLAY_TIMEZONE`，复用 ADR-046）、算连续天数、达标经 `AchievementGate` 申请新成就码 `streak_7`。写事务幂等靠 SQLite UNIQUE。入口层在登录成功（GitHub `loginFlow.finish` / 邮箱 `emailFlow`）会话升级后由 `onLogin` 钩子调用，钩子失败只记日志不影响登录结果。
+  3. **/matrix 合规雨帘**：只生成 SGR 青色 + 固定字符集（行 60 字符、稀疏分布），50ms/行、24 行、ctx 取消即停。**不使用** ADR-027 禁止的 ED 清屏(2J)/CUP 定位/备用屏/非数字参数 CSI——真全屏动画需扩白名单，风险高，留路线图。
+  4. **Konami 按用户解锁**：`command.KonamiDetector` 纯状态机（↑↑↓↓←→←→BA，错键重置，完成后自动复位），在浏览态（命令输入/编辑态不拦截）喂入；访客不触发。解锁写 `user_node_unlocks`，slug 由服务端固定不接受用户参数。可见性走**方案 2**：`ViewContext.UnlockedHiddenNodes []node.Node` 由入口层注入，`forum.ScreenNodes` 按 ID 去重后追加到列表末尾——forum 层不做解锁判权、不依赖解锁存储，维持 ADR-015 边界。
+- 理由：三项彩蛋都是"外围消费者"，必须走受限端口接入，不因彩蛋把存储或渲染控制面引入领域内核。签到复用既有成就 gate 与展示时区配置，零新增配置；隐藏节点用 ViewContext 注入避免污染 forum 通用查询链（比"列表注入行"稳健、比"改 /open 支持 slug"语义完整）。
+- 代价 / 边界：签到跨时区旅行可能出现日期空洞（按字符串比对）；/dev/null 只有可见性、无内容与权限变化；Konami 状态机在浏览态会消费方向键导航（序列完成/错键重置前短暂改变焦点，属彩蛋代价）。真全屏数字雨、多色终端、更多隐藏版块写入 `docs/ROADMAP.md`，不在本版。
+- 验证：格式零、build/vet OK、全量 0 FAIL，测试 924 → 935；专项覆盖 Konami 精确/错键、签到连续/断签/幂等、SQLite 解锁持久化、ViewContext 去重注入、matrix 帧无控制字符。迁移后节点数断言（5→6）与状态分布（5/5/0→6/5/1）同步更新。
+- 关联：`ADR-027`（ANSI 白名单）、`ADR-046`（展示时区）、`ADR-048`（节点三不变量）、`ADR-015`（插件权限）、`P3-PLAN.md §7`、`docs/ROADMAP.md`（多色/节日主题评估）。

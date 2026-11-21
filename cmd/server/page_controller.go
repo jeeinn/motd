@@ -71,8 +71,8 @@ type pageController struct {
 	// v0.6.0：Konami 码检测与解锁回调（每会话一份状态机）。
 	konami   command.KonamiDetector
 	onUnlock func(context.Context, int64) error
-	// unlockedNode 返回该用户已解锁的隐藏节点（未解锁返回 nil），供 showNodes 注入。
-	unlockedNode func(context.Context, int64) (*node.Node, error)
+	// unlockedNodes 返回该用户已解锁的隐藏节点列表，供 viewContext 注入 ScreenNodes。
+	unlockedNodes func(context.Context, int64) ([]node.Node, error)
 	// 行编辑回显器：与页面状态一样每会话一份（ADR-026）。
 	echo *lineEcho
 	// 上一屏占用的行数（ADR-027）。>0 表示屏幕连续、可原地重绘；
@@ -128,12 +128,14 @@ type pageEditor struct {
 
 func (h *inputHandler) newPageController(out io.Writer) *pageController {
 	return &pageController{
-		service:  h.forum,
-		users:    h.users,
-		presence: h.presence,
-		reg:      h.reg,
-		screen:   emptyScreen(),
-		echo:     newLineEcho(out),
+		service:       h.forum,
+		users:         h.users,
+		presence:      h.presence,
+		reg:           h.reg,
+		onUnlock:      h.onUnlock,
+		unlockedNodes: h.unlockedNodes,
+		screen:        emptyScreen(),
+		echo:          newLineEcho(out),
 	}
 }
 
@@ -166,6 +168,12 @@ func (p *pageController) viewContext(sess pageSession) forum.ViewContext {
 		if kr, ok := p.users.(appuser.KarmaReader); ok {
 			if karma, err := kr.Karma(context.Background(), principal.UserID); err == nil {
 				vc.Karma = karma
+			}
+		}
+		// v0.6.0：注入该用户已解锁的隐藏节点（如 Konami 码解锁的 /dev/null）。
+		if p.unlockedNodes != nil {
+			if nodes, err := p.unlockedNodes(context.Background(), principal.UserID); err == nil {
+				vc.UnlockedHiddenNodes = nodes
 			}
 		}
 	}

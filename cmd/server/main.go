@@ -229,9 +229,14 @@ func run() error {
 			logger.Info("用户达成连续签到成就", "user_id", userID, "streak", res.Streak)
 		}
 	}
+	// v0.6.0：Konami 码解锁 /dev/null（按用户持久化，服务端固定 slug 不接受用户输入）。
+	onUnlock := func(ctx context.Context, userID int64) error {
+		return checkInStore.UnlockSlug(ctx, userID, "/dev/null", time.Now())
+	}
 	handler := newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login).
 		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
-		withSecurity(gate).withCommands(eggReg).withLoginHook(onLogin)
+		withSecurity(gate).withCommands(eggReg).withLoginHook(onLogin).
+		withUnlockHooks(onUnlock, checkInStore.UnlockedNodes)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:     cfg.SSHAddr,
 		DataDir:  cfg.DataDir,

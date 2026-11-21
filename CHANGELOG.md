@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-21
+
+彩蛋扩展版本。连续签到成就、合规数字雨、Konami 码解锁隐藏版块。含 schema 迁移（0010），测试 924 → 935。
+
+### Added
+
+- **每日签到与 7 天成就**：登录成功（GitHub Device Flow / 邮箱两路）幂等记录本地日期，连续 7 天解锁 `streak_7` 成就；断签归零。按 `MOTD_DISPLAY_TIMEZONE` 算本地日期（复用 ADR-046 配置）。
+- **`/matrix` 滚动雨帘**：固定 24 行、50ms/行、SGR 青色 + 固定字符集，ctx 取消（连接断开）即停。只用 SGR，不触碰 ADR-027 禁止的 ED 清屏 / CUP 定位 / 备用屏。
+- **Konami 码解锁 `/dev/null`**：浏览态输入 ↑↑↓↓←→←→BA 解锁隐藏版块，**按用户持久化**（`user_node_unlocks` 表）；解锁后该用户的版块列表末尾出现 `/dev/null`。未解锁用户不可见；管理员归档的其它版块不会混入彩蛋节点。
+- `docs/ROADMAP.md`：后续路线图。含终端多色扩展（含节日主题）的技术评估与实施顺序。
+
+### Changed
+
+- `ViewContext` 加 `UnlockedHiddenNodes` 字段，由入口层注入已解锁节点；forum 层不做解锁判权、只做去重与并入（ADR-015 边界）。
+- 成就码白名单加 `streak_7`；迁移版本 9 → 10。
+
+### Notes
+
+- 新增 0010 迁移：`daily_checkins`、`user_node_unlocks` 表 + `/dev/null` 种子（status=`archived`，复用 0008 枚举，避免重建 nodes 表）。
+- 无新环境变量；升级替换二进制重启即可，迁移自动应用。
+- 真全屏数字雨、30/100 天签到、更多隐藏版块评估见 `docs/ROADMAP.md`。
+
 ## [0.5.1] - 2026-11-20
 
 彩蛋系统版本。P3-M6 落地，打通「彩蛋→成就」闭环。无 schema 迁移、无新依赖、无新环境变量；测试 914 → 924。
@@ -256,7 +278,8 @@ P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞�
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jeeinn/motd/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/jeeinn/motd/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jeeinn/motd/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jeeinn/motd/compare/v0.4.2...v0.4.3

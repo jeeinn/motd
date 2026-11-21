@@ -1,55 +1,47 @@
-# Release Notes — v0.5.1
+# Release Notes — v0.6.0
 
-**发布日期**：2026-11-20
-**Git tag**：`v0.5.1`（待打，代码与文档已就绪）
+**发布日期**：2026-11-21
+**Git tag**：`v0.6.0`（待打，代码与文档已就绪）
 **Module**：`github.com/jeeinn/motd`
 
-> 彩蛋系统版本。P3-M6 落地，打通「彩蛋→成就」闭环。无 schema 迁移、无新依赖、无新环境变量；测试 914 → 924。
+> 彩蛋扩展版本。连续签到成就、合规数字雨、Konami 码解锁隐藏版块。含 schema 迁移（0010），测试 924 → 935。
 
 ## 本版变化
 
 ### Added
 
-- **六条彩蛋命令**（全部本地语料、零网络、无新依赖）：
-  - `/fortune` — 随机极客箴言（20 条本地语料）
-  - `/cowsay` — ASCII 牛说固定短句
-  - `/xkcd` — 随机 xkcd 风格编号+标题（12 条本地清单，**不联网**，避免失败态）
-  - `/blame @user` — 玩笑式甩锅，固定模板、**绝不回显参数**
-  - `/sudo` — 假提权失败文案，呼应公钥白名单与审计日志
-  - `/karma` — 显示自己的声望、等级与距下一级进度（复用 v0.5.0 的 `KarmaReader`）
-  - `/quit` 退出时约 12% 概率多说一句固定告别语
-- **状态类成就**（接 0001 白名单里已有的两个成就码，首次真正生效）：
-  - `night_owl`「夜行者」— 02:00–05:00 发帖解锁，**按 `MOTD_DISPLAY_TIMEZONE` 计算**（默认 Asia/Shanghai，与终端显示时间一致）
-  - `first_vote`「欢迎来到互联网」— 内容首次被投票时给**作者**（非投票者）；自投票不解锁
-- `command.WithCommands` 命令合并机制与 `internal/plugin/social` 插件。
+- **每日签到与 7 天成就**：登录成功后幂等记录本地日期，连续 7 天解锁 `streak_7` 成就，断签归零。日期按 `MOTD_DISPLAY_TIMEZONE` 计算（默认 Asia/Shanghai），与终端展示时间一致。GitHub Device Flow 与邮箱登录两条路径都已接。
+- **`/matrix` 滚动雨帘**：固定 24 行、50ms/行、SGR 青色 + 固定字符集，连接断开立即停。**合规 ADR-027**：只用 SGR 上色，不使用被禁止的 ED 清屏、CUP 光标定位或备用屏序列；真全屏数字雨评估见路线图。
+- **Konami 码解锁 `/dev/null`**：浏览态输入 ↑↑↓↓←→←→BA 解锁隐藏版块，**按用户持久化**，解锁后该用户的版块列表末尾出现 `/dev/null`；未解锁用户不可见。解锁目标由服务端固定，绝不接用户参数。
+- `docs/ROADMAP.md`：后续路线图，含终端多色扩展（如节日主题）的完整技术评估。
 
-## 安全与边界
+### Changed
 
-- 彩蛋文案全部是编译期常量，经 `safe.RenderSystem`（服务端可信路径）输出；渲染失败退化为不输出，绝不裸写原文（ADR-019/026）。
-- 彩蛋不改数据库、不改计分；插件仍只有「只读查询 + 申请成就」两条受限能力（ADR-015）。
-- `first_vote` 通过扩展的只读端口取作者 ID（只有整数、无 PII）；内容已软删查不到作者时静默跳过，不让插件读失败阻塞 outbox 事件投递。
-- `night_owl` 按 `MOTD_DISPLAY_TIMEZONE`（默认 Asia/Shanghai）计算本地小时，与终端展示时间一致；时区由 cmd 装配层注入插件 Context，插件不反向依赖 presentation 层。
+- `ViewContext` 加 `UnlockedHiddenNodes` 字段：入口层注入已解锁节点，forum 层只做去重与并入，不做解锁判权（维持 ADR-015 边界）。
+- 迁移版本 9 → 10；成就码白名单加 `streak_7`。
 
 ## 升级说明
 
-从 v0.5.0 升级无需迁移、无需改配置：替换二进制重启即可。无新环境变量。
+新增 0010 迁移（`daily_checkins`、`user_node_unlocks` 表 + `/dev/null` 种子），启动时自动应用。从 v0.5.x 升级无需改配置：替换二进制重启即可，无新环境变量。签到数据从本版起开始累积。
 
 ## 已知问题与限制
 
-- 彩蛋文案固定，重复触发内容不变；`/xkcd` 是本地清单不是实时漫画。
-- 延后到 v0.5.2：动态数字雨 `/matrix`（ANSI 白名单风险）、连续签到 7 天（需迁移）、Konami 码解锁隐藏版块 `/dev/null`（需输入序列检测）。
+- `/dev/null` 是彩蛋版块，无任何内容；解锁只影响版块列表可见性，不改变权限或计分。
+- `/matrix` 是合规的滚动雨帘（24 行），不是真全屏动画——受 ADR-027 安全白名单约束。
+- 签到按展示时区的**本地日期**判定；跨时区旅行或系统时区变更可能使连续天数出现空洞（按日期字符串比对）。
 - 沿用前版：会话最长 6 小时、最小压测不构成 1 Mbps/1000 在线验收、race job 非 required 观察中。
+- 延后项与多色评估见 [`ROADMAP.md`](docs/ROADMAP.md)。
 
 ## 验证
 
-- `go build ./...` / `go vet ./...` 通过；`go test -count=1 ./...` 全绿，**0 FAIL**，测试函数 **924**（v0.5.0 为 914）。
-- 专项测试：命令合并与语料安全、夜行者时段边界、投票成就给作者、安全渲染、等级阈值；archtest 全绿（插件未越权 import infrastructure）。
-- 格式门禁零输出。
+- `go build ./...` / `go vet ./...` 通过；`go test -count=1 ./...` 全绿、**0 FAIL**，测试函数 **935**（v0.5.1 为 924）。
+- 专项：Konami 状态机（精确序列/错键重置）、签到连续天数与成就（含断签重置）、SQLite 幂等签到与解锁持久化、ViewContext 隐藏节点注入去重、matrix 帧安全。
+- 格式门禁零输出；archtest 全绿（插件未越权）。
 
 ## 破坏性变更
 
-无。新增命令与成就均为增量能力，对外契约、配置与数据结构兼容 v0.5.0。
+无。新增能力均为增量，Config / schema 兼容旧版（迁移向前）。
 
 ## 变更明细
 
-见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.5.1]` 段、[`DECISIONS.md`](docs/DECISIONS.md) 的 ADR-061、[`P3-PLAN.md`](docs/P3-PLAN.md) §7。
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.6.0]` 段、[`DECISIONS.md`](docs/DECISIONS.md) 的 ADR-062、[`ROADMAP.md`](docs/ROADMAP.md)。

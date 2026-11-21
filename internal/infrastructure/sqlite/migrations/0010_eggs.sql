@@ -5,8 +5,10 @@
 --    签到是幂等的：同一天多次登录只留一条。
 -- 2) user_node_unlocks：用户级隐藏版块解锁（仅 /dev/null 使用）。
 --    按用户而非全局，未解锁用户的列表查询过滤该节点。
--- 3) /dev/null 种子节点：status='hidden'，默认所有人不可见，
---    只有 user_node_unlocks 有记录的用户能看到。
+-- 3) /dev/null 种子节点：status='archived'（0008 的 CHECK 只允许 active/archived），
+--    ListNodes 只查 active 故默认所有人不可见；只有 user_node_unlocks 有记录的用户
+--    才能在 viewContext 注入后看到。用 archived 表达「默认不出现在列表」是刻意复用
+--    现有枚举，避免为彩蛋重建 nodes 表放宽 CHECK（ADR-048 节点三不变量）。
 
 CREATE TABLE IF NOT EXISTS daily_checkins (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,4 +30,4 @@ CREATE TABLE IF NOT EXISTS user_node_unlocks (
 );
 
 INSERT OR IGNORE INTO nodes (slug, name, description, status) VALUES
-  ('/dev/null', '黑洞', '此处空空如也——也可能是别有洞天', 'hidden');
+  ('/dev/null', '黑洞', '此处空空如也——也可能是别有洞天', 'archived');

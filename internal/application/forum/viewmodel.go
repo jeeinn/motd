@@ -26,6 +26,10 @@ type ViewContext struct {
 	RowOffset int // 跨页累计的行数，保证翻页后序号连续
 	Context   string
 	Notice    viewmodel.Notice
+	// UnlockedHiddenNodes 是入口层注入的「该用户已解锁的隐藏节点」（v0.6.0）。
+	// forum 层不依赖解锁存储，也不做权限判断——它只把调用方明确放行的节点
+	// 并入节点列表。隐藏节点默认不在 ListNodes（status='active' 过滤）里。
+	UnlockedHiddenNodes []node.Node
 }
 
 func (v ViewContext) statusBar() viewmodel.StatusBar {
@@ -113,6 +117,18 @@ func (s *Service) ScreenNodes(ctx context.Context, v ViewContext) (viewmodel.Scr
 	nodes, err := s.ListNodes(ctx)
 	if err != nil {
 		return viewmodel.Screen{}, err
+	}
+	// v0.6.0：把入口层放行的隐藏节点追加到列表末尾。去重按 ID，
+	// 防止解锁记录脏数据导致同一节点出现两行（Row.Index 必须唯一）。
+	seen := make(map[int64]bool, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = true
+	}
+	for _, n := range v.UnlockedHiddenNodes {
+		if !seen[n.ID] && n.ID > 0 {
+			nodes = append(nodes, n)
+			seen[n.ID] = true
+		}
 	}
 	rows := make([]viewmodel.Row, 0, len(nodes))
 	for i, n := range nodes {

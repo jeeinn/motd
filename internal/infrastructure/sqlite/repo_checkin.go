@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appuser "github.com/jeeinn/motd/internal/application/user"
+	"github.com/jeeinn/motd/internal/domain/node"
 )
 
 var _ appuser.CheckInStore = (*CheckInStore)(nil)
@@ -163,20 +164,42 @@ func (s *CheckInStore) IsNodeUnlocked(ctx context.Context, userID, nodeID int64)
 	return true, nil
 }
 
-// HiddenNodeIDs 返回所有 hidden 节点的 ID（用于列表过滤）。
-func (s *CheckInStore) HiddenNodeIDs(ctx context.Context) (map[int64]bool, error) {
-	rows, err := s.pools.QueryContext(ctx, `SELECT id FROM nodes WHERE status = 'hidden'`)
+// UnlockedNodes 返回用户已解锁的隐藏节点（JOIN user_node_unlocks × nodes）。
+// 只返回彩蛋隐藏节点（slug='/dev/null'）；管理员归档的普通版块不算彩蛋节点。
+func (s *CheckInStore) UnlockedNodes(ctx context.Context, userID int64) ([]node.Node, error) {
+	rows, err := s.pools.QueryContext(ctx, `
+		SELECT n.id, n.slug, n.name, n.description
+		FROM user_node_unlocks u JOIN nodes n ON n.id = u.node_id
+		WHERE u.user_id = ? AND n.slug = '/dev/null'
+		ORDER BY n.id ASC`, userID)
 	if err != nil {
-		return nil, fmt.Errorf("查询隐藏节点: %w", err)
+		return nil, fmt.Errorf("查询已解锁节点: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[int64]bool)
+	var out []node.Node
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var n node.Node
+		if err := rows.Scan(&n.ID, &n.Slug, &n.Name, &n.Description); err != nil {
+			return nil, fmt.Errorf("扫描已解锁节点: %w", err)
 		}
-		out[id] = true
+		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// UnlockSlug 解锁彩蛋隐藏节点。slug 必须精确为服务端固定的 "/dev/null"，
+// 其它值一律拒绝——调用方不该、也不能通过参数选择解锁目标。
+func (s *CheckInStore) UnlockSlug(ctx context.Context, userID int64, slug string, at time.Time) error {
+	if slug != "/dev/null" {
+		return fmt.Errorf("非法的彩蛋节点 slug: %q", slug)
+	}
+	var nodeID int64
+	err := s.pools.QueryRowContext(ctx, `SELECT id FROM nodes WHERE slug = ?`, slug).Scan(&nodeID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("隐藏节点不存在: %s: %w", slug, err)
+	}
+	if err != nil {
+		return fmt.Errorf("查询隐藏节点: %w", err)
+	}
+	return s.UnlockNode(ctx, userID, nodeID, at)
 }

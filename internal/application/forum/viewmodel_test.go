@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/domain/post"
 	"github.com/jeeinn/motd/internal/domain/thread"
 )
@@ -362,5 +363,36 @@ func TestOnlyThreadListProjectsReplyCounts(t *testing.T) {
 	}
 	if len(repos.replyCountCalls) != 0 {
 		t.Fatalf("详情页 Rows 与搜索屏不应投影回复数，实际 %v", repos.replyCountCalls)
+	}
+}
+
+// v0.6.0 / P3-M6：ViewContext 注入的已解锁隐藏节点并入列表屏，且按 ID 去重。
+func TestScreenNodesWithUnlockedHiddenNode(t *testing.T) {
+	ctx := context.Background()
+	s := NewService(newFakeRepos(), WithClock(func() time.Time { return testBase }))
+	v := testViewContext()
+	v.UnlockedHiddenNodes = []node.Node{
+		{ID: 99, Slug: "/dev/null", Name: "黑洞", Description: "隐藏版块"},
+		{ID: 1, Slug: "/dev/ai", Name: "重复项", Description: "应被去重"}, // 与已有 ID 1 重复
+	}
+	sc, err := s.ScreenNodes(ctx, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.Rows) != 3 { // 原有 2 个 + 解锁 1 个（重复的 ID 1 被过滤）
+		t.Fatalf("应显示 3 行，实际 %d", len(sc.Rows))
+	}
+	last := sc.Rows[len(sc.Rows)-1]
+	if last.Meta.Node != "/dev/null" || last.Index != 3 {
+		t.Errorf("隐藏节点应在列表末尾且序号连续: %+v", last)
+	}
+	for i, r := range sc.Rows {
+		if r.Index != i+1 {
+			t.Errorf("行序号应唯一且递增: %+v", sc.Rows)
+			break
+		}
+	}
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("注入后屏幕未通过自洽校验: %v", err)
 	}
 }

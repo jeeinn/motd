@@ -84,8 +84,9 @@ func TestNodesStatusBackfillsSeedRows(t *testing.T) {
 	if err := pools.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE status = 'archived'`).Scan(&archived); err != nil {
 		t.Fatal(err)
 	}
-	if total != 5 || active != 5 || archived != 0 {
-		t.Fatalf("5 个 seed 应全部回填 active: total=%d active=%d archived=%d", total, active, archived)
+	// v0.6.0 / 0010 追加了彩蛋节点 /dev/null（archived），因此 6 总 / 5 active / 1 archived。
+	if total != 6 || active != 5 || archived != 1 {
+		t.Fatalf("seed 状态分布应为 6/5/1（含彩蛋隐藏节点）: total=%d active=%d archived=%d", total, active, archived)
 	}
 
 	// 归档是可逆 UPDATE，非法值必须被 CHECK 挡住。

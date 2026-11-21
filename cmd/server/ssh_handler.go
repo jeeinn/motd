@@ -16,6 +16,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/presentation/terminal"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
@@ -55,6 +56,10 @@ type inputHandler struct {
 	// onLogin 是登录成功后的副作用钩子（签到），由 cmd 装配层注入（v0.6.0）。
 	// 只在会话升级成功后调用；nil 时零影响，保持既有测试零改动。
 	onLogin func(context.Context, int64)
+	// onUnlock / unlockedNodes 是隐藏节点解锁的写/读钩子（v0.6.0），
+	// 由 cmd 装配层注入；nil 时 Konami 码与列表注入都零影响。
+	onUnlock      func(context.Context, int64) error
+	unlockedNodes func(context.Context, int64) ([]node.Node, error)
 }
 
 // withSecurity 注入认证安全门（限流 + 审计的 fail-closed 入口）。
@@ -84,6 +89,15 @@ func (h *inputHandler) withForum(svc *forum.Service, users appuser.StatusReader,
 
 func newInputHandler() *inputHandler {
 	return &inputHandler{reg: command.Default()}
+}
+
+// withUnlockHooks 注入隐藏节点的解锁写钩子与已解锁读钩子（v0.6.0）。
+func (h *inputHandler) withUnlockHooks(
+	onUnlock func(context.Context, int64) error,
+	unlocked func(context.Context, int64) ([]node.Node, error),
+) *inputHandler {
+	h.onUnlock, h.unlockedNodes = onUnlock, unlocked
+	return h
 }
 
 // withLoginHook 注入登录成功后的签到钩子（v0.6.0）。
@@ -395,7 +409,10 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 	if !cl.active && pc.editor == nil && sess.Principal().IsUser() {
 		if pc.konami.Feed(m) {
 			if pc.onUnlock != nil {
-				_ = pc.onUnlock(ctx, sess.Principal().UserID)
+				if err := pc.onUnlock(ctx, sess.Principal().UserID); err == nil {
+					// 固定文案（不含用户数据），经安全渲染路径输出。
+					writeEgg(sess, "隐藏版块已解锁：/dev/null\r\n")
+				}
 			}
 			pc.konami.Reset()
 		}

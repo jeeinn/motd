@@ -14,6 +14,8 @@ var seedNodes = map[string]string{
 	"/dev/jobs": "工作与招聘",
 	"/etc/rant": "随便聊聊",
 	"/bin/help": "帮助与支持",
+	// v0.6.0 / 0010：彩蛋隐藏节点（status=archived，默认不在 active 列表）。
+	"/dev/null": "黑洞",
 }
 
 // 复用 write_test.go 里同包的 countNodes(ctx, pools)，避免重复定义。
