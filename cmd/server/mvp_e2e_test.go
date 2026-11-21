@@ -85,7 +85,7 @@ func (o *mvpOutput) mark() int { return len(o.text()) }
 
 func (o *mvpOutput) waitSince(t *testing.T, from int, want string) {
 	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(e2eWaitTimeout)
 	for {
 		all := o.text()
 		if from <= len(all) && strings.Contains(all[from:], want) {
