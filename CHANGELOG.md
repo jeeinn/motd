@@ -279,8 +279,8 @@ P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞�
 - 令牌不落库、不进日志、不进呈现结构。
 
 [Unreleased]: https://github.com/jeeinn/motd/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/jeeinn/motd/compare/v0.5.1...v0.6.0
-[0.5.1]: https://github.com/jeeinn/motd/compare/v0.5.0...v0.5.1
+[0.6.0]: https://github.com/jeeinn/motd/compare/v0.5.0...v0.6.0
+<!-- v0.5.1 未单独发 tag，其内容随 v0.6.0 一并发布；上方 [0.6.0] 的 compare 基准因此取 v0.5.0 -->
 [0.5.0]: https://github.com/jeeinn/motd/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/jeeinn/motd/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jeeinn/motd/compare/v0.4.1...v0.4.2
