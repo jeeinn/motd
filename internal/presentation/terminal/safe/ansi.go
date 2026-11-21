@@ -14,6 +14,12 @@ const (
 	StyleCode
 	StyleLink
 	StyleHeader
+	// P4-T1：三种配色 Style 只服务于服务端固定文案（标签/前缀），
+	// 用户文本主体永不染色。用户内容路径的 styleFor() 不得返回它们，
+	// archtest 的 color_test.go 会静态守卫这一约束。
+	StyleAccent // 深蓝：状态栏 L3/L4 等级标签
+	StyleNotice // 琥珀：[提示] 前缀（Warning）；公告/置顶字段到位后再消费
+	StyleError  // 暗红：仅 [错误] 前缀，消息正文不上色
 )
 
 // 下面这张表是渲染输出中**唯一**允许出现的 ESC 序列来源（ADR-027 扩充）。
@@ -34,6 +40,11 @@ const (
 	codeANSI   = "\x1b[36m"
 	linkANSI   = "\x1b[4m"
 	headerANSI = "\x1b[1;4m"
+	// P4-T1 新增的三种 SGR 前景色。只在此文件定义；
+	// StyleCode 的 36 是行内代码语义，保持原样，不复用为 UI 色。
+	accentANSI = "\x1b[34m" // 深蓝
+	noticeANSI = "\x1b[33m" // 琥珀
+	errorANSI  = "\x1b[31m" // 暗红
 )
 
 func openANSI(s Style) string {
@@ -50,6 +61,12 @@ func openANSI(s Style) string {
 		return linkANSI
 	case StyleHeader:
 		return headerANSI
+	case StyleAccent:
+		return accentANSI
+	case StyleNotice:
+		return noticeANSI
+	case StyleError:
+		return errorANSI
 	default:
 		return ""
 	}

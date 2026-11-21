@@ -375,7 +375,8 @@ find data/backups -name 'motd-*.db' -mtime +14 -print
 
 ## 8. 监控与告警（P3 落地）
 
-- `/healthz` 返回 `ok <version> queue=<depth>/<cap> online=<n> active=<n> commits=<n>`：`queue` 观察写入背压，`online/active` 是内存在线注册表（重启归零，非业务数据），`commits` 是进程启动以来成功提交的事务数。全部为运维可观测字段，不承载业务流量（ADR-006 / ADR-016）。
+- `/healthz` 返回 `ok <version> queue=<depth>/<cap> online=<n> active=<n> commits=<n> tx_bytes=<n> rx_bytes=<n>`：`queue` 观察写入背压，`online/active` 是内存在线注册表（重启归零，非业务数据），`commits` 是进程启动以来成功提交的事务数。全部为运维可观测字段，不承载业务流量（ADR-006 / ADR-016）。
+- **带宽探针（P4-T2）**：`tx_bytes` / `rx_bytes` 是进程级 SSH 字节累计值（`tx` 服务端→客户端，`rx` 客户端→服务端），由 `Session.Read/Write` 用 atomic 在内存中单调累加，重启归零。**它们不写 SQLite、不改变 `commits`、不进领域模型或 ViewModel，也不在终端页面呈现**；只用于粗略判断链路是否在传数据。`tx_bytes`/`rx_bytes` 增长而 `online/active=0` 说明连接已断但注册表状态滞后，`commits` 增长则与带宽无关（那是真实写库）。
 - **连接级心跳**：每条活 SSH 连接每 10s 在内存 `Touch` 一次，不写库；20s `Reap` 因此只清理真正断开的僵尸条目。等待 Device Flow 授权期间即使几十秒无按键，`online` 也不应归零；若观察到归零或「登录成功但仍为访客」，排查 `sshd.Session.heartbeatLoop` 是否被关闭，详见 `docs/MVP-DELIVERY.md §9`。
 - **终端 VT 兼容（ADR-027）**：终端页面用服务端白名单序列 `\x1b[K`（EL）与 `\x1b[nA`（CUU）做原地重绘，依赖客户端启用 VT 支持（Windows Terminal / 现代 conhost / xterm 均默认支持）。若用户反馈「导航仍刷屏」或看到字面 `\x1b[K`，优先确认终端 VT 设置，而不是服务端渲染；未启用 VT 时服务端会退化为追加输出，业务功能不受影响。清屏 / OSC / 备用屏等禁止序列由 `internal/archtest` 负向注入守卫持续校验。
 - 待接入告警：最近备份时间超过 26 h、`verify` 失败、队列深度持续接近容量。

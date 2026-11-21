@@ -36,6 +36,10 @@ type Session struct {
 	principal   auth.Principal
 	reg         *presence.Registry
 
+	// bw 指向进程级带宽计数器；用 atomic.Pointer 是因为 newSession 会提前
+	// 启动关闭定时器，而 setBandwidth 在构造之后才由 Server 调用。
+	bw atomic.Pointer[Bandwidth]
+
 	mu     sync.Mutex
 	term   string
 	width  uint32
@@ -107,6 +111,8 @@ func newSession(id string, ch gossh.Channel, fp, pk string, p auth.Principal, re
 		principal: p, reg: reg,
 		done: make(chan struct{}),
 	}
+	// 默认挂进程级计数器：直接 newSession 的调用方（含单测）也有确定目标。
+	s.bw.Store(ProcessBandwidth())
 	// 这两个字段会被 closeWithReason 在锁内读取，赋值也必须在同一把锁内完成：
 	// 极短 lifetime（测试注入）时 AfterFunc 回调可能在赋值语句返回前就触发，
 	// 无锁赋值会与回调的锁内读取构成 data race（CI race job 实测捕获）。
@@ -177,6 +183,8 @@ func (s *Session) heartbeat() { _ = s.reg.Touch(s.id) }
 // 此时服务端仍要继续输出。会话的收口由 Server 的连接级 connDone 信号负责。
 func (s *Session) Read(p []byte) (int, error) {
 	n, err := s.ch.Read(p)
+	// 纯内存累加：不产生持久化写入，不改变任何领域状态（§2.6 / ADR-016）。
+	s.addRx(n)
 	if n > 0 {
 		if terr := s.reg.Touch(s.id); terr != nil && errors.Is(terr, presence.ErrUnknownSession) {
 			// Reap 会按 20s 心跳超时把「长时间只读不输入」的连接移出注册表，
@@ -188,7 +196,34 @@ func (s *Session) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (s *Session) Write(p []byte) (int, error) { return s.ch.Write(p) }
+func (s *Session) Write(p []byte) (int, error) {
+	n, err := s.ch.Write(p)
+	// 与 Read 对称：只在真实写出字节后累加，错误路径不虚增带宽。
+	s.addTx(n)
+	return n, err
+}
+
+// setBandwidth 把会话挂到指定计数器。进程内唯一并发写入点，
+// 由 atomic.Pointer 保证与 Read/Write 的读取无竞态。
+func (s *Session) setBandwidth(bw *Bandwidth) {
+	if bw != nil {
+		s.bw.Store(bw)
+	}
+}
+
+// addRx / addTx 只对实际传输的字节做原子累加。
+// 计数器指针始终非空（newSession 注入默认值），无需 nil 分支。
+func (s *Session) addRx(n int) {
+	if n > 0 {
+		s.bw.Load().AddRx(n)
+	}
+}
+
+func (s *Session) addTx(n int) {
+	if n > 0 {
+		s.bw.Load().AddTx(n)
+	}
+}
 
 // sendExitStatus 在会话结束前回一个 exit-status，否则 OpenSSH 客户端
 // 只看到连接被关闭，会以 255 退出，看起来像登录失败。

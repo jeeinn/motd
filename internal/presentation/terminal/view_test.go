@@ -366,3 +366,99 @@ func TestRenderScreenDetailHasSeparatorBetweenTitleAndBody(t *testing.T) {
 		t.Fatal("虚线插入不得吞掉下方回复行")
 	}
 }
+
+// P4-T1：状态栏等级着色只覆盖 L3/L4 两字符，且 "L%d" 文字标签始终保留。
+func TestStatusBarLevelColorIsScoped(t *testing.T) {
+	for _, tc := range []struct {
+		level uint8
+		label string
+	}{
+		{1, "L1"}, {2, "L2"}, {3, "L3"}, {4, "L4"},
+	} {
+		s := baseScreen(viewmodel.ScreenNodes)
+		s.StatusBar.Level = tc.level
+		out, err := RenderScreen(s, 80)
+		if err != nil {
+			t.Fatalf("level=%d 渲染失败: %v", tc.level, err)
+		}
+		assertOnlySGR(t, out)
+
+		if !strings.Contains(out, tc.label) {
+			t.Errorf("level=%d 必须保留文字标签 %q: %q", tc.level, tc.label, out)
+		}
+		if tc.level >= 3 {
+			if !strings.Contains(out, "\x1b[34m"+tc.label+"\x1b[0m") {
+				t.Errorf("level=%d 的 %s 应走 Accent(34): %q", tc.level, tc.label, out)
+			}
+		} else {
+			// L1/L2 整行保持一条 Dim 序列（与既有输出逐字节一致）。
+			if !strings.Contains(out, "\x1b[2m") || !strings.Contains(out, tc.label+"\x1b[0m") {
+				t.Errorf("level=%d 的 %s 应保持在 Dim(2) 段落内: %q", tc.level, tc.label, out)
+			}
+			if strings.Contains(out, "\x1b[34m") {
+				t.Errorf("level=%d 不应出现 Accent 色: %q", tc.level, out)
+			}
+		}
+		// 固定数值区不得被染色：颜色面积只限等级两字符。
+		if strings.Contains(out, "\x1b[34monline=") || strings.Contains(out, "\x1b[34mkarma=") {
+			t.Errorf("level=%d 状态栏数值区不应染色: %q", tc.level, out)
+		}
+	}
+}
+
+// P4-T1：提示行按 NoticeKind 给固定前缀分色，消息正文仍走 RenderUser。
+func TestNoticePrefixColorAndUserBodyIsolation(t *testing.T) {
+	for _, tc := range []struct {
+		kind   viewmodel.NoticeKind
+		prefix string
+	}{
+		{viewmodel.NoticeError, "\x1b[31m[错误] \x1b[0m"},
+		{viewmodel.NoticeWarning, "\x1b[33m[提示] \x1b[0m"},
+		{viewmodel.NoticeInfo, "\x1b[2m[提示] \x1b[0m"},
+		{viewmodel.NoticeSuccess, "\x1b[2m[提示] \x1b[0m"},
+	} {
+		s := baseScreen(viewmodel.ScreenNodes)
+		// 正文含用户提交的颜色 SGR，必须被净化成可见字符而非真正上色。
+		s.StatusBar.Notice = viewmodel.Notice{Kind: tc.kind, Message: "用户正文\x1b[31m红\x1b[0m"}
+		out, err := RenderScreen(s, 80)
+		if err != nil {
+			t.Fatalf("kind=%d 渲染失败: %v", tc.kind, err)
+		}
+		assertOnlySGR(t, out)
+
+		if !strings.Contains(out, tc.prefix) {
+			t.Errorf("kind=%d 缺少着色前缀 %q: %q", tc.kind, tc.prefix, out)
+		}
+		if !strings.Contains(out, "␛[31m红␛[0m") {
+			t.Errorf("kind=%d 用户 SGR 应转成可见图示（走 RenderUser）: %q", tc.kind, out)
+		}
+		for _, forbidden := range []string{
+			"\x1b[31m用户正文", "\x1b[33m用户正文", "\x1b[34m用户正文",
+		} {
+			if strings.Contains(out, forbidden) {
+				t.Errorf("kind=%d 用户正文被染色 %q: %q", tc.kind, forbidden, out)
+			}
+		}
+		// 错误色只允许落在 [错误] 前缀，不得泄漏到正文行其他位置。
+		if tc.kind != viewmodel.NoticeError && strings.Count(out, "\x1b[31m") != 0 {
+			t.Errorf("kind=%d 不应出现 Error 色: %q", tc.kind, out)
+		}
+	}
+}
+
+// P4-T1：没有 Notice 时不得凭空多出前缀着色。
+func TestNoticeAbsentHasNoPrefixedLine(t *testing.T) {
+	s := baseScreen(viewmodel.ScreenNodes)
+	out, err := RenderScreen(s, 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"[错误]", "[提示]"} {
+		if strings.Contains(out, prefix) {
+			t.Errorf("无提示时不应输出 %q: %q", prefix, out)
+		}
+	}
+	if strings.Contains(out, "\x1b[31m") || strings.Contains(out, "\x1b[33m") {
+		t.Errorf("无提示时不应出现 Error/Notice 色: %q", out)
+	}
+}

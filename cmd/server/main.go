@@ -297,7 +297,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           probeMux(pools, writer, rt.Presence, auditLogger, limiter),
+		Handler:           probeMux(pools, writer, rt.Presence, auditLogger, limiter, sshSrv.Bandwidth()),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -349,8 +349,14 @@ func run() error {
 // 不开任何业务 HTTP 端点；HTTP 端点留到 P1 浏览器接入时再评估。
 // probeMux 只提供运维探针，不承担业务流量。审计器 / 限流器可传 nil，
 // 此时 /healthz 只输出原有指标，便于不装配安全组件的本机开发场景。
+// bw 是可省略的进程级带宽计数器；不传时用 ssh 包的兜底计数器，
+// 保持旧的五参数调用方源码兼容。
 func probeMux(pools *sqlite.Pools, writer *sqlite.Writer, reg *presence.Registry,
-	audit *auth.AuditLogger, limiter *auth.RateLimiter) http.Handler {
+	audit *auth.AuditLogger, limiter *auth.RateLimiter, bw ...*sshd.Bandwidth) http.Handler {
+	bandwidth := sshd.ProcessBandwidth()
+	if len(bw) > 0 && bw[0] != nil {
+		bandwidth = bw[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -361,8 +367,11 @@ func probeMux(pools *sqlite.Pools, writer *sqlite.Writer, reg *presence.Registry
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "ok %s queue=%d/%d online=%d active=%d commits=%d",
-			version, writer.Depth(), writer.Cap(), reg.Online(), reg.Active(), writer.Commits())
+		// tx_bytes / rx_bytes 是进程级纯内存计数：与 commits 无关，
+		// 字节累加不写库、不进领域模型、不在终端呈现暴露。
+		_, _ = fmt.Fprintf(w, "ok %s queue=%d/%d online=%d active=%d commits=%d tx_bytes=%d rx_bytes=%d",
+			version, writer.Depth(), writer.Cap(), reg.Online(), reg.Active(), writer.Commits(),
+			bandwidth.Tx(), bandwidth.Rx())
 		if audit != nil {
 			depth, dropped, flushed, failed := audit.Stats()
 			_, _ = fmt.Fprintf(w, " audit_depth=%d audit_cap=%d audit_dropped=%d audit_flushed=%d audit_failed=%d",
