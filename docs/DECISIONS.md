@@ -935,6 +935,11 @@
 - 代价 / 边界：CI 多一个 job 的 runner 分钟消耗；本机（Windows）仍无法本地复现 race 结果，只能靠 CI。race 不是压测——它查并发正确性，不衡量容量（见 ADR-059 与 P3-PLAN §5 的诚实口径）。
 - 验证：YAML 结构与现有 `check` job 同构、人工核对缩进；本机实测 `go test -race` 报 `requires cgo`（符合预期，非缺陷）；全量 `go build/vet/test` 仍全绿、0 FAIL。race job 本身待 push 后在 CI 验证。
 - 关联：`ADR-016`（presence 内存状态与并发）、`ADR-010`（单写队列）、`PHASE1-PLAN.md:75`（被本条更正的因果）、`P3-PLAN.md §4`。
+- **实施后续（2026-11-20~21，实况修正原决策）**：
+  1. **抓到 4 处 data race**（首次跑即失败）：3 处测试假对象（`loginClient` 计数器无锁、`loginStore.inWriteTxn()` 无锁读、`sessionMaxLifetime` 裸全局），1 处**生产代码真 bug**（`session.go` 的 `s.lifetime`/`s.hb` 赋值无锁，与 timer 回调的锁内读竞争）。全部修复后 CI 全绿；`sessionMaxLifetime` 改 `atomic.Int64`，赋值纳入 `s.mu`。
+  2. **`halt_on_error=1` 已移除**：它让 detector 在每个包第一个 race 处停止，导致"修一个冒一个"（经历两轮）。去掉后一轮报全，这是灰度期经验修正。
+  3. **R3 真实发生**：race 下 `TestMVPLoginCommandHintOnRealSSH` 首屏等待偶发超过 8s（CI 实测 8.18s），非 data race、非挂起，是渲染变慢。解法用构建标签分离超时：正常构建 `e2e_wait_default.go` 仍 8s 保持挂起检测灵敏度，race 构建 `e2e_wait_race.go` 放宽到 30s；**没有跳过 race、没有全局放水**。修复后 CI 连续两轮全绿。
+  4. required 状态：仍非 required，观察项见 `P3-PLAN.md §11`。
 
 ## ADR-059 最小压测集合：核心场景基线而非容量验收
 
