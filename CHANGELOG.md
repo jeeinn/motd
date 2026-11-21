@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-21
+
+P4「可靠性收尾 + 基础多色」版本。终端基础多色（克制 3 色）+ `/healthz` 带宽探针；race 检测转 main 强制门禁。测试 935 → 941。
+
+### Added
+
+- **终端基础多色（克制 3 色）**：`safe/ansi.go` 新增 Accent（34 深蓝）/ Notice（33 琥珀）/ Error（31 暗红）三个 SGR 前景 Style，仅服务端固定文案；状态栏 `L3`/`L4` 走深蓝、提示行 `[错误]`/`[提示]` 前缀分色，用户文本正文仍走 `RenderUser` 不上色。不引入绿/品红/白/亮色/背景色/256 色/真彩，版块名不上色。
+- **带宽探针**：`/healthz` 新增 `tx_bytes`/`rx_bytes`，`Server.bw`(2×atomic.Uint64) + `Session.bw`(atomic.Pointer) 纯内存计数，不写库、不改领域模型。`probeMux` 的 bw 参数 variadic 兼容旧调用。
+- **archtest 配色守卫**：`TestUserMarkdownCannotSelectPalette`、`TestColorStylesOnlyUsedBySystemPath`（含负向注入），阻止用户 Markdown 选色与非授权文件引用配色 Style。
+
+### Changed
+
+- **race 检测转 required**：main 分支建立保护规则，`Build / Vet / Test` 与 `Race detector` 设为 required（strict）。
+- `docs/P4-PLAN.md`（新增）、`docs/ROADMAP.md`（R-01 纳入 P4、新增 R-04 P5）、`docs/OPS.md`（§8 探针字段）。
+
+### Notes
+
+- 无 schema 迁移、无新环境变量、无新依赖；从 v0.6.x 升级替换二进制重启即可。
+- CI 双 job 全绿（check 27s / race 1m31s）；QA 独立验证信任域未破防、karma 阈值正确、healthz 实测含字段且 commits 不变。
+
 ## [0.6.0] - 2026-11-21
 
 彩蛋扩展版本。连续签到成就、合规数字雨、Konami 码解锁隐藏版块。含 schema 迁移（0010），测试 924 → 935。

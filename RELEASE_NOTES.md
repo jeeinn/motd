@@ -1,47 +1,48 @@
-# Release Notes — v0.6.0
+# Release Notes — v0.7.0
 
 **发布日期**：2026-11-21
-**Git tag**：`v0.6.0`（待打，代码与文档已就绪）
+**Git tag**：`v0.7.0`
 **Module**：`github.com/jeeinn/motd`
 
-> 彩蛋扩展版本。连续签到成就、合规数字雨、Konami 码解锁隐藏版块。含 schema 迁移（0010），测试 924 → 935。
+> P4「可靠性收尾 + 基础多色」版本。终端基础多色（克制 3 色）+ `/healthz` 带宽探针；race 检测正式成为 main 强制门禁。无 schema 迁移，测试 935 → 941。
 
 ## 本版变化
 
 ### Added
 
-- **每日签到与 7 天成就**：登录成功后幂等记录本地日期，连续 7 天解锁 `streak_7` 成就，断签归零。日期按 `MOTD_DISPLAY_TIMEZONE` 计算（默认 Asia/Shanghai），与终端展示时间一致。GitHub Device Flow 与邮箱登录两条路径都已接。
-- **`/matrix` 滚动雨帘**：固定 24 行、50ms/行、SGR 青色 + 固定字符集，连接断开立即停。**合规 ADR-027**：只用 SGR 上色，不使用被禁止的 ED 清屏、CUP 光标定位或备用屏序列；真全屏数字雨评估见路线图。
-- **Konami 码解锁 `/dev/null`**：浏览态输入 ↑↑↓↓←→←→BA 解锁隐藏版块，**按用户持久化**，解锁后该用户的版块列表末尾出现 `/dev/null`；未解锁用户不可见。解锁目标由服务端固定，绝不接用户参数。
-- `docs/ROADMAP.md`：后续路线图，含终端多色扩展（如节日主题）的完整技术评估。
+- **终端基础多色（克制 3 色）**：`safe/ansi.go` 新增 3 个 SGR 前景 Style——Accent（34 深蓝）、Notice（33 琥珀）、Error（31 暗红），仅服务端固定文案使用；行内代码原有的青色（36）保持不变。
+  - 状态栏：等级 `L3`/`L4` 走深蓝，`L1`/`L2` 与数值区保持暗灰；等级文字标签始终保留，颜色只是辅助提示。
+  - 提示行：`[错误]` 前缀暗红、`[提示]` 前缀琥珀，消息正文仍走用户文本安全路径，不染色。
+  - 明确不新增绿 / 品红 / 白 / 亮色 / 背景色 / 256 色 / 真彩；版块名与所有用户生成内容不上色。
+- **带宽可观测探针**：`/healthz` 新增 `tx_bytes` / `rx_bytes`，记录进程级收发字节。纯内存原子计数，不写库、不改领域模型、不在终端呈现暴露，仅为后续容量口径备数据（不构成 1 Mbps / 1000 在线验收）。
+- **archtest 配色守卫**：新增 `TestUserMarkdownCannotSelectPalette` 与 `TestColorStylesOnlyUsedBySystemPath`（含负向注入），从结构上阻止用户 Markdown 选色或非授权文件引用配色 Style。
 
 ### Changed
 
-- `ViewContext` 加 `UnlockedHiddenNodes` 字段：入口层注入已解锁节点，forum 层只做去重与并入，不做解锁判权（维持 ADR-015 边界）。
-- 迁移版本 9 → 10；成就码白名单加 `streak_7`。
+- **race 检测转强制门禁**：GitHub `main` 分支建立保护规则，`Build / Vet / Test` 与 `Race detector` 两个 CI job 设为 required 且 strict。此后合入 main 的 PR 必须通过竞态检测。
+- `docs/P4-PLAN.md`：P4 计划与里程碑状态（T1/T2/T3/T4 均已完成）。
+- `docs/ROADMAP.md`：R-01 基础多色纳入 P4；新增 R-04 浏览器端 TUI 帧传输（P5 方向）。
 
 ## 升级说明
 
-新增 0010 迁移（`daily_checkins`、`user_node_unlocks` 表 + `/dev/null` 种子），启动时自动应用。从 v0.5.x 升级无需改配置：替换二进制重启即可，无新环境变量。签到数据从本版起开始累积。
+无 schema 迁移、无新环境变量、无新依赖。从 v0.6.x 升级只需替换二进制并重启。本版不改变任何对外协议或终端显示契约，颜色仅作辅助信息、不单独承载语义。
 
 ## 已知问题与限制
 
-- `/dev/null` 是彩蛋版块，无任何内容；解锁只影响版块列表可见性，不改变权限或计分。
-- `/matrix` 是合规的滚动雨帘（24 行），不是真全屏动画——受 ADR-027 安全白名单约束。
-- 签到按展示时区的**本地日期**判定；跨时区旅行或系统时区变更可能使连续天数出现空洞（按日期字符串比对）。
-- 沿用前版：会话最长 6 小时、最小压测不构成 1 Mbps/1000 在线验收、race job 非 required 观察中。
-- 延后项与多色评估见 [`ROADMAP.md`](docs/ROADMAP.md)。
+- 沿用前版：会话最长 6 小时；最小压测不构成 1 Mbps / 1000 在线验收；签到跨时区按本地日期比对。
+- 真全屏数字雨、节日主题、@提及、公告/置顶、标题颜色等运营与个性化扩展按中期路线图留待后续用户反馈。
+- 浏览器端 TUI 帧传输为 P5 方向，尚未开工；容量验收未作为其前置拍板。
 
 ## 验证
 
-- `go build ./...` / `go vet ./...` 通过；`go test -count=1 ./...` 全绿、**0 FAIL**，测试函数 **935**（v0.5.1 为 924）。
-- 专项：Konami 状态机（精确序列/错键重置）、签到连续天数与成就（含断签重置）、SQLite 幂等签到与解锁持久化、ViewContext 隐藏节点注入去重、matrix 帧安全。
-- 格式门禁零输出；archtest 全绿（插件未越权）。
+- CI 双 job 全绿：`Build / Vet / Test` pass（27s）、`Race detector` pass（1m31s）。
+- 四门禁：`gofmt` 零输出、`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿；测试函数 **941**（v0.6.0 为 935）。
+- QA 独立验证：用户文本注入的 ESC 被转可见图示（信任域未破防）、karma 阈值着色正确、`/healthz` 实测含 `tx_bytes`/`rx_bytes` 且 `commits` 不变、8×100 并发计数无丢失。
 
 ## 破坏性变更
 
-无。新增能力均为增量，Config / schema 兼容旧版（迁移向前）。
+无。所有变化为增量，配置与 schema 向前兼容。
 
 ## 变更明细
 
-见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.6.0]` 段、[`DECISIONS.md`](docs/DECISIONS.md) 的 ADR-062、[`ROADMAP.md`](docs/ROADMAP.md)。
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.7.0]` 段、[`docs/P4-PLAN.md`](docs/P4-PLAN.md)。
