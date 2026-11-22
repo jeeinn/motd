@@ -43,6 +43,11 @@ type pageSession interface {
 	SetState(presence.State) error
 }
 
+// latestScope 是跨版块列表屏在状态栏「位置」里显示的固定串（v0.7.1 / ADR-063）。
+// 它不是真实版块 slug——nodes.slug 必须以 / 开头（forum.ValidateSlug），
+// 因此这个假 slug 不会与任何真实版块冲突，也不会被用来查询版块。
+const latestScope = "latest"
+
 // pageDeps 是进程级共享依赖，每会话只复制一份控制器状态。
 type pageDeps struct {
 	service  *forum.Service
@@ -278,8 +283,26 @@ func (p *pageController) showThreads(ctx context.Context, sess pageSession, node
 	if p.service == nil {
 		return p.writeFixed(sess, "论坛服务尚未就绪")
 	}
+	// nodeID=0 且 slug 为空是「无版块上下文」的残缺状态：检索结果（ScreenSearchResults
+	// 会把 nodeID/nodeSlug 清零）打开详情后按 q、以及删除/治理后重建列表，都会带着
+	// (0, "") 走到这里。按语义应回版块列表，而不是去查一个不存在的跨版块屏
+	// （否则状态栏会显示「位置: 」（空串），用户不知身在何处）。v0.7.1 / ADR-063。
+	if nodeID == 0 && slug == "" {
+		return p.showNodes(ctx, sess)
+	}
+	// 游标为空即第一页：offset 必须归零，否则分页边界（n → p）会把上一页的行数
+	// 带进 FirstIndex，序号从中间开始跳。v0.7.1 / ADR-063。
+	if cursor == "" {
+		offset = 0
+	}
 	v := p.viewContext(sess)
 	v.RowOffset = offset
+	// 状态栏「位置」必须用本次要进入的 slug，而不是 p.nodeSlug（上一次的位置）：
+	// viewContext 读的是控制器上的旧字段，若不覆盖，进入版块/切到 /latest 的
+	// 首帧会显示上一屏的位置（或干脆没有「位置」行）。v0.7.1 / ADR-063 修正。
+	if slug != "" {
+		v.Context = slug
+	}
 	sc, err := p.service.ScreenThreads(ctx, forum.ListThreadsQuery{
 		NodeID: nodeID, Sort: forum.SortLatest, Cursor: cursor,
 	}, v)
@@ -464,6 +487,11 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.unthread(ctx, sess, inv.Args)
 	case "search":
 		return p.showSearch(ctx, sess, strings.Join(inv.Args, " "), 1)
+	case "latest":
+		// 跨版块列表 = 「全部版块的主题列表屏」：nodeID=0 走 ScreenThreads 的跨版块分支，
+		// nodeSlug 取固定串 "latest"（版块 slug 必须以 / 开头，不可能与之冲突）。
+		// 详情页 back() 用 p.nodeID/p.nodeSlug/p.cursor/p.offset 原样回到这里。
+		return p.showThreads(ctx, sess, 0, latestScope, "", 0)
 	case "node":
 		return p.nodeCommand(ctx, sess, inv)
 	default:

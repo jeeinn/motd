@@ -45,11 +45,21 @@ type ThreadCursor struct {
 func (c ThreadCursor) IsZero() bool { return c.ID == 0 }
 
 // ThreadQuery 是主题列表查询。Limit 由用例层统一裁剪，仓储会取 Limit+1 条用于判断 hasMore。
+//
+// NodeID 的取值域（v0.7.1 / ADR-063）：
+//   - NodeID > 0：版块内列表，只返回该版块的主题（既有行为）；
+//   - NodeID == 0：跨版块列表（/latest），此时**必须**同时给出 AllowedNodeIDs，
+//     仓储用 `node_id IN (...)` 限定可见范围；列表为空时仓储 fail-closed 返回空结果。
+//
+// AllowedNodeIDs 是「该用户此刻可见的版块集合」，由用例层用 ListNodes（公开 active）
+// 与该会话的已解锁隐藏版块合并得出。可见性因此留在 application（可测、与呈现无关），
+// 仓储只执行集合过滤，不感知归档/彩蛋语义。NodeID > 0 时该字段被忽略。
 type ThreadQuery struct {
-	NodeID int64
-	Sort   ThreadSort
-	After  ThreadCursor
-	Limit  int
+	NodeID         int64
+	AllowedNodeIDs []int64
+	Sort           ThreadSort
+	After          ThreadCursor
+	Limit          int
 }
 
 // PostQuery 是主题下内容列表查询。AfterID 为上一页最后一条的 id（升序游标）。

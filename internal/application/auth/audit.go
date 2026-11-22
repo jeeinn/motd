@@ -34,6 +34,11 @@ const (
 	// AuditAdminAction 是 P2-M1 节点治理动作的审计事件名。
 	// 治理事件经 forum outbox 提交后投递到这里，与其它认证审计共用 auth_events 通道。
 	AuditAdminAction = "admin_action"
+	// AuditLoginSuccess 是 v0.7.1 新增的**成功登录**事件（ADR-064）：
+	// 累计登录人次 = COUNT(event='login_success')。只在主动登录动作成功后记录
+	// （GitHub Device Flow / 邮箱密码），重连公钥恢复登录态不计。
+	// 与其它事件不同，它**不参与 fail-closed**——见 SecurityGate.NoteLoginSuccess。
+	AuditLoginSuccess = "login_success"
 )
 
 // DefaultAuditCapacity / DefaultAuditFlushInterval 与 config 包同名默认值一致。

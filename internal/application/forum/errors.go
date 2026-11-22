@@ -17,6 +17,9 @@ var (
 	ErrInvalidSort   = errors.New("排序方式不合法")
 	ErrInvalidCursor = errors.New("分页游标不合法")
 	ErrInvalidLimit  = errors.New("分页大小不合法")
+	// ErrInvalidNodeID 表示版块 ID 为负（v0.7.1 / ADR-063：NodeID=0 是跨版块哨兵，
+	// 负值不是合法取值）。属于内部调用错误，不来自用户输入。
+	ErrInvalidNodeID = errors.New("版块 ID 不合法")
 	// ErrParentThreadMismatch 表示回复的父帖不属于同一主题（R8）。
 	ErrParentThreadMismatch = errors.New("父帖与回复不在同一主题")
 	// ErrInvalidVote 表示投票值不在 -1/1 的取值域内。

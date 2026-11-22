@@ -87,13 +87,14 @@ type emailFlow struct {
 	// 第一次输入存 firstPwd，confirm=true 时进入二次输入；两次一致才提交 service。
 	firstPwd string
 	confirm  bool
-	// onLogin 是登录成功（UpgradeToUser 之后）的签到钩子（v0.6.0），nil 时跳过。
-	onLogin func(context.Context, int64)
+	// onLogin 是登录成功（UpgradeToUser 之后）的副作用钩子（签到 + login_success 审计），nil 时跳过。
+	// 邮箱密码登录是**主动登录动作**，与 GitHub Device Flow 并列计一次 login_success（ADR-064）。
+	onLogin loginHook
 }
 
 // newEmailFlow 创建一条流程并输出第一步提示。svc 为空由调用方拦截，
 // 这里不做静默降级。
-func newEmailFlow(kind emailFlowKind, svc *auth.EmailAuthService, sess emailSession, echo *lineEcho, pending, purpose *string, code string, recover bool, onLogin ...func(context.Context, int64)) *emailFlow {
+func newEmailFlow(kind emailFlowKind, svc *auth.EmailAuthService, sess emailSession, echo *lineEcho, pending, purpose *string, code string, recover bool, onLogin ...loginHook) *emailFlow {
 	f := &emailFlow{kind: kind, svc: svc, sess: sess, echo: echo, pending: pending, purpose: purpose, code: code, recover: recover, ipHash: sess.RemoteIPHash()}
 	if len(onLogin) > 0 {
 		f.onLogin = onLogin[0]
@@ -255,8 +256,10 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 			_, _ = io.WriteString(f.sess, emailTextFailed+"\r\n")
 			return true
 		}
+		// 邮箱密码登录成功 = 一次主动登录动作，provider 固定为 auth.ProviderEmail
+		// （白名单常量，绝不来自用户输入）。
 		if f.onLogin != nil {
-			f.onLogin(ctx, res.UserID)
+			f.onLogin(ctx, res.UserID, auth.ProviderEmail)
 		}
 		_, _ = io.WriteString(f.sess, emailTextLoggedin+"\r\n")
 		return true

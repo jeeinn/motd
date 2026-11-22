@@ -219,16 +219,20 @@ func run() error {
 	// v0.6.0：签到 service（登录成功后的副作用）。
 	checkInStore := sqlite.NewCheckInStore(pools, writer)
 	checkInSvc := appuser.NewCheckInService(checkInStore, rt.Gate, time.Now, cfg.DisplayLocation)
-	onLogin := func(ctx context.Context, userID int64) {
-		res, err := checkInSvc.CheckIn(ctx, userID)
-		if err != nil {
-			logger.Warn("签到写入失败", "user_id", userID, "error", err)
-			return
-		}
-		if res.Unlocked {
-			logger.Info("用户达成连续签到成就", "user_id", userID, "streak", res.Streak)
-		}
-	}
+	// v0.7.1：统计看板的读端口与用例（/stats），峰值写端口给下方采样器复用。
+	statsStore := sqlite.NewStatsStore(pools, writer)
+	statsSvc := appuser.NewStatsService(statsStore, time.Now, cfg.DisplayLocation)
+	// 登录成功的两件副作用（v0.6.0 签到 + v0.7.1 login_success 审计）**收在一处**：
+	// 两个调用点（GitHub / 邮箱）都只调这一份闭包，不各写一遍。
+	// 顺序固定为「审计先行、签到在后」——审计是纯内存入队，不依赖 DB 写队列；
+	// 若签到先失败并提前 return（v0.6.0 的写法），login_success 就会跟着丢，
+	// 累计登录人次被系统性低估（QA P0-2）。
+	onLogin := newOnLoginHook(checkInSvc.CheckIn, gate.NoteLoginSuccess, logger)
+	// v0.7.1 峰值在线采样（ADR-064）：cmd 层持 30s ticker，读 presence 内存值
+	// 写 stats_daily。presence 仍不 import SQL、application 仍不起 goroutine。
+	statsSamplerDone := runPeakSampler(ctx, logger, rt.Presence, statsStore,
+		cfg.DisplayLocation, statsSampleInterval)
+	defer func() { <-statsSamplerDone }()
 	// v0.6.0：Konami 码解锁 /dev/null（按用户持久化，服务端固定 slug 不接受用户输入）。
 	onUnlock := func(ctx context.Context, userID int64) error {
 		return checkInStore.UnlockSlug(ctx, userID, "/dev/null", time.Now())
@@ -236,6 +240,7 @@ func run() error {
 	handler := newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login).
 		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
 		withSecurity(gate).withCommands(eggReg).withLoginHook(onLogin).
+		withStats(statsSvc).
 		withUnlockHooks(onUnlock, checkInStore.UnlockedNodes)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:     cfg.SSHAddr,

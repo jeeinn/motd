@@ -94,6 +94,11 @@ var defaultCommands = []Command{
 	{Name: "vote", Usage: "/vote <up|down|rm>", Summary: "给当前主题投赞成/反对票或撤销", MinArgs: 1, MaxArgs: 1},
 	// 关键词可含空格：MaxArgs=-1 后在页面层用空格拼回，仍只把整串作为查询词。
 	{Name: "search", Usage: "/search <关键词>", Summary: "检索正文", MinArgs: 1, MaxArgs: -1},
+	// v0.7.1 / P4.5-M2：跨版块最新主题。与 /top 同层（页面命令），导航全部复用
+	// ScreenThreads 链路，不新增页面类型。
+	{Name: "latest", Usage: "/latest", Summary: "全论坛最新主题（跨版块）", MaxArgs: 0},
+	// v0.7.1 / P4.5-M1：社区统计看板。进程级只读命令，所有人可见（含访客）。
+	{Name: "stats", Usage: "/stats", Summary: "论坛统计（在线/登录/注册）", MaxArgs: 0},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 

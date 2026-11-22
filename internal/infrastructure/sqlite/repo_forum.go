@@ -50,6 +50,33 @@ func normalizeLimit(n int) int {
 	return n
 }
 
+// inPlaceholders 生成 n 个逗号分隔的 ? 占位符（供 IN (...) 使用）。
+// n 必须 > 0：调用方负责把「空集合」判在前面（空 IN () 是语法错误）。
+func inPlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// latestThreadsQuery 是跨版块最新列表的完整 SQL，**由仓储与 EXPLAIN 测试共用**——
+// 执行计划验的必须是生产实际跑的那条串，不能测试里另抄一份（抄一份就会漂移）。
+// 参数顺序固定：IN 值 × nodeCount → 游标行值 (last_reply_at, id) → LIMIT。
+//
+// 两处刻意的写法（ADR-063 / QA 实测）：
+//  1. **INDEXED BY 强制索引**：不加提示时优化器在同一句 SQL、两份不同数据上会给出
+//     不同计划（idx_threads_node + temp b-tree 或 idx_threads_last_reply），
+//     索引断言本质上不可稳定复现。代价是缺索引时 prepare 期直接报错（fail-fast），
+//     优于静默退化成全表扫。
+//  2. **行值游标 `(a, b) < (?, ?)`** 而不是 `a < ? OR (a = ? AND b < ?)`：
+//     OR 形态即使有索引也只能 SCAN（从头扫到游标），翻 k 页总代价 O(k×N)；
+//     行值形态能 seek（SEARCH），总量 O(N)。首屏无差别，深翻页差三个数量级。
+func latestThreadsQuery(nodeCount int, withCursor bool) string {
+	q := selectThreadsScoped + ` INDEXED BY idx_threads_last_reply` +
+		` WHERE t.status = 'active' AND t.node_id IN (` + inPlaceholders(nodeCount) + `)`
+	if withCursor {
+		q += ` AND (t.last_reply_at, t.id) < (?, ?)`
+	}
+	return q + ` ORDER BY t.last_reply_at DESC, t.id DESC LIMIT ?`
+}
+
 // ---------------------------------------------------------------------------
 // NodeReader
 // ---------------------------------------------------------------------------
@@ -103,6 +130,11 @@ func (r *ForumRepos) GetNodeBySlug(ctx context.Context, slug string) (node.Node,
 
 const selectThreads = `SELECT id, node_id, user_id, title, score, last_reply_at, created_at FROM threads`
 
+// selectThreadsScoped 是**跨版块**查询的列投影：JOIN nodes 后所有列必须带别名，
+// 且必须逐列书写、不能写 t.*——threads 自 0004 起有 8 列（多了 status），
+// 而 scanThread 只扫 7 列，t.* 会让 Scan 在运行期报「期望 7 个目标」。
+const selectThreadsScoped = `SELECT t.id, t.node_id, t.user_id, t.title, t.score, t.last_reply_at, t.created_at FROM threads t`
+
 func scanThread(s interface{ Scan(...any) error }) (thread.Thread, error) {
 	var t thread.Thread
 	var lastReply, created int64
@@ -129,6 +161,14 @@ func (r *ForumRepos) GetThread(ctx context.Context, id int64) (thread.Thread, er
 
 // ListThreads 用 keyset 分页：排序列 + id 组成复合键，避免 OFFSET 的深翻页代价与数据漂移。
 // 多取一条判断 hasMore，返回给用例层的行数恒 <= q.Limit。
+//
+// NodeID == 0 是「跨版块」语义（v0.7.1 / ADR-063），**只接受显式允许列表**：
+// 版块内列表靠「归档版块从 ListNodes 消失、导航不可达」隐藏，跨版块列表没有这层导航兜底，
+// 因此可见性由用例层算好的 AllowedNodeIDs 决定（= 公开 active 版块 ∪ 该用户已解锁的隐藏版块），
+// 仓储只做 `node_id IN (...)`。这里刻意**不**写 `JOIN nodes ... status='active'`——
+// 那会把已解锁的 /dev/null（status='archived'）一并挡掉，让「解锁了却看不到新帖」。
+// AllowedNodeIDs 为空时 fail-closed 返回空列表，绝不退化成「查全表」。
+// 版块内分支（NodeID > 0）的 SQL 与改前逐字一致，既有行为零变化。
 func (r *ForumRepos) ListThreads(ctx context.Context, q forum.ThreadQuery) ([]thread.Thread, bool, error) {
 	if !q.Sort.Valid() {
 		return nil, false, forum.ErrInvalidSort
@@ -136,20 +176,44 @@ func (r *ForumRepos) ListThreads(ctx context.Context, q forum.ThreadQuery) ([]th
 	if !q.After.IsZero() && q.After.Sort != q.Sort {
 		return nil, false, fmt.Errorf("%w: 游标排序与查询排序不一致", forum.ErrInvalidCursor)
 	}
+	if q.NodeID < 0 {
+		// 负值既不是合法版块 ID，也不是跨版块哨兵；显式拒绝，避免与 0 的语义混淆。
+		return nil, false, fmt.Errorf("%w: 版块 ID 不能为负", forum.ErrInvalidNodeID)
+	}
 	limit := normalizeLimit(q.Limit)
 
 	var query string
 	var args []any
 	switch q.Sort {
 	case forum.SortLatest:
-		query = selectThreads + ` WHERE node_id = ? AND status = 'active'`
-		args = append(args, q.NodeID)
-		if !q.After.IsZero() {
-			query += ` AND (last_reply_at < ? OR (last_reply_at = ? AND id < ?))`
-			args = append(args, q.After.LastReplyAt, q.After.LastReplyAt, q.After.ID)
+		if q.NodeID == 0 {
+			if len(q.AllowedNodeIDs) == 0 {
+				return nil, false, nil
+			}
+			query = latestThreadsQuery(len(q.AllowedNodeIDs), !q.After.IsZero())
+			for _, id := range q.AllowedNodeIDs {
+				args = append(args, id)
+			}
+			if !q.After.IsZero() {
+				// 行值游标 (last_reply_at, id) < (?, ?)：与 latestThreadsQuery 的参数顺序一致。
+				args = append(args, q.After.LastReplyAt, q.After.ID)
+			}
+		} else {
+			query = selectThreads + ` WHERE node_id = ? AND status = 'active'`
+			args = append(args, q.NodeID)
+			if !q.After.IsZero() {
+				query += ` AND (last_reply_at < ? OR (last_reply_at = ? AND id < ?))`
+				args = append(args, q.After.LastReplyAt, q.After.LastReplyAt, q.After.ID)
+			}
+			query += ` ORDER BY last_reply_at DESC, id DESC LIMIT ?`
 		}
-		query += ` ORDER BY last_reply_at DESC, id DESC LIMIT ?`
 	case forum.SortScore:
+		// 跨版块热度榜不在 v0.7.1 范围（P4.5-PLAN §5 明确不做）。显式拒绝，
+		// 绝不能落到 `node_id = 0` 上静默返回空列表——那会让「排序不支持」
+		// 伪装成「没有主题」。
+		if q.NodeID == 0 {
+			return nil, false, fmt.Errorf("%w: 跨版块列表仅支持 SortLatest", forum.ErrInvalidSort)
+		}
 		query = selectThreads + ` WHERE node_id = ? AND status = 'active'`
 		args = append(args, q.NodeID)
 		if !q.After.IsZero() {

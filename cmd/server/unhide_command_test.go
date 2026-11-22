@@ -54,6 +54,11 @@ func TestUnhideCommandNoArgOnCurrentThread(t *testing.T) {
 	tid, _, _ := setupDeleteThread(t, ctx, writer, 1)
 	sess := hideSession(2)
 	pc := h.newPageController(sess)
+	// v0.7.1：先进入版块再开帖——真实路径如此；没有版块上下文时
+	// showThreads(0, "") 会按语义回版块列表（ADR-063），不再是空列表。
+	if err := pc.showThreads(ctx, sess, 1, "/dev/ai", "", 0); err != nil {
+		t.Fatalf("进入版块: %v", err)
+	}
 	if err := pc.showDetail(ctx, sess, tid); err != nil {
 		t.Fatal(err)
 	}
