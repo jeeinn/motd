@@ -9,7 +9,7 @@
 SSH 优先的命令行论坛：用户 `ssh` 连入，用键盘与斜杠命令浏览版块、发帖、回复，**无需浏览器**。
 
 - Go module：`github.com/jeeinn/motd`，Go `1.26.3`
-- 当前版本：`v0.7.1`（2026-11-22），处于 `0.x`，对外契约未稳定
+- 当前版本：`v0.7.2`（2026-11-22），处于 `0.x`，对外契约未稳定
 - 单进程二进制：`cmd/server`（服务）+ `cmd/motdctl`（离线备份恢复）
 - 依赖极少：`golang.org/x/crypto`（SSH）、`modernc.org/sqlite`（纯 Go SQLite）。**非必要不引入新依赖**
 
@@ -29,7 +29,7 @@ internal/
 
 - **依赖单向**：`transport → application → domain`；`presentation → application`；`infrastructure` 实现 `application` 定义的接口；`domain` 不依赖任何上层。端口（接口）定义在**使用方**。
 - `internal/archtest/` 有一批静态守卫，违反依赖方向或安全渲染会直接测试失败。**改完先跑 archtest**。
-- 统计量级：989 个测试函数，全量 `go test -count=1 ./...` 约 10 秒。
+- 统计量级：990 个测试函数，全量 `go test -count=1 ./...` 约 10 秒。
 
 ## 3. 必须遵守的安全与实现约定
 
