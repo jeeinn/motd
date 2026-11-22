@@ -2,14 +2,14 @@
 
 > 本文件面向在本仓库工作的 AI 智能体与人类贡献者，记录**必须遵守的硬约束**与**易踩坑点**。
 > 与 `CONTRIBUTING.md` 分工：后者面向人类贡献者（提交规范、Issue 流程）；本文件额外强调智能体最容易违反的边界。
-> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~055）、`.github/workflows/ci.yml`、实际 git/代码状态。
+> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~064）、`.github/workflows/ci.yml`、实际 git/代码状态。
 
 ## 1. 项目定位
 
 SSH 优先的命令行论坛：用户 `ssh` 连入，用键盘与斜杠命令浏览版块、发帖、回复，**无需浏览器**。
 
 - Go module：`github.com/jeeinn/motd`，Go `1.26.3`
-- 当前版本：`v0.4.3`（2026-11-20），处于 `0.x`，对外契约未稳定
+- 当前版本：`v0.7.1`（2026-11-22），处于 `0.x`，对外契约未稳定
 - 单进程二进制：`cmd/server`（服务）+ `cmd/motdctl`（离线备份恢复）
 - 依赖极少：`golang.org/x/crypto`（SSH）、`modernc.org/sqlite`（纯 Go SQLite）。**非必要不引入新依赖**
 
@@ -29,7 +29,7 @@ internal/
 
 - **依赖单向**：`transport → application → domain`；`presentation → application`；`infrastructure` 实现 `application` 定义的接口；`domain` 不依赖任何上层。端口（接口）定义在**使用方**。
 - `internal/archtest/` 有一批静态守卫，违反依赖方向或安全渲染会直接测试失败。**改完先跑 archtest**。
-- 统计量级：905 个测试函数，全量 `go test -count=1 ./...` 约 8 秒。
+- 统计量级：989 个测试函数，全量 `go test -count=1 ./...` 约 10 秒。
 
 ## 3. 必须遵守的安全与实现约定
 
@@ -42,7 +42,7 @@ internal/
 | 权限单点 | 作者权 `canModify`、管理员权 `requireAdmin` 各只有一个判定点，不新造第二套 |
 | 软删不硬删 | `threads`/`posts` 用 `status` 过滤；节点归档只改 `node.status`，`threads` 不动（FK） |
 | 会话生存期 | 无按键不断连；唯一约束是 6 小时绝对上限（`sessionMaxLifetime`），关闭前下发固定文案 + exit-status。**已移除 `MOTD_SSH_IDLE_TIMEOUT`（v0.4.2，ADR-055）** |
-| 迁移 | 版本化 SQL 在 `internal/infrastructure/sqlite/migrations/`，当前止于 `0009`；新增迁移不得修改历史迁移 |
+| 迁移 | 版本化 SQL 在 `internal/infrastructure/sqlite/migrations/`，当前止于 `0011`；新增迁移不得修改历史迁移 |
 
 ## 4. 开发命令（与 CI 门禁一致）
 
@@ -91,7 +91,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | --- | --- | --- |
 | `README.md` | 用户入口：功能、安装、配置表、快速开始 | 改对外描述 / 配置 |
 | `CONTRIBUTING.md` | 开发约定、提交前门禁、PR 规范 | 任何提交前 |
-| `docs/DECISIONS.md` | ADR-001~055，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
+| `docs/DECISIONS.md` | ADR-001~064，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
 | `docs/OPS.md` | 部署、备份恢复、演练记录、监控告警；§9 实战部署清单、§10 AI 智能体自动部署指南 | 改运维相关 / 部署；智能体执行远程部署前**必读 §10** |
 | `docs/P0-PLAN.md` / `PHASE1-PLAN.md` / `PHASE2-PLAN.md` / `P2-PLAN.md` | 各阶段计划与完成状态（历史快照，不回改） | 追溯需求来源 |
 | `docs/MVP-DELIVERY.md` | MVP 交付复盘（D1~D7 判定） | 理解项目起点 |
@@ -99,7 +99,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | `CHANGELOG.md` / `RELEASE_NOTES.md` | 变更记录 / 当前版本说明 | 发版 |
 | `docs/images/` | README 引用的截图，命名规范见其 README | 新增截图 |
 
-**惯例**：历史结论不删改，只标注"已修订"并追加新 ADR / 新章节。新增 ADR 从当前最大号顺延（现为 ADR-055）。
+**惯例**：历史结论不删改，只标注"已修订"并追加新 ADR / 新章节。新增 ADR 从当前最大号顺延（现为 ADR-064）。
 
 ## 7. 项目特有陷阱速查
 

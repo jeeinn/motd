@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.1] - 2026-11-22
 
-P4.5「运营可见性」版本（目标 v0.7.1）：跨版块 `/latest` 与社区看板 `/stats`。含一次 schema 迁移（0011），测试 948 → 989。**尚未发版**。
+P4.5「运营可见性」版本：跨版块 `/latest` 与社区看板 `/stats`。含一次 schema 迁移（0011），测试 948 → 989。
 
 ### Added
 
