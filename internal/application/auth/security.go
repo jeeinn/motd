@@ -26,6 +26,34 @@ func NewSecurityGate(limiter *RateLimiter, audit *AuditLogger, provider string) 
 // Enabled 报告是否真的有安全能力在岗，供装配日志与探针展示。
 func (g *SecurityGate) Enabled() bool { return g != nil && (g.limiter != nil || g.audit != nil) }
 
+// loginSuccessProviders 是 login_success 允许的 provider 白名单。
+// provider 是**审计列**，只接受编译期常量，绝不接用户输入（ADR-019 / ADR-026）。
+var loginSuccessProviders = map[string]struct{}{
+	ProviderGitHub: {},
+	ProviderEmail:  {},
+}
+
+// NoteLoginSuccess 记录一次**成功登录动作**（v0.7.1 / ADR-064）。
+//
+// 与 NoteLoginFailure / NoteKeyAttempt 的 fail-closed 语义**刻意不同**：
+// 登录此刻已经成功、会话已升级，事后统计事件写不进去不能回滚登录结果，
+// 因此 Record 失败（ErrAuditQueueFull）只由调用方记 Warn，绝不拒绝登录。
+// 这是 audit.go 包注释里「Record 返回错误 → 调用方必须拒绝本次认证动作」的
+// **唯一显式例外**，理由与边界写在 ADR-064。
+//
+// provider 必须来自白名单常量；非法值返回错误（调用方 bug，不是用户输入）。
+// 注意：这里直接调 audit.Record 并显式传 provider，**不走** g.record()——
+// g.record 固定用 g.provider（装配时恒为 github），会把邮箱登录也记成 github。
+func (g *SecurityGate) NoteLoginSuccess(userID int64, provider string) error {
+	if _, ok := loginSuccessProviders[provider]; !ok {
+		return fmt.Errorf("login_success 的 provider 不在白名单: %q", provider)
+	}
+	if g == nil || g.audit == nil {
+		return nil
+	}
+	return g.audit.Record(AuditLoginSuccess, userID, provider, "", `{}`)
+}
+
 func (g *SecurityGate) record(event string, userID int64, ipHash, detail string) error {
 	if g == nil || g.audit == nil {
 		return nil

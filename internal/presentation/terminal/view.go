@@ -328,7 +328,10 @@ func emptyHint(k viewmodel.ScreenKind) string {
 	case viewmodel.ScreenNodes:
 		return "（暂无版块）"
 	case viewmodel.ScreenThreads:
-		return "（该版块暂无主题，登录后可用 /new 发第一帖）"
+		// 不能写「该版块」：同一个 ScreenThreads 也承载跨版块列表（/latest），
+		// 而 /latest 没有版块上下文，/new 在那里也不可用（需先进入版块）。
+		// v0.7.1 / ADR-063。
+		return "（暂无主题，登录后可用 /new 发第一帖）"
 	case viewmodel.ScreenThreadDetail:
 		return "（暂无回复，登录后可用 /reply 回复）"
 	case viewmodel.ScreenSearchResults:

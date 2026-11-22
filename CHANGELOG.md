@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-11-22
+
+P4.5「运营可见性」版本：跨版块 `/latest` 与社区看板 `/stats`。含一次 schema 迁移（0011），测试 948 → 989。
+
+### Added
+
+- **`/latest` 跨版块最新主题**：全论坛按最后回复时间倒序（`last_reply_at DESC, id DESC`），新主题与新回复自动置顶；`n/p` 翻页、`j/k` 移动、Enter 进主题、`q` 回列表（保持位置）、`/top` 回版块列表。导航复用既有 `ScreenThreads` 链路，不新增页面类型。
+  - 可见性等于版块列表：公开 active 版块 ∪ 该用户已解锁的隐藏版块（Konami 解锁的 `/dev/null` 主题也会出现在「最新」里）；归档的普通版块三态皆不可见。查询用**显式白名单** `node_id IN (...)`，不用 `status` 放宽或收紧（ADR-063）。
+  - 仓储新增 `INDEXED BY idx_threads_last_reply` 强制索引 + 行值游标 `(last_reply_at, id) < (?, ?)`：计划稳定（无 `TEMP B-TREE`），深翻页 O(k×N) → O(N)。
+- **`/stats` 社区统计看板**（所有人可见，含访客）：今日/昨日登录人数、今日/昨日在线峰值、历史在线峰值、当前在线（活跃）、注册用户数、累计登录人次。
+  - 新增审计事件 `login_success`（GitHub Device Flow / 邮箱登录各计一次；重连凭公钥恢复登录态不计）。该事件为**事后统计**，写不进审计队列只记日志、绝不回滚已完成的登录（ADR-064 唯一的 fail-open 例外）。
+  - 新增 cmd 层 30 秒峰值采样器：自持当日峰值（不读进程级 `Peak()`），当日首 tick 无条件建行、之后只写变高、单条幂等 MAX-upsert、停机补采一次。
+  - 诚实口径：`--` 表示「无观测」（该日无行且当前在线为 0），`0` 表示「观测到没人」；每项起点上屏声明（登录自 v0.6.0、峰值与累计登录自 v0.7.1）。
+
+### Changed
+
+- **迁移 0011**：`idx_threads_last_reply`、`stats_daily`（`local_date TEXT NOT NULL PRIMARY KEY` + 形状 CHECK、`peak_online`/`updated_at` 非负 CHECK）、`idx_auth_events_event`。
+- `onLogin` 钩子签名加 `provider`（命名类型 `loginHook`），装配收敛为 `newOnLoginHook`：审计先行、签到在后、两者互不短路。
+- `showThreads` 三处上下文修正：首帧状态栏用本次 slug、无版块上下文回版块列表、首屏 offset 归零。
+- 主题列表空态文案改为「（暂无主题，登录后可用 /new 发第一帖）」（同一屏也承载跨版块列表，原「该版块」错指）。
+
+### Notes
+
+- 无新环境变量、无新依赖、无新入口；SSH 仍是唯一业务入口，`/healthz` 口径不变。
+- 升级：迁移自动应用到 0011；`stats_daily` 不回溯、不回填，峰值与累计登录从升级后开始累积。
+- 本地四门禁 + 两条闭环绿；`-race` 由 CI race job 覆盖（本地 Windows 环境不跑）。
+
 ## [0.7.0] - 2026-11-21
 
 P4「可靠性收尾 + 基础多色」版本。终端基础多色（克制 3 色）+ `/healthz` 带宽探针；race 检测转 main 强制门禁。测试 935 → 941。
@@ -196,16 +223,6 @@ P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞�
 ### Fixed
 
 - 帖子/回复与 `/keys` 公钥详情时间此前固定按 UTC 显示，中国用户看到相差 8 小时的时间。新增 `MOTD_DISPLAY_TIMEZONE`（默认 `Asia/Shanghai`）统一控制展示时区；论坛格式 `MM-DD HH:MM` 不变，`/keys` 后缀按时间戳所在时刻的时区缩写（CST / UTC / EST…）显示，不再硬编码 " UTC"。存储层归一化未改动，历史数据无需迁移。非法时区值启动即失败，不静默回落 UTC。
-
-## [Unreleased]
-
-### Added
-
-### Changed
-
-### Fixed
-
-### Security
 
 ## [0.3.0] - 2026-11-19
 

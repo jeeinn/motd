@@ -87,7 +87,7 @@ func NoticeFromError(err error) viewmodel.Notice {
 		errors.Is(err, ErrInvalidLimit), errors.Is(err, ErrInvalidTitle),
 		errors.Is(err, ErrInvalidBody), errors.Is(err, ErrInvalidVote),
 		errors.Is(err, ErrInvalidVoteTarget), errors.Is(err, ErrInvalidSlug),
-		errors.Is(err, ErrInvalidNodeName):
+		errors.Is(err, ErrInvalidNodeName), errors.Is(err, ErrInvalidNodeID):
 		n.Kind, n.Code = viewmodel.NoticeWarning, "invalid_input"
 	case errors.Is(err, ErrAdminDenied), errors.Is(err, ErrNodeSlugExists),
 		errors.Is(err, ErrSeedNodeRename):
@@ -138,7 +138,30 @@ func (s *Service) ScreenNodes(ctx context.Context, v ViewContext) (viewmodel.Scr
 }
 
 // ScreenThreads 输出主题列表屏；NextCursor 原样带上，交回入口层保管。
+//
+// q.NodeID == 0 是跨版块列表（/latest，v0.7.1 / ADR-063）：这里做两件版块内屏不做的事——
+//  1. 用一次 ListNodes（公开 active，数量级小）∪ ViewContext.UnlockedHiddenNodes 算出
+//     可见版块白名单交给仓储；白名单是**放行**语义，不是「排除归档」语义，因此已解锁的
+//     /dev/null（status='archived'）能正常出现在 /latest 里。
+//  2. 建立 id→slug 映射，把版块 slug 投影进各行 RowMeta.Node（版块内屏不需要、保持为空）。
+//
+// 版块内屏（NodeID > 0）路径完全不变：不多查 ListNodes、不填 slug。
 func (s *Service) ScreenThreads(ctx context.Context, q ListThreadsQuery, v ViewContext) (viewmodel.Screen, error) {
+	var slugs map[int64]string
+	if q.NodeID == 0 {
+		visible, err := s.visibleNodes(ctx, v)
+		if err != nil {
+			return viewmodel.Screen{}, err
+		}
+		slugs = make(map[int64]string, len(visible))
+		if len(q.AllowedNodeIDs) == 0 {
+			q.AllowedNodeIDs = make([]int64, 0, len(visible))
+			for _, n := range visible {
+				q.AllowedNodeIDs = append(q.AllowedNodeIDs, n.ID)
+				slugs[n.ID] = n.Slug
+			}
+		}
+	}
 	page, err := s.ListThreads(ctx, q)
 	if err != nil {
 		return viewmodel.Screen{}, err
@@ -146,6 +169,11 @@ func (s *Service) ScreenThreads(ctx context.Context, q ListThreadsQuery, v ViewC
 	rows := make([]viewmodel.Row, 0, len(page.Rows))
 	for i, t := range page.Rows {
 		rows = append(rows, threadRow(t, v.RowOffset+i+1))
+	}
+	if slugs != nil {
+		for i, t := range page.Rows {
+			rows[i].Meta.Node = slugs[t.NodeID]
+		}
 	}
 	if err := s.fillRowAuthors(ctx, rows, nil); err != nil {
 		return viewmodel.Screen{}, err
@@ -157,6 +185,27 @@ func (s *Service) ScreenThreads(ctx context.Context, q ListThreadsQuery, v ViewC
 	sc.Pagination.HasMore = page.HasMore
 	sc.Pagination.NextCursor = page.NextCursor
 	return sc, nil
+}
+
+// visibleNodes 返回本会话在跨版块列表里可见的版块：公开 active 版块在前，
+// 调用方明确放行的已解锁隐藏版块按 ID 去重后追加（与 ScreenNodes 的去重口径一致）。
+// 隐藏节点的放行权在入口层（ViewContext），forum 层只做合并，不查解锁存储。
+func (s *Service) visibleNodes(ctx context.Context, v ViewContext) ([]node.Node, error) {
+	nodes, err := s.repos.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int64]bool, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = true
+	}
+	for _, n := range v.UnlockedHiddenNodes {
+		if !seen[n.ID] && n.ID > 0 {
+			nodes = append(nodes, n)
+			seen[n.ID] = true
+		}
+	}
+	return nodes, nil
 }
 
 // ScreenThreadDetail 输出主题详情屏：主题正文放 Detail，回复列表放 Rows。

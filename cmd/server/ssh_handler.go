@@ -53,14 +53,35 @@ type inputHandler struct {
 	forum    *forum.Service
 	users    appuser.StatusReader
 	presence *presence.Registry
-	// onLogin 是登录成功后的副作用钩子（签到），由 cmd 装配层注入（v0.6.0）。
+	// onLogin 是登录成功后的副作用钩子（签到 + login_success 审计），由 cmd 装配层注入（v0.6.0 / v0.7.1）。
 	// 只在会话升级成功后调用；nil 时零影响，保持既有测试零改动。
-	onLogin func(context.Context, int64)
+	onLogin loginHook
 	// onUnlock / unlockedNodes 是隐藏节点解锁的写/读钩子（v0.6.0），
 	// 由 cmd 装配层注入；nil 时 Konami 码与列表注入都零影响。
 	onUnlock      func(context.Context, int64) error
 	unlockedNodes func(context.Context, int64) ([]node.Node, error)
+	// stats 是 /stats 的统计用例（v0.7.1），nil 时命令只给固定提示。
+	stats *appuser.StatsService
 }
+
+// withStats 注入社区统计用例（v0.7.1 / ADR-064）。读端口在 application/user，
+// 命令层只做排版，端口注入沿用 withCommands / withLoginHook 的既有先例。
+func (h *inputHandler) withStats(svc *appuser.StatsService) *inputHandler {
+	h.stats = svc
+	return h
+}
+
+// loginHook 是「登录动作成功」之后的副作用钩子：v0.6.0 只做签到，
+// v0.7.1 起多带一个 provider，供 login_success 审计事件记录来源（ADR-064）。
+//
+// 为什么用命名类型：签名从 (ctx, userID) 扩到 (ctx, userID, provider) 会波及
+// loginFlow / emailFlow / pageController / 装配闭包共 9 处，命名类型让编译器
+// 一次性把所有调用点标出来，而不是靠人肉搜。
+//
+// 语义边界：只在**主动登录**成功（UpgradeToUser 之后）时调用——
+// GitHub Device Flow 与邮箱密码两条路径。重连凭公钥恢复登录态在 transport/ssh
+// 解析身份，根本不走登录流程，因此天然不计入「登录人次」。
+type loginHook func(ctx context.Context, userID int64, provider string)
 
 // withSecurity 注入认证安全门（限流 + 审计的 fail-closed 入口）。
 func (h *inputHandler) withSecurity(gate *auth.SecurityGate) *inputHandler {
@@ -100,8 +121,8 @@ func (h *inputHandler) withUnlockHooks(
 	return h
 }
 
-// withLoginHook 注入登录成功后的签到钩子（v0.6.0）。
-func (h *inputHandler) withLoginHook(fn func(context.Context, int64)) *inputHandler {
+// withLoginHook 注入登录成功后的副作用钩子（签到 + login_success 审计，v0.6.0 / v0.7.1）。
+func (h *inputHandler) withLoginHook(fn loginHook) *inputHandler {
 	h.onLogin = fn
 	return h
 }
@@ -477,6 +498,9 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 			writeEgg(sess, h.eggText(inv.Name)+"\r\n")
 		case "karma":
 			writeEgg(sess, h.runKarma(sess.Principal())+"\r\n")
+		case "stats":
+			// v0.7.1：社区统计看板。所有人可见（含访客），输出全是固定文案 + 本地数字。
+			writeSystem(sess, h.runStats(ctx)+"\r\n")
 		case "keys":
 			_, _ = io.WriteString(sess, h.runKeys(ctx, sess.Principal(), inv))
 		case "key":
@@ -543,16 +567,22 @@ func (h *inputHandler) runLogout(ctx context.Context, sess *sshd.Session) string
 	}
 }
 
-// writeEgg 经安全渲染路径输出彩蛋固定文案（ADR-019 / ADR-026）。
-// RenderSystem 只允许 \n、不允许 \r，故先规范化换行再渲染，最后统一转 CRLF。
-// 渲染失败时退化为不输出——绝不把原始文本裸写到终端。
-func writeEgg(sess io.Writer, text string) {
+// writeSystem 经安全渲染路径输出**服务端固定文案**（ADR-019 / ADR-026）。
+// 适用于彩蛋语料、/karma、/stats 等「全由常量与本地数字拼成」的多行文本。
+//
+// 传入文本里的 \n 由 RenderSystem 校验（它拒绝 \r），故先规范化换行再渲染，
+// 最后统一转 CRLF。渲染失败时退化为不输出——绝不把原始文本裸写到终端。
+func writeSystem(sess io.Writer, text string) {
 	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	rendered, err := safe.RenderSystem(normalized, safe.StylePlain)
 	if err == nil {
 		_, _ = io.WriteString(sess, toCRLF(rendered))
 	}
 }
+
+// writeEgg 是彩蛋语料的入口，保留旧名以固定调用点语义（内部即 writeSystem）。
+// v0.7.1 把实现抽为 writeSystem 供 /stats 复用，调用点不必区分「彩蛋」与「系统文案」。
+func writeEgg(sess io.Writer, text string) { writeSystem(sess, text) }
 
 // runMatrix 输出固定行数的滚动雨帘（v0.6.0）。
 // 合规约束：只经 safe.RenderSystem 的 SGR 样式白名单上色，帧内容是 MatrixFrame()

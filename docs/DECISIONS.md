@@ -998,3 +998,55 @@
 - 代价 / 边界：签到跨时区旅行可能出现日期空洞（按字符串比对）；/dev/null 只有可见性、无内容与权限变化；Konami 状态机在浏览态会消费方向键导航（序列完成/错键重置前短暂改变焦点，属彩蛋代价）。真全屏数字雨、多色终端、更多隐藏版块写入 `docs/ROADMAP.md`，不在本版。
 - 验证：格式零、build/vet OK、全量 0 FAIL，测试 924 → 935；专项覆盖 Konami 精确/错键、签到连续/断签/幂等、SQLite 解锁持久化、ViewContext 去重注入、matrix 帧无控制字符。迁移后节点数断言（5→6）与状态分布（5/5/0→6/5/1）同步更新。
 - 关联：`ADR-027`（ANSI 白名单）、`ADR-046`（展示时区）、`ADR-048`（节点三不变量）、`ADR-015`（插件权限）、`P3-PLAN.md §7`、`docs/ROADMAP.md`（多色/节日主题评估）。
+
+## ADR-063 `/latest` 跨版块最新列表：allow-list 可见性与强制索引
+
+- 状态：已采纳，v0.7.1 / P4.5-M2 落地（分支 `feat/p4.5-ops-visibility`）。
+- 背景：已部署实例（jeeinn.com）的真实反馈——浏览最新动态必须逐版块翻找。计划稿给出的做法是 `JOIN nodes n ON n.id = t.node_id AND n.status = 'active'`，实施期核对发现三个硬事实与之冲突：① `threads` 自 0004 起 8 列，计划里的 `SELECT t.*` 会让 `scanThread`（7 列）运行期报错；② 版块内列表靠「归档版块从 `ListNodes` 消失、导航不可达」隐藏，跨版块没有这层兜底，但简单 JOIN `status='active'` 又会挡掉彩蛋版块 `/dev/null`（`status='archived'`，靠 `user_node_unlocks` 按用户解锁）；③ 实测不加索引提示时，同一句 SQL 在不同数据分布下会给出不同计划（`idx_threads_node` + `USE TEMP B-TREE` 与 `idx_threads_last_reply` 之间摇摆），索引断言不可稳定复现。
+- 决策：
+  1. **语义**：`ThreadQuery.NodeID == 0` 表示跨版块；此时**必须**同时给出 `AllowedNodeIDs`，仓储只做 `node_id IN (...)` 过滤，白名单为空时 fail-closed 返回空页（绝不退化成全站可见）。`NodeID < 0` 返回 `ErrInvalidNodeID`（用例层单点校验，仓储保留同款防御）。`NodeID > 0` 的版块内分支 SQL **逐字未改**，既有行为零变化。
+  2. **可见性口径**：「`/latest` 的可见性必须与版块列表完全一致：用户能点进去读的版块，其主题就必须出现在『全论坛最新』里」——否则命令名义上跨版块，实际悄悄丢掉用户有权看的那一块，这是可见性口径的分裂，不是彩蛋的私密性。因此白名单 = `ListNodes`（公开 active）∪ 该会话的 `ViewContext.UnlockedHiddenNodes`，由 `ScreenThreads` 一次算出；**SQL 里不得出现任何 `status` 放宽**（会泄漏归档普通版块），也不得收紧成 `status='active'`（会挡掉已解锁彩蛋版块）。
+  3. **查询形态**：`INDEXED BY idx_threads_last_reply` 强制命中 + 行值游标 `(t.last_reply_at, t.id) < (?, ?)`。前者让计划确定（ANALYZE 前后逐字一致），后者把 `SCAN`（从索引头扫到游标，翻 k 页 O(k×N)）变成 `SEARCH`（从游标 seek，总量 O(N)）；首屏无差别，深翻页差三个数量级。列投影逐列书写，`SELECT t.*` 永久禁用。
+  4. **展示**：跨版块行由 `ScreenThreads` 事后投影 `RowMeta.Node`（slug，走 `ext()` 净化链）；版块内屏不填（与状态栏重复）。页面层用固定串 `latestScope = "latest"` 作 nodeSlug——`ValidateSlug` 要求真实 slug 以 `/` 开头，故不可能冲突。不新增 `ScreenKind`、不动 ViewModel 契约。
+  5. **同屏上下文三处修正**（实施期实测）：`showThreads` 用本次 slug 覆盖 `v.Context`（否则首帧状态栏显示上一屏）；`nodeID==0 && slug==""` 直接回版块列表（检索结果开详情后按 `q` 的残缺态）；`cursor==""` 时 `offset=0`（防检索屏的 offset 带进跨版块首屏）。
+  6. 空态文案中性化为「（暂无主题，登录后可用 /new 发第一帖）」——同一个 `ScreenThreads` 也承载跨版块列表，说「该版块」是错指；不让 presentation 去比对 `latest` 字面量（会造成跨包字符串漂移）。
+- 理由：白名单是唯一能同时满足「归档普通版块不可见」与「已解锁彩蛋版块可见」的口径；把可见性留在 application（可测、与呈现无关）、仓储只执行集合过滤，符合 ADR-001 的端口边界。强制索引把「静默退化」换成「缺失即报错」，与 `ReplyCountsByThreadIDs` 的既有取舍同源。
+- 代价 / 边界：
+  1. 索引名硬绑定：缺 `idx_threads_last_reply` 时错误在 **prepare 期**抛出，`/latest` 整体不可用；同理**不把 `/latest` 加入启动自检**——它不是 liveness 依赖，0011 用 `IF NOT EXISTS` 已保证正常部署不会缺。错误经 `p.fail` 呈现时，`NoticeFromError` 的 default 分支会外显 `err.Error()`（既有行为，无注入面，但会露出英文内部描述）。
+  2. `/latest` 空态里引导 `/new` 会二次提示「请先进入一个版块再发新主题」——零主题实例才可能触发的两步绕行，换取零跨包字符串耦合。
+  3. allow-list 越窄越亏：正常形态下白名单 ≈ 全部公开内容，仅在「大部分版块被归档」时出现期望外的扫描量（≈ 21 × 总行数/可见行数），个人论坛量级可接受，不做优化。
+  4. `RowMeta.Node` 跨版块填、版块内不填，两处口径不同（版块内填会与状态栏重复），是刻意差异。
+- 验证：`cross_node_test.go` 8 项（排序与软删、白名单为唯一判据、空白名单 fail-closed、`SortScore` 跨版块拒绝、负 ID 拒绝、同秒 5 帖翻页不重不漏、行值游标与 OR 形态结果全等、执行计划含 `idx_threads_last_reply` 且无 `TEMP B-TREE`、缺索引 fail-fast）；`latest_command_test.go` 6 项（跨版块列表与 slug、版块内无 slug、导航闭环、`/new` 拒绝、检索来源返回、空态中性）；命令表与 `/help` 断言同步。四门禁 + 两条闭环绿。
+- 关联：`ADR-048`（节点三不变量）、`ADR-062`（按用户解锁隐藏版块）、`ADR-014/019`（作者与外部文本投影）、`ADR-046`（展示时区）、`P4.5-PLAN.md §3`。
+
+## ADR-064 `/stats` 社区统计看板：诚实口径与峰值采样
+
+- 状态：已采纳，v0.7.1 / P4.5-M1 落地。
+- 背景：同一批运营反馈要求「一屏看到社区活跃度」。计划稿的取自方向正确（登录人数取 `daily_checkins`、峰值取新表、人次取新审计事件），但实施期暴露出四处「会写出错误数字」的形状：① `presence.Peak()` 是**进程**生命周期最大值，不按天重置；② 计划写的 `gate.Record(...)` 不存在，且 `record()` 固定 provider=`github`；③ `stats_daily.local_date TEXT PRIMARY KEY` 在 SQLite 允许 NULL 且允许多行 NULL；④ 每 30 秒无条件 UPSERT 会把写队列当计时器用。
+- 决策：
+  1. **口径表**（每项都能追到数据源，零回填零臆造）：今日/昨日登录人数 = `daily_checkins` 按 `local_date` 去重计数（v0.6.0 起有真实数据）；今日/昨日在线峰值 = `stats_daily.peak_online`；历史在线峰值 = `MAX(peak_online)`；当前在线/活跃 = `presence.Online()/Active()`（实时内存）；注册用户 = `users COUNT(status='active')`（pending/deleting/deleted 不计，防注销虚增）；累计登录人次 = `auth_events COUNT(event='login_success')`（自 v0.7.1 起累积）。各指标起点必须上屏声明。
+  2. **`--` 判据（两条件，与实现字段解耦）**：`今日在线峰值` 显示 `--` 当且仅当「该日无 `stats_daily` 行 **且** 渲染时刻当前在线为 0」。实时在线数本身构成一次观测，因此「没有落库行」≠「没有观测」。`昨日在线峰值` 无实时源，判据是纯「有无该日行」；`历史在线峰值` = max(全时 MAX, 今日显示值)，故今日一有观测、历史必不为 `--`。图例 `-- 表示暂无在线观测数据` 只在屏上真出现 `--` 时插入一次，判据与三处 `--` **同源**（同一次钳制后的 observed/seen 标志）；升级首日因昨日位无行，必定出现一次。
+  3. **展示层自洽（两处纯算术钳制）**：今日 = max(库值, 当前在线)；历史 = max(全时 MAX, 今日显示)。由此恒有「历史 ≥ 今日 ≥ 当前在线」。**不保证**同一天内多次渲染的今日峰值单调不降：`Online` 在两次 tick 之间会动、日内峰值只在 tick 时前推，要单调必须让渲染路径写回日内高水位——为 ≤30 秒的显示抖动引入读路径写入，收益与风险不成比例，故不做；ADR 已声明「显示值可领先持久化值一个 tick」，本现象是该句的直接推论。
+  4. **`login_success` 语义**：一次「登录动作」成功 = GitHub Device Flow 授权完成登录/建号，或邮箱密码登录成功（两处 `onLogin` 调用点，均在 `UpgradeToUser` 成功后）。重连凭公钥恢复登录态**不计**——那是会话恢复不是登录动作。埋点走新增的 `SecurityGate.NoteLoginSuccess(userID, provider)`：直接 `audit.Record` 并显式传 provider（白名单 `github`/`email`），**不走** `g.record()`（它固定用 `g.provider`，会把邮箱登录记成 github）。
+  5. **fail-open 边界（audit.go「队列满必须拒绝认证动作」的唯一显式例外）**：login_success 是登录**成功之后**的事后统计事件，写不进去不能回滚已完成的登录——`Record` 失败只 `logger.Warn`。装配层收敛为 `newOnLoginHook(checkIn, noteLoginSuccess, logger)`：审计先行（纯内存入队）、签到在后（写库），**两者互不短路**。v0.6.0 的「签到失败即 return」会让 login_success 跟着丢，人次被系统性低估且永不报警。
+  6. **峰值采集机制**：cmd 层 30s ticker（application 不起 goroutine、presence 不 import SQL，两条守卫不破）。状态只有 `day / dayPeak / rowWritten / writtenPeak`：**当日首 tick 无条件写一次**（值可为 0——这是「该日存在观测窗口」的来源，也是 `--` 与 `0` 的唯一判据，写频优化不得省掉它），之后只在创新高时写；跨天 `dayPeak` 归零、**不读 `presence.Peak()`**（进程峰值会把昨日 50 写进今天并被 `MAX` 锁死一整天）；停机补采一次（独立 2s ctx）。写入是**单条幂等 MAX-upsert**：`Writer.Submit` 的失败含「commit 结果未知」（队列未入队 / 关闭中 / 重试耗尽 / commit 失败），只有幂等语句能安全重放；失败时状态不推进 → 下轮自然重试（`!rowWritten` 本身就是 pending 标志），日志当日首次 Warn、其后 Debug，恢复时 Info。
+  7. **`stats_daily` 约束**：`local_date TEXT NOT NULL PRIMARY KEY` + 形状 CHECK（`GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'`），`peak_online >= 0`，`updated_at >= 0` 且只在 MAX 生效时推进。SQLite 的 `TEXT PRIMARY KEY` 允许 NULL 且允许多行 NULL，一次空日期即污染全历史 `MAX`；`length=10` 挡不住 `2026/11/22`。
+  8. **文案**：6 行定稿（「今日在线峰值 / 历史在线峰值」而非「今日峰值在线 / 历史最高在线」——前者主语明确，后者「最高」是绝对化措辞而该值自 v0.7.1 起才累积）；40 列是排版**目标**不是结构不变量（数字涨三位数时正解是重排行）；末行「登录自 v0.6.0；峰值与累计登录自 v0.7.1」是免责尾注，不可删。
+- 理由：这三条不是三个 bug，是同一条不变量——**屏幕上的数字必须等于我们真的观测到的**——被三个方向破开的样子：
+
+  | 反例 | 触发 | 后果 | 防线 |
+  | --- | --- | --- | --- |
+  | 把昨天的观测写成今天 | 用进程生命周期 `Peak()` 而非当日自持峰值 | 昨日 50 写进今天，被 `MAX` 锁死一整天 | 基线隔离（`dayPeak` 跨天归零） |
+  | 把没观测写成有 | 无行渲染 0，或用昨日行/历史值兜底 | 进程没跑的那天读成「今天没人」 | 类型层（`observed bool`） |
+  | 把观测到 0 写成没观测 | 写频优化省掉当日首 tick 建行 | 真实 0 人显示成 `--` | 首写义务（首 tick 无条件写 + 失败补建） |
+
+- 代价 / 边界：
+  1. `peak_online` 是**当日 30 秒采样峰值**，可能低估瞬时并发；不以此为口径承诺、不据此做容量决策。将来要精确并发的做法是提高采样频率或改事件计数，不是改文案。
+  2. 两次采样之间起落的瞬时尖峰可能不被任何持久化记录，后到的读者看不到该尖峰；属已接受的采样精度边界，不通过展示层或文案补救。**这正是「采样器内存日内峰值」曾存在的动机**——它为消除这类遗漏而引入，但因无法实现同日单调、且读接口缺日期守卫（午夜会把昨日峰值当今日）被移除。未来任何试图补回该能力的改动必须同时满足：①真正实现同日单调（而非只在 tick 时前推）；②带日期守卫；③不得在读/渲染路径写库。缺一不合入。
+  3. 建行持续失败并跨过午夜 → 昨日行永久缺失 → 昨日显示 `--` + 图例解释；**不做**跨日 closing write（要第二个 pending 槽，且触发窗口要求 DB 恰在 00:00–00:30 不可用，成本大于收益）。
+  4. 进程启动后首 tick 落库前的 ≤30 秒内，今日峰值可能翻转一次（有人在线显示数字 → 人走了且仍无行 → 翻回 `--`）；不为它加「今天见过就记住」的状态。
+  5. 图例解释的是全屏所有 `--`，不含「登录 0」——`0` 是真值（观测到没人），不是缺失。
+  6. Ambiguous 宽度字符（East Asian Width = A）进入输出词汇需一次性决策：已入词汇且经终端实测的（U+00B7 `·`，屏幕标题/页脚/`/karma` 共 8 处）可复用；新增的一律拦（U+2014、U+2026），除非同时补 `wideRanges` 与宽度口径说明。
+  7. 昨日日期一律 `AddDate(0,0,-1)`，禁止 `now.Add(-24h)`：`MOTD_DISPLAY_TIMEZONE` 可配任意时区，跨 DST 切换日用 24 小时减会落到同一天或跳一天（症状：「昨日数字莫名等于前日」）；更根本的理由是「昨日登录」与「昨日在线峰值」现在同屏相邻，两行的「昨日」若指向不同日期，用户会读成我们算错。
+- 验证：`repo_stats_test.go` 7 项（UPSERT 只升不降/写 0 不打回、`updated_at` 只在变高时推进、跨天隔离、非法日期与形状被拒、注册数只算 active、按日去重登录、只数 login_success、0011 对象存在）；`stats_test.go` 5 项（本地日历日期、展示时区归属、峰值自洽、`--` 两条件、读失败不兜 0）；`stats_command_test.go` 3 项（6 行文案逐字、`--` 变体 + 图例、行宽）；`stats_sampler_test.go` 5 项（首行必写、只写变高、跨天归零、失败重试、nil 安全）；`login_hook_test.go` 6 项（审计先行、失败不短路、nil 安全、`/stats` 固定文案与零回显）。测试函数 948 → 989。
+- 关联：`ADR-046`（展示时区）、`ADR-016`（presence 纯内存）、`ADR-019/026`（信任域与零回显）、`ADR-010`（写队列）、`P4.5-PLAN.md §4`。

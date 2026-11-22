@@ -53,8 +53,9 @@ type loginFlow struct {
 	gate   *auth.SecurityGate // P1-M2：失败留痕 + 按 IP 限流；nil 时零影响
 	view   loginPresenter
 
-	// onLogin 在会话升级成功后调用的签到钩子（v0.6.0），nil 时跳过。
-	onLogin func(context.Context, int64)
+	// onLogin 在会话升级成功后调用（签到 + login_success 审计），nil 时跳过。
+	// v0.7.1 起带 provider：本路径恒为 GitHub Device Flow（ADR-064）。
+	onLogin loginHook
 
 	active     bool
 	deviceCode string // 进程内唯一副本；绝不呈现、不落库
@@ -206,9 +207,10 @@ func (f *loginFlow) finish(ctx context.Context, conn loginConn, out io.Writer, t
 		_ = f.view.line(out, auth.LoginTextUpgradeFailed, safe.StylePlain)
 		return true, 0, err
 	}
-	// 签到是登录成功的副作用（v0.6.0）：失败不影响登录结果，只记日志由调用方处理。
+	// 签到与 login_success 审计都是登录成功的副作用（v0.6.0 / v0.7.1）：
+	// 失败不影响登录结果，只记日志由调用方处理。
 	if f.onLogin != nil {
-		f.onLogin(ctx, res.UserID)
+		f.onLogin(ctx, res.UserID, auth.ProviderGitHub)
 	}
 
 	notice := ""

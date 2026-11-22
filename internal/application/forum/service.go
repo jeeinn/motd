@@ -135,11 +135,16 @@ func (s *Service) ListNodes(ctx context.Context) ([]node.Node, error) {
 }
 
 // ListThreadsQuery 是 transport 层传入的列表参数。Cursor 是不透明字符串。
+//
+// NodeID == 0 表示跨版块列表（/latest，v0.7.1 / ADR-063）。此时 AllowedNodeIDs
+// 由 ScreenThreads 依据 ViewContext 里的已解锁隐藏版块补齐；直接调用 ListThreads
+// 而不给 AllowedNodeIDs 时返回空页（fail-closed，不会退化成「全站可见」）。
 type ListThreadsQuery struct {
-	NodeID int64
-	Sort   ThreadSort
-	Cursor string
-	Limit  int
+	NodeID         int64
+	AllowedNodeIDs []int64
+	Sort           ThreadSort
+	Cursor         string
+	Limit          int
 }
 
 // ThreadPage 是列表结果；NextCursor 为空表示没有下一页。
@@ -153,6 +158,11 @@ func (s *Service) ListThreads(ctx context.Context, q ListThreadsQuery) (*ThreadP
 	if !q.Sort.Valid() {
 		return nil, ErrInvalidSort
 	}
+	// NodeID 的取值域在用例层单点把守（ADR-063）：0 = 跨版块，>0 = 版块内，负值一律非法。
+	// 仓储也有同样的守卫，但端口可能被别人实现——用例层不替实现方省这一步。
+	if q.NodeID < 0 {
+		return nil, fmt.Errorf("%w: 版块 ID 不能为负", ErrInvalidNodeID)
+	}
 	limit := normalizePageSize(q.Limit)
 
 	after, err := decodeThreadCursor(q.Cursor)
@@ -164,7 +174,8 @@ func (s *Service) ListThreads(ctx context.Context, q ListThreadsQuery) (*ThreadP
 	}
 
 	rows, hasMore, err := s.repos.ListThreads(ctx, ThreadQuery{
-		NodeID: q.NodeID, Sort: q.Sort, After: after, Limit: limit,
+		NodeID: q.NodeID, AllowedNodeIDs: q.AllowedNodeIDs,
+		Sort: q.Sort, After: after, Limit: limit,
 	})
 	if err != nil {
 		return nil, err

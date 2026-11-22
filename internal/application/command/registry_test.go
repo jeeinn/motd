@@ -11,7 +11,8 @@ func TestDefaultRegistryHasP0Commands(t *testing.T) {
 	// P2-M1b 追加 /hide；P2-M2 追加 /edit（紧跟 /delete，同为作者权）；
 	// ADR-053 追加 /unhide 与 /unthread（后者可从任意屏恢复隐藏主题）。
 	// B 方案（帮助归组）把 7 条管理员命令集中到表尾：顺序固定，帮助文本由注册表生成。
-	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "help", "quit", "hide", "unhide", "unthread", "node", "node", "node", "node"}
+	// 2026-11-22（v0.7.1 / P4.5）：/search 之后追加 /latest（跨版块最新）与 /stats（统计看板）。
+	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "latest", "stats", "help", "quit", "hide", "unhide", "unthread", "node", "node", "node", "node"}
 	all := Default().All()
 	if len(all) != len(want) {
 		t.Fatalf("命令应为 %d 条，实际 %d", len(want), len(all))
