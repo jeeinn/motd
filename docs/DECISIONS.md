@@ -984,6 +984,7 @@
 - **patch（用户 2026-11-20 建议，同日落地）**：`night_owl` 时段从 UTC 改为按 `MOTD_DISPLAY_TIMEZONE` 计算——`OccurredAt.In(c.Location).Hour()`，与用户在终端看到的时间一致。实现：`registry.Context` 加可选 `Location *time.Location`（nil 回落 UTC 保持零值安全），cmd 装配层注入 `terminal.DisplayLocation()`（main 已在 `newForumRuntime` 之前 SetDisplayLocation），插件不反向依赖 presentation 层。测试用 `18:30Z` 在 Asia/Shanghai（本地 02:30）解锁、UTC（18 点）不解锁证明时区生效。
 - 验证：`eggs_test.go` 3 项（合并/重名拒绝/语料无 ESC）、`social_test.go` 3 项（时段边界、投票给作者而非投票者、自投票不给）、`cmd/server/egg_test.go` 4 项（固定文案、安全渲染、注入、等级阈值）；全量 `go build/vet/test` 绿、0 FAIL，测试 914 → 924。
 - 关联：`P3-PLAN.md §7`（M6）、`ADR-015`（插件权限）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-014`（等级仅显示）。
+- **patch（v0.7.2，用户 2026-11-22 反馈）**：`/help` 里彩蛋命令被显示在「管理员命令（需白名单指纹授权）」标题之下，读者会误判权限。根因是排版边界而非分组误标：`eggRegistry` 没给彩蛋设 `Group`，`WithCommands` 把彩蛋 append 到内置表末尾（管理员组之后），而 `Help()` 只用一个 `inAdminGroup` bool、仅在首次遇到 `GroupAdmin` 时插说明行，之后再无分组边界。修法：新增 `command.GroupEgg` 与 `eggGroupHelpHeader`（「彩蛋命令（无需权限，纯娱乐）」），`Help()` 改用 `map[string]bool` 按分组首次出现插头，`eggRegistry` 两处构造（插件元数据 + `EggCommands()` 兜底）都补 `Group`。**未隐藏任何命令**：`?` 是彩蛋唯一发现入口（ADR-061 的「命令表唯一入口」），隐藏会让功能事实上不存在；`Group` 仍只是展示元数据，鉴权零变化。
 
 ## ADR-062 v0.6.0 彩蛋扩展：签到、合规数字雨与按用户解锁隐藏版块
 

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-11-22
+
+补丁版本：修 `/help` 把彩蛋命令显示在「管理员命令」标题之下。无 schema 迁移、无新依赖、无新环境变量，鉴权零变化。
+
+### Fixed
+
+- **`/help` 把彩蛋命令显示在「管理员命令」标题之下**：彩蛋命令的 `Group` 为空且被 append 在内置表末尾（管理员组之后），而 `Help()` 只在首次进入管理员组时插一次分组说明，之后不再出现分组边界，于是 `/fortune`、`/xkcd`、`/karma` 等被读成「需要白名单指纹授权」。新增 `GroupEgg` 分组与固定说明行「彩蛋命令（无需权限，纯娱乐）」，`Help()` 改为按分组首次出现插头；鉴权零变化（`Group` 是纯展示元数据，权限仍只在 `requireAdmin`）。
+
 ## [0.7.1] - 2026-11-22
 
 P4.5「运营可见性」版本：跨版块 `/latest` 与社区看板 `/stats`。含一次 schema 迁移（0011），测试 948 → 989。
@@ -315,7 +323,10 @@ P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞�
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/jeeinn/motd/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/jeeinn/motd/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/jeeinn/motd/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jeeinn/motd/compare/v0.5.0...v0.6.0
 <!-- v0.5.1 未单独发 tag，其内容随 v0.6.0 一并发布；上方 [0.6.0] 的 compare 基准因此取 v0.5.0 -->
 [0.5.0]: https://github.com/jeeinn/motd/compare/v0.4.3...v0.5.0

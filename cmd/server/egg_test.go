@@ -54,6 +54,46 @@ func TestEggRegistryInjectsCommands(t *testing.T) {
 	}
 }
 
+// v0.7.2：彩蛋命令必须显示在独立的「彩蛋命令（无需权限）」分组里，
+// 不能落在「管理员命令（需白名单指纹授权）」标题之下——那会误导权限。
+func TestEggHelpGroupIsSeparateFromAdmin(t *testing.T) {
+	reg, err := eggRegistry(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	help := reg.Help()
+
+	adminAt := strings.Index(help, "管理员命令（需白名单指纹授权）")
+	eggAt := strings.Index(help, "彩蛋命令（无需权限，纯娱乐）")
+	keysAt := strings.Index(help, "\r\n键位：")
+	if adminAt < 0 || eggAt < 0 {
+		t.Fatalf("两个分组说明都应出现: admin=%d egg=%d", adminAt, eggAt)
+	}
+	if !(adminAt < eggAt && eggAt < keysAt) {
+		t.Fatalf("分组顺序应为 管理员 → 彩蛋 → 键位，实际 admin=%d egg=%d keys=%d", adminAt, eggAt, keysAt)
+	}
+	if n := strings.Count(help, "彩蛋命令（无需权限，纯娱乐）"); n != 1 {
+		t.Fatalf("彩蛋分组说明必须恰好一次，实际 %d 次", n)
+	}
+
+	for _, c := range reg.All() {
+		at := strings.Index(help, c.Usage)
+		if at < 0 {
+			t.Errorf("帮助缺少命令 %q", c.Name)
+			continue
+		}
+		if c.Group == command.GroupEgg && at < eggAt {
+			t.Errorf("彩蛋命令 %q 不得出现在彩蛋说明之前（位置 %d）", c.Usage, at)
+		}
+		if c.Group == command.GroupAdmin && at > eggAt {
+			t.Errorf("管理员命令 %q 不得落到彩蛋分组之后（位置 %d）", c.Usage, at)
+		}
+		if c.Group == command.GroupAdmin && c.Name == "fortune" {
+			t.Errorf("彩蛋命令不得归入管理员组")
+		}
+	}
+}
+
 func TestKarmaLevelThresholds(t *testing.T) {
 	cases := []struct {
 		karma int64

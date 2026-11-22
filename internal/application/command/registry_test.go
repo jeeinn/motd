@@ -42,6 +42,12 @@ func TestHelpGroupsAdminCommandsWithoutHiding(t *testing.T) {
 	headerAt := strings.Index(help, header)
 	keysAt := strings.Index(help, "\r\n键位：")
 
+	// v0.7.2：内置表（Default）不含彩蛋，因此不应出现彩蛋分组说明行——
+	// 分组说明行必须由「真的有该组命令」触发，不能无条件插。
+	if n := strings.Count(help, eggGroupHelpHeader); n != 0 {
+		t.Fatalf("无彩蛋命令时不应出现彩蛋分组说明，实际 %d 次", n)
+	}
+
 	// 7 条管理员命令全在说明行之后、键位表之前；一条都不少（不隐藏）。
 	adminUsages := []string{"/node list", "/node create", "/node rename", "/node archive", "/hide [id]", "/unhide [id]", "/unthread <thread-id>"}
 	for _, usage := range adminUsages {
@@ -71,6 +77,33 @@ func TestHelpGroupsAdminCommandsWithoutHiding(t *testing.T) {
 		if !strings.Contains(help, c.Usage) {
 			t.Errorf("帮助缺少命令 %q", c.Name)
 		}
+	}
+
+	// v0.7.2：彩蛋分组必须独立成段。此前彩蛋 Group 为空且排在管理员组之后，
+	// Help 只在首次进入管理员组时插一次说明，导致彩蛋被显示在「管理员命令」之下。
+	r2, err := New([]Command{
+		{Name: "top", Usage: "/top", Summary: "回到版块列表", MaxArgs: 0},
+		{Name: "hide", Usage: "/hide [id]", Summary: "隐藏（仅管理员）", MinArgs: 0, MaxArgs: 1, Group: GroupAdmin},
+		{Name: "fortune", Group: GroupEgg, Usage: "/fortune", Summary: "随机箴言", MaxArgs: 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eggHelp := r2.Help()
+	adminAt := strings.Index(eggHelp, adminGroupHelpHeader)
+	eggAt := strings.Index(eggHelp, eggGroupHelpHeader)
+	fortuneAt := strings.Index(eggHelp, "/fortune")
+	if adminAt < 0 || eggAt < 0 {
+		t.Fatalf("两个分组说明都应出现: admin=%d egg=%d", adminAt, eggAt)
+	}
+	if eggAt <= adminAt {
+		t.Fatalf("彩蛋分组说明应在管理员分组之后（append 顺序）: admin=%d egg=%d", adminAt, eggAt)
+	}
+	if fortuneAt <= eggAt {
+		t.Fatalf("彩蛋命令必须落在彩蛋说明之后: eggAt=%d fortuneAt=%d", eggAt, fortuneAt)
+	}
+	if n := strings.Count(eggHelp, eggGroupHelpHeader); n != 1 {
+		t.Fatalf("彩蛋分组说明必须恰好出现一次，实际 %d 次", n)
 	}
 }
 
