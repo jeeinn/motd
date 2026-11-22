@@ -42,6 +42,26 @@ const GroupAdmin = "admin"
 // adminGroupHelpHeader 是固定文案（不含任何用户数据），Help() 在进入管理员分组前插一次。
 const adminGroupHelpHeader = "\r\n管理员命令（需白名单指纹授权）：\r\n"
 
+// GroupEgg 标记彩蛋命令（v0.7.2）。它们不需要任何权限；与 GroupAdmin 混排会让
+// 人误以为「要管理员才能用」。分组只影响 /help 排版，Parse / 鉴权完全不看它。
+const GroupEgg = "egg"
+
+// eggGroupHelpHeader 是彩蛋分组的固定说明行（v0.7.2）。措辞明说「无需权限」，
+// 因为此前它们被排在管理员标题之下，读者会误判权限。
+const eggGroupHelpHeader = "\r\n彩蛋命令（无需权限，纯娱乐）：\r\n"
+
+// groupHelpHeader 返回分组说明行；未知分组返回空串（不插说明，保持旧行为）。
+func groupHelpHeader(group string) string {
+	switch group {
+	case GroupAdmin:
+		return adminGroupHelpHeader
+	case GroupEgg:
+		return eggGroupHelpHeader
+	default:
+		return ""
+	}
+}
+
 // Binding 是「键位 → 语义」的说明，P1 的鼠标 / 快捷键也映射到同一张表。
 type Binding struct {
 	Key  string
@@ -303,11 +323,14 @@ func (r *Registry) Bindings() []Binding {
 func (r *Registry) Help() string {
 	var b strings.Builder
 	b.WriteString("命令（唯一入口）：\r\n")
-	inAdminGroup := false
+	// 每个分组只在**首次出现**时插一次说明行。旧实现只认 GroupAdmin 一个 bool：
+	// 内置表末尾是管理员组，彩蛋命令在它之后 append，于是再没有出现分组边界，
+	// 彩蛋被视觉上吞进「管理员命令」区（v0.7.2 修）。用 map 让任意分组都能插头。
+	printed := make(map[string]bool, 2)
 	for _, c := range r.All() {
-		if c.Group == GroupAdmin && !inAdminGroup {
-			b.WriteString(adminGroupHelpHeader)
-			inAdminGroup = true
+		if c.Group != "" && !printed[c.Group] {
+			b.WriteString(groupHelpHeader(c.Group))
+			printed[c.Group] = true
 		}
 		_, _ = fmt.Fprintf(&b, "  %-18s %s\r\n", c.Usage, c.Summary)
 	}

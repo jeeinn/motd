@@ -39,6 +39,9 @@ func eggRegistry(plugins []registry.Plugin) (*command.Registry, error) {
 				Summary: pc.Description,
 				MinArgs: 0,
 				MaxArgs: 0,
+				// v0.7.2：彩蛋独立分组。此前空 Group + 排在管理员组之后，
+				// 让 /help 把它们显示在「管理员命令」标题下面。
+				Group: command.GroupEgg,
 			})
 		}
 	}

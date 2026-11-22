@@ -16,13 +16,13 @@ import (
 // cmd 装配层据此合并进命令注册表；Usage/Summary 会进入 Help()。
 func EggCommands() []Command {
 	return []Command{
-		{Name: "fortune", Usage: "/fortune", Summary: "随机吐一句箴言", MaxArgs: 0},
-		{Name: "cowsay", Usage: "/cowsay", Summary: "ASCII 牛说一句话", MaxArgs: 0},
-		{Name: "xkcd", Usage: "/xkcd", Summary: "随机一则 xkcd 风格标题（本地清单）", MaxArgs: 0},
-		{Name: "blame", Usage: "/blame @user", Summary: "把锅甩给某个倒霉蛋（玩笑）", MinArgs: 1, MaxArgs: 1},
-		{Name: "sudo", Usage: "/sudo", Summary: "尝试提权（注定失败）", MaxArgs: 0},
-		{Name: "karma", Usage: "/karma", Summary: "查看自己的声望与等级", MaxArgs: 0},
-		{Name: "matrix", Usage: "/matrix", Summary: "看一小段数字雨（按 Ctrl-C 可中断）", MaxArgs: 0},
+		{Name: "fortune", Group: GroupEgg, Usage: "/fortune", Summary: "随机吐一句箴言", MaxArgs: 0},
+		{Name: "cowsay", Group: GroupEgg, Usage: "/cowsay", Summary: "ASCII 牛说一句话", MaxArgs: 0},
+		{Name: "xkcd", Group: GroupEgg, Usage: "/xkcd", Summary: "随机一则 xkcd 风格标题（本地清单）", MaxArgs: 0},
+		{Name: "blame", Group: GroupEgg, Usage: "/blame @user", Summary: "把锅甩给某个倒霉蛋（玩笑）", MinArgs: 1, MaxArgs: 1},
+		{Name: "sudo", Group: GroupEgg, Usage: "/sudo", Summary: "尝试提权（注定失败）", MaxArgs: 0},
+		{Name: "karma", Group: GroupEgg, Usage: "/karma", Summary: "查看自己的声望与等级", MaxArgs: 0},
+		{Name: "matrix", Group: GroupEgg, Usage: "/matrix", Summary: "看一小段数字雨（按 Ctrl-C 可中断）", MaxArgs: 0},
 	}
 }
 
