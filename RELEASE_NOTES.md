@@ -1,6 +1,6 @@
 # Release Notes — v0.7.1
 
-**发布日期**：2026-11-22（本地已就绪，**待推送**）
+**发布日期**：2026-11-22
 **Git tag**：`v0.7.1`
 **Module**：`github.com/jeeinn/motd`
 
