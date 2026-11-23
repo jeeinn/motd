@@ -186,7 +186,7 @@ func rowCommandID(line string) (int64, bool) {
 }
 
 // v0.3.3 格式契约（golden）：CreatedAt=0 去掉时间后输出完全确定。
-// 三段按「id= → 作者 → 时间/回复数」拼接；顺序或分隔符任一改动都会让本断言失败，
+// 三段按「id= → 作者 → 回复数/时间」拼接；顺序或分隔符任一改动都会让本断言失败，
 // 防止后续改动悄悄破坏「帖子 ID、作者、赞数三者形态不同」的约定。
 func TestMetaPartsFormatContract(t *testing.T) {
 	row := viewmodel.Row{Index: 1, ID: 123, Meta: viewmodel.RowMeta{AuthorID: 1}}

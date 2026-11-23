@@ -1,43 +1,32 @@
-# Release Notes — v0.7.2
+# Release Notes — v0.7.3
 
-**发布日期**：2026-11-22
-**Git tag**：`v0.7.2`
+**发布日期**：2026-11-23
+**Git tag**：`v0.7.3`
 **Module**：`github.com/jeeinn/motd`
 
-> 补丁版本：修 `/help` 把彩蛋命令显示在「管理员命令（需白名单指纹授权）」标题之下。无 schema 迁移、无新依赖、无新环境变量，鉴权零变化。测试 989 → 990。
+> 补丁版本：调整主题列表行元信息顺序，回复数 `rN` 移到时间之前。无 schema 迁移、无新依赖、无新环境变量，行为与鉴权零变化。测试 990 → 991。
 
 ## 本版变化
 
-### Fixed
+### Changed
 
-- **`/help` 的分组边界丢失，彩蛋命令被读成「需要管理员权限」**。修复前：
+- **主题列表行元信息顺序：回复数 `rN` 提到时间之前**。修复前：
 
   ```
-  管理员命令（需白名单指纹授权）：
-    /hide [id] … /node archive <slug>                    ← 真管理员（7 条）
-    /fortune /cowsay /xkcd /blame /sudo /karma /matrix   ← 彩蛋，被吞进同一标题下
+  >  1. [3] 主题标题 id=1 @alice 11-23 09:15 r3
   ```
 
   修复后：
 
   ```
-  管理员命令（需白名单指纹授权）：
-    /hide [id] … /node archive <slug>
-
-  彩蛋命令（无需权限，纯娱乐）：
-    /fortune /cowsay /xkcd /blame /sudo /karma /matrix
+  >  1. [3] 主题标题 id=1 @alice r3 11-23 09:15
   ```
 
-  **根因**（排版边界，不是分组误标）：`eggRegistry` 构造插件命令时没设 `Group`（属普通分组），`WithCommands` 把彩蛋 append 到内置命令表末尾，而内置表最后一段正是管理员组；`Help()` 只用一个 `inAdminGroup` 布尔、仅在**首次**遇到管理员命令时插一次说明行，之后再无分组边界，彩蛋就落在该标题之下。
+  **改动范围**：只在 `metaTail` 的 `parts` 拼接顺序——`ScreenThreads && Replies > 0` 的 ` r%d` 段先于时间段 append。`rN` 紧凑形态、显示时机（仅主题列表、`N>0` 才显示）、分隔符与其余符号一律不动（沿袭 v0.3.3 / ADR-052）。详情页回复行、搜索结果屏本就不投影回复数，零变化。信任域边界不变：`id=` / 回复数 / 时间走 `sys()`→`RenderSystem`，作者段走 `ext()`→`RenderUser`（ADR-014/019）。
 
-  **修法**：新增 `command.GroupEgg` 与固定说明行「彩蛋命令（无需权限，纯娱乐）」；`Help()` 改用 `map` 按分组首次出现插头（对任意分组通用，不再只认管理员）；`eggRegistry` 两条构造路径（插件元数据 + `EggCommands()` 兜底）都补 `Group`；彩蛋清单在 `EggCommands()` 里带 `Group`，保持「命令表是唯一事实来源」。
-- `CHANGELOG.md` 补记缺失的 `[0.7.0]` / `[0.7.1]` compare 链接，并同步 `[Unreleased]` 基准到 `v0.7.2`。
+## 设计取舍
 
-## 设计取舍（为什么不直接隐藏）
-
-`?` / `/help` 是这套 TUI 里彩蛋唯一的发现入口（`/xkcd` 等还刻意做成纯本地清单、不联网）。把它们从帮助里隐藏会让功能事实上不存在；而「混在管理员区」比隐藏更糟——它同时误导权限认知，用户会怀疑自己权限不足，而不是认为排版有问题。因此选择「独立成段、明说不需权限」，既消除误导又保留可发现性。
-
-`Group` 始终只是展示元数据：`Parse` 与鉴权完全不看它，白名单准入仍只在 `forum.requireAdmin` 单点判定。
+这是纯展示层排版调整，不涉及计数口径（ADR-052 的 `COUNT(status='normal') - 1`）、不涉及投影链路、不涉及数据。顺序对调不改变任何数字含义，只让「回复数」这个与主题本身更相关的统计紧邻作者段、时间退为末位。
 
 ## 升级说明
 
@@ -50,15 +39,14 @@
 
 ## 验证
 
-- 四门禁：`gofmt` 零输出、`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿；测试函数 **990**。
-- 新增/扩展断言：两个分组说明各恰好出现一次、顺序为「管理员 → 彩蛋 → 键位」、彩蛋命令不得归入管理员组、无彩蛋命令时不得出现彩蛋说明行（防止无条件插头）。
-- 真实 SSH 会话实测 `?` 输出：彩蛋已独立成段，管理员区只剩 7 条真管理员命令。
-- CI 双 job（Build/Vet/Test + Race detector）全绿。
+- 四门禁：`gofmt` 零输出、`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿；测试函数 **991**。
+- 新增 `TestMetaTailRepliesBeforeTime`：锁定 `id=109 @alice r3 11-14 22:13` 的组合顺序，并反向断言 `r3` 不得出现在时间之后。
+- 两条闭环专项 `TestMVPSSHClosedLoop` / `TestMVPRestartAndBackupWithRealData` 绿。
 
 ## 破坏性变更
 
-无。帮助文本排版变化，命令集合与权限完全不变。
+无。仅列表行元信息排版顺序变化，命令集合、权限、数据契约完全不变。
 
 ## 变更明细
 
-见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.7.2]` 段、[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-061 patch 段。
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.7.3]` 段、[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-052 patch 段。
