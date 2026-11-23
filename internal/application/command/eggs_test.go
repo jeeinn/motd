@@ -12,7 +12,7 @@ func TestWithCommandsMergesEggs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("合并彩蛋命令: %v", err)
 	}
-	for _, name := range []string{"fortune", "cowsay", "xkcd", "blame", "sudo", "karma"} {
+	for _, name := range []string{"fortune", "cowsay", "xkcd", "blame", "sudo", "matrix"} {
 		line := "/" + name
 		if name == "blame" {
 			line += " @someone" // /blame 要求一个参数
@@ -36,7 +36,7 @@ func TestWithCommandsMergesEggs(t *testing.T) {
 	}
 	// Help 含彩蛋说明，且管理员分组仍在。
 	help := r.Help()
-	for _, name := range []string{"/fortune", "/karma"} {
+	for _, name := range []string{"/fortune", "/matrix"} {
 		if !strings.Contains(help, name) {
 			t.Errorf("Help 应含 %s", name)
 		}

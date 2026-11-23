@@ -21,7 +21,7 @@ func EggCommands() []Command {
 		{Name: "xkcd", Group: GroupEgg, Usage: "/xkcd", Summary: "随机一则 xkcd 风格标题（本地清单）", MaxArgs: 0},
 		{Name: "blame", Group: GroupEgg, Usage: "/blame @user", Summary: "把锅甩给某个倒霉蛋（玩笑）", MinArgs: 1, MaxArgs: 1},
 		{Name: "sudo", Group: GroupEgg, Usage: "/sudo", Summary: "尝试提权（注定失败）", MaxArgs: 0},
-		{Name: "karma", Group: GroupEgg, Usage: "/karma", Summary: "查看自己的声望与等级", MaxArgs: 0},
+		// ADR-065：/karma 命令入口已删除，声望/等级并入 /whoami；KarmaReader 能力层保留（状态栏消费）。
 		{Name: "matrix", Group: GroupEgg, Usage: "/matrix", Summary: "看一小段数字雨（按 Ctrl-C 可中断）", MaxArgs: 0},
 	}
 }

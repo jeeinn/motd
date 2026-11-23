@@ -12,7 +12,8 @@ func TestDefaultRegistryHasP0Commands(t *testing.T) {
 	// ADR-053 追加 /unhide 与 /unthread（后者可从任意屏恢复隐藏主题）。
 	// B 方案（帮助归组）把 7 条管理员命令集中到表尾：顺序固定，帮助文本由注册表生成。
 	// 2026-11-22（v0.7.1 / P4.5）：/search 之后追加 /latest（跨版块最新）与 /stats（统计看板）。
-	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "latest", "stats", "help", "quit", "hide", "unhide", "unthread", "node", "node", "node", "node"}
+	// ADR-065：/stats 之后追加 /whoami（别名 /me）与 /who [页]；/karma 彩蛋入口删除。
+	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "latest", "stats", "whoami", "who", "help", "quit", "hide", "unhide", "unthread", "node", "node", "node", "node"}
 	all := Default().All()
 	if len(all) != len(want) {
 		t.Fatalf("命令应为 %d 条，实际 %d", len(want), len(all))
@@ -234,6 +235,10 @@ func TestParseCommands(t *testing.T) {
 		{"/signin foo", "login", []string{"foo"}, nil}, // 别名
 		{"/?", "help", nil, nil},                       // 别名
 		{"/help", "help", nil, nil},
+		{"/whoami", "whoami", nil, nil}, // ADR-065
+		{"/me", "whoami", nil, nil},     // 别名 → whoami
+		{"/who", "who", nil, nil},
+		{"/who 2", "who", []string{"2"}, nil},
 		{"/open", "", nil, ErrArgCount},
 		{"/open 3 4", "", nil, ErrArgCount},
 		{"/quit extra", "", nil, ErrArgCount},

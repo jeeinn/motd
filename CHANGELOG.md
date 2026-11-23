@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`/whoami`（别名 `/me`）**：查看本人资料——账号 `@username（ID）`、注册时间、声望与等级（ADR-065）。
+- **`/who [页]`**：查看当前在线人员名单，页长 15、参数分页；汇总行给出在线/活跃/访客计数；所有人可见（含访客）。（ADR-065）
+
+### Changed
+
+- `/whoami` 复用既有等级阈值（`karmaLevel`/`progressDesc`），不另造口径；`/who` 名单从单次 presence 快照派生，活跃态在前、`LastSeenAt` 倒序，访客不列名。
+
+### Removed
+
+- **`/karma` 命令入口删除**（不做别名过渡）：声望/等级展示并入 `/whoami`；`KarmaReader` 端口、状态栏等级渲染与计分能力层保留不动。（ADR-065）
+
 ## [0.7.3] - 2026-11-23
 
 补丁版本：调整主题列表行元信息顺序，回复数 `rN` 移到时间之前。无 schema 迁移、无新依赖、无新环境变量，行为与鉴权零变化。测试 990 → 991。
