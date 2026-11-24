@@ -427,8 +427,8 @@ func TestBackspaceAcrossFoldedLine(t *testing.T) {
 	const width = 8
 	var out bytes.Buffer
 	e := newLineEchoWithWidth(&out, width)
-	e.paste("甲乙丙丁戊") // row0: 甲乙丙丁(8 列 pending)，row1: 戊
-	e.backspace(true)    // 删戊 → row1 擦空，光标应回 row0 末
+	e.paste("甲乙丙丁戊")  // row0: 甲乙丙丁(8 列 pending)，row1: 戊
+	e.backspace(true) // 删戊 → row1 擦空，光标应回 row0 末
 
 	g := newTerminalGrid(width)
 	g.feed(out.String())

@@ -18,7 +18,7 @@ func TestMeasureLineWidthsAndBreaks(t *testing.T) {
 		wantBreaks  []int
 		wantPending bool
 	}{
-		{"ascii exact", "abcd", 4, 4, 1, nil, true},   // 恰好占满末列 → pending，不立即折
+		{"ascii exact", "abcd", 4, 4, 1, nil, true}, // 恰好占满末列 → pending，不立即折
 		{"ascii folds", "abcde", 4, 5, 2, []int{4}, false},
 		{"cjk exact", "中文", 4, 4, 1, nil, true},
 		{"cjk fold as unit", "A乙丙", 4, 5, 2, []int{2}, false}, // 乙占 1-2 列，丙 2 列放不下整字折

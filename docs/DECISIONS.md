@@ -437,6 +437,7 @@
   - `cmd/server` 补 `TestNavigationRedrawsInPlace` 与真实 SSH `TestMVPNavigationRedrawsInPlace`；`cmdOnlySGR` 升为 `cmdOnlyWhitelistedANSI`。
   - **真实 Windows OpenSSH 客户端实测**：连按 `jjj` → 3 次 `\x1b[8A`、24 次 `\x1b[K`（3×8 行）、清屏/OSC/备用屏 0 次；`go build` / `go vet` / `go test -count=1 ./...` 0 FAIL（479 测试函数）。
 - 关联：`DEVIATIONS.md` R22、`docs/MVP-DELIVERY.md §11`。
+- 边界澄清（2026-11-24）：`RenderFrame` 现按**可视高度**钳制 CUU 上移量并在帧末归位光标（见 `ADR-071`）；本 ADR 的白名单与六条结论不变，`width > 0` 超宽降级追加之外新增高度维钳制。
 
 ## ADR-028 领域事件事务性发件箱（outbox）：写内落库、提交后投递
 
@@ -1181,3 +1182,25 @@
 
 > 验证结果（2026-11-24）：四门禁 + 两条闭环专项 + archtest + 虚拟网格 TC-01~TC-05 + 双语参数化全部通过；测试函数 1041 → 1067（ADR-069 落地阶段 1041 → 1056，ADR-070 落地后累计 1067）。发版动作（commit / tag / Release / 部署）待用户单独授权，按 `AGENTS.md` §5 执行。
 
+
+## ADR-071 视口有界原地重绘：CUU 按终端高度钳制 + 帧末光标归位（ADR-027 边界澄清）
+
+- 状态：已采纳（2026-11-24；用户实测反馈"从详情返回列表后下方大片空白、列表从第 2 条开始、光标落底"）。
+- 性质：**ADR-027 的边界澄清，不修订其任何结论、不扩 ANSI 白名单**。ADR-027 的六条结论（原地重绘、SGR/EL/CUU 白名单、禁 ED/CUP/CUD/DECSET、RenderFrame 唯一消费点、invalidateScreen 连续性、超宽降级追加）全部保持。
+- 背景：ADR-027 的 `RenderFrame(text, prevLines, width)` 只有宽度维，无终端高度。两个高度维缺陷：
+  1. **D>H（详情逻辑行数 > 可视高度）**：顶部行滚入 scrollback，`CursorUp(prevLines)` 被终端钳制在可视顶、回不到逻辑屏首，随后补空 CRLF 又滚屏一次，可视区落空。
+  2. **D<=H**：`total = max(n, prevLines)` 补空行到旧屏行数，末行又发 `\r\n` 把光标推到 `total` 行而非内容末行——屏幕呈现"列表内容 + 下方空白带 + 光标停最底"。临界 D=H 时末尾 CRLF 还会把列表第 1 行滚出可视区（即用户看到的"从第 2 条开始"）。
+- 决策：
+  1. `RenderFrame` 增 `height int` 参数；`up = min(prevLines, height)`（height<=0 未知时退回旧口径，兼容无 Window 高度的调用点）。CUU 只回到可视顶，不跨 scrollback。
+  2. **帧末不写 `\r\n`**：写入 `total = max(n+1, up)` 行，最后一行留作归位空行且不换行，避免多滚一行把内容顶出可视区。
+  3. **光标归位**：补清多余行后用白名单 `CursorUp(total-1-n)` 把光标抬回第 n 行（内容末行的下一行）；返回值由 `total` 改为**内容行数 n**，使下次 `CUU(n)` 精确回到屏首，形成自洽闭环（连续重绘行数恒定）。
+  4. 高度经 `pageSession.Window()` 的 height 传入 `pageController.render`；登录屏 `loginPresenter` 增 `height` 字段、由 `login_flow` 从连接 pty-req 注入——两处生产调用点都拿到高度。
+- 理由：根因是"上一屏行数"被当作可无限 CUU 回退的量，而终端 CUU 实际受可视高度钳制；把模型改为"视口有界 + 帧末归位"即用既有白名单序列消除错位。以字节级虚拟网格实证四场景（D=H=24、H≈37、D<H、D>H）均修复：列表首行保留、状态栏/位置/help 完整、光标停在 help 下一行（空白带顶端而非终端底行）、无旧屏残留。
+- 代价 / 边界：
+  1. 补清的 `up-n` 行是用 EL 逐行擦掉旧屏内容必须付出的帧字节；这些空白已不造成光标/视觉异常（光标在空白带顶端，等价于 `cat` 短文件后的正常留白）。
+  2. 白名单内（无 ED）无法清除已滚入 scrollback 的旧详情残影，也无法在终端 resize 后立即对齐（`screenLines` 记录的是旧高度下的行数）——属可视区之外/异常态。处理需扩白名单引入 ED/CUP，会破 ADR-027 红线并抹掉用户历史，不采纳。SIGWINCH 时 `invalidateScreen()` 可作为后续改进。
+  3. "状态栏钉底"（展示层按 height 补白）经评估不纳入本次：它是独立的布局 UX 方向；且把内容行数撑到 H 会让光标重新落到终端底行，收益不明确。
+  4. `back()` 的两次 render 是 ADR-066 决策 5 要求，非本次根因，保持不动。
+  5. 无新 ANSI 序列、无 schema 迁移、无新依赖、无新环境变量、无键位改动；archtest 白名单与守卫零改动。
+- 验证：`frame_test.go` 高度维单测（CUU 钳制到 H、帧末不写 CRLF、归位 CUU、height 未知退化、连续重绘行数稳定）+ `page_controller_test.go:TestBackClampsCUUToViewport`（真实详情→back 路径断言所有 CUU <= 可视高度）；四门禁 + 两闭环专项 + archtest 全绿。
+- 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（原地重绘，本条为其边界澄清）、`ADR-034`、`ADR-066`（back 双渲染）、`ADR-068`~`ADR-070`。

@@ -56,6 +56,6 @@ func renderLoginScreen(out *loginPresenter, v auth.LoginView, prevLines int) (st
 	if err != nil {
 		return "", 0, err
 	}
-	frame, lines := terminal.RenderFrame(toCRLF(text), prevLines, out.width)
+	frame, lines := terminal.RenderFrame(toCRLF(text), prevLines, out.width, out.height)
 	return frame, lines, nil
 }

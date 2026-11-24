@@ -69,6 +69,7 @@ type fakePageSession struct {
 	principal auth.Principal
 	states    []presence.State
 	width     uint32 // 终端列数：虚拟网格复现窄屏折行用，0 表示未显式设置
+	height    uint32 // 终端行数：高度维钳制回归用（ADR-071），0 表示沿用默认 24
 }
 
 // newFakePageSession 保持历史默认 80 列——既有 80 列调用点行为逐字节不变。
@@ -87,14 +88,28 @@ func newFakePageSessionWithWidth(width uint32, userID int64) *fakePageSession {
 	return &fakePageSession{principal: p, width: width}
 }
 
+// newFakePageSessionWithSize 造一个指定宽高的会话替身，供高度维钳制回归
+// （ADR-071）：height 传 0 沿用默认 24，width 传 0 沿用默认 80。
+func newFakePageSessionWithSize(width, height uint32, userID int64) *fakePageSession {
+	p := auth.Guest("SHA256:fake")
+	if userID > 0 {
+		p = auth.Principal{Kind: auth.KindUser, UserID: userID, KeyFingerprint: "SHA256:fake"}
+	}
+	return &fakePageSession{principal: p, width: width, height: height}
+}
+
 func (s *fakePageSession) Write(p []byte) (int, error) { return s.buf.Write(p) }
 func (s *fakePageSession) ID() string                  { return "fake-session" }
 func (s *fakePageSession) Principal() auth.Principal   { return s.principal }
 func (s *fakePageSession) Window() (uint32, uint32, string) {
-	if s.width == 0 {
-		return 80, 24, "xterm" // 直接结构体字面量构造的兜底，行为同旧实现
+	w, h := s.width, s.height
+	if w == 0 {
+		w = 80 // 直接结构体字面量构造的兜底，行为同旧实现
 	}
-	return s.width, 24, "xterm"
+	if h == 0 {
+		h = 24
+	}
+	return w, h, "xterm"
 }
 func (s *fakePageSession) SetState(st presence.State) error {
 	s.states = append(s.states, st)
@@ -464,5 +479,53 @@ func TestPageControllerHostilePostIsSafeForOtherSession(t *testing.T) {
 	}
 	if !strings.Contains(out, "␛") {
 		t.Error("ESC 应被转成可见控制图示而非透传")
+	}
+}
+
+// TestBackClampsCUUToViewport 回归 ADR-071：从详情返回列表时，若详情屏逻辑行数
+// 超过终端可视高度，CUU 必须钳制到可视高度（不能按详情行数上移跨入 scrollback），
+// 且返回行数恒为内容行数——这消除"列表被滚出首行 + 下方空白 + 光标落底"。
+func TestBackClampsCUUToViewport(t *testing.T) {
+	ctx, h, rt, _, _ := setupMVPRuntime(t)
+	// 极小可视高度：详情屏必然超过它，触发钳制路径。
+	const viewport = 5
+	sess := newFakePageSessionWithSize(80, viewport, 1)
+	pc := h.newPageController(sess)
+	threadID := seedFirstPost(t, ctx, pc, sess, rt)
+
+	if err := pc.showDetail(ctx, sess, threadID); err != nil {
+		t.Fatal(err)
+	}
+	detailLines := pc.screenLines
+	if detailLines <= int(viewport) {
+		t.Fatalf("前提：详情屏应超过可视高度 %d，实际 %d 行", viewport, detailLines)
+	}
+	sess.reset()
+
+	if err := pc.back(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	out := sess.output()
+	cmdOnlyWhitelistedANSI(t, out)
+	params := cuuParams(out)
+	if len(params) == 0 {
+		t.Fatalf("back 应走原地重绘并发出 CUU，实际 %q", out)
+	}
+	for _, up := range params {
+		if up > int(viewport) {
+			t.Fatalf("CUU(%d) 超过可视高度 %d，会跨入 scrollback 落错行: %q", up, viewport, out)
+		}
+	}
+	// 返回行数应为内容行数（列表屏），而非钳制前的详情行数。
+	if pc.screenLines >= detailLines {
+		t.Fatalf("返回列表后行数应为内容行数（<%d），实际 %d", detailLines, pc.screenLines)
+	}
+	// 稳定性：同屏再渲染一次，行数不变。
+	before := pc.screenLines
+	if err := pc.render(sess); err != nil {
+		t.Fatal(err)
+	}
+	if pc.screenLines != before {
+		t.Fatalf("连续重绘行数应稳定：%d → %d", before, pc.screenLines)
 	}
 }

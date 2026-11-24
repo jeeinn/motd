@@ -21,8 +21,15 @@ import (
 // 登录输出等），退回追加模式。width > 0 时若任一行显示宽度超出终端，
 // 说明终端会自动折行、行数不可靠，同样退回追加模式（宁可刷屏也不错位）。
 //
-// 返回本屏占用的行数；下次以该值 CursorUp 即可回到屏首。
-func RenderFrame(text string, prevLines, width int) (string, int) {
+// height 是终端可视区行数（ADR-071）：>0 时 CursorUp 的上移量以可视区为界。
+// 上一屏行数超过可视高度时，顶部行已滚入 scrollback，终端把 CUU 钳制在可视顶，
+// 若仍按 prevLines 上移会落在错误行；钳到 height 后落点确定。height<=0 表示
+// 未知，退回按 prevLines 计算的旧口径（兼容无 Window 信息的调用点）。
+//
+// 返回**内容行数 n**（不是写入行数）：帧末不写 CRLF、并在补清多余行后用
+// 白名单 CUU 把光标抬回内容末行的下一行（第 n 行），下次以该值 CursorUp
+// 即可精确回到屏首——避免"补空行后光标停在屏幕底部"的错位（ADR-071）。
+func RenderFrame(text string, prevLines, width, height int) (string, int) {
 	lines := strings.Split(strings.TrimSuffix(text, "\r\n"), "\r\n")
 	n := len(lines)
 	if n == 0 {
@@ -34,21 +41,33 @@ func RenderFrame(text string, prevLines, width int) (string, int) {
 		return text, n
 	}
 
-	total := n
-	if prevLines > n {
-		total = prevLines // 新屏更短时，多出来的旧行必须显式清空
+	// 高度维钳制：CUU 只回退到可视区顶，不试图跨 scrollback（ADR-071）。
+	up := prevLines
+	if height > 0 && up > height {
+		up = height
+	}
+	// 至少写 n+1 行：末行留作光标归位点，使下次 CUU(n) 精确回到屏首。
+	total := n + 1
+	if up > total {
+		total = up
 	}
 
 	var b strings.Builder
-	b.WriteString(safe.CursorUp(prevLines))
+	b.WriteString(safe.CursorUp(up))
 	for i := 0; i < total; i++ {
-		// \r 回到行首 → EL 清掉旧内容 → 写新行 → 换行。
+		// \r 回到行首 → EL 清掉旧内容 → 写新行 →（除末行）换行。
 		b.WriteString("\r")
 		b.WriteString(safe.ClearToEOL())
 		if i < n {
 			b.WriteString(lines[i])
 		}
-		b.WriteString("\r\n")
+		if i < total-1 {
+			b.WriteString("\r\n") // 末行不写：避免多滚一行把内容顶出可视区
+		}
 	}
-	return b.String(), total
+	// 补清了多余行时，光标停在末行；抬回第 n 行（内容末行的下一行）。
+	if total-1 > n {
+		b.WriteString(safe.CursorUp(total - 1 - n))
+	}
+	return b.String(), n
 }

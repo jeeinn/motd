@@ -87,13 +87,14 @@ func (f *loginFlow) begin(ctx context.Context, conn loginConn, out io.Writer) (t
 		_ = f.view.line(out, auth.LoginTextDeviceCodeInvalidated, safe.StylePlain)
 		return 0, false, err
 	}
-	// 终端宽度只来自连接自身的 pty-req；loginConn 不暴露 Window，
-	// 用可选接口适配，测试 fake 无需实现新方法（0 时 Renderer 按 80 列降级）。
+	// 终端宽高只来自连接自身的 pty-req；loginConn 不暴露 Window，
+	// 用可选接口适配，测试 fake 无需实现新方法（宽 0 按 80 列、高 0 未知降级）。
 	if w, ok := conn.(interface {
 		Window() (uint32, uint32, string)
 	}); ok {
-		width, _, _ := w.Window()
+		width, height, _ := w.Window()
 		f.view.width = int(width)
+		f.view.height = int(height)
 	}
 	if err := f.view.showStart(out, v); err != nil {
 		_ = f.device.Cancel(ctx, st.DeviceCode)

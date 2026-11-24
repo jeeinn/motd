@@ -29,7 +29,10 @@ type loginPresenter struct {
 	status viewmodel.StatusBar
 	// width 来自当前连接的 pty-req；0 时 Renderer 按 80 列降级。
 	width int
-	// screenLines 为上一屏占用行数；>0 才允许原地重绘。
+	// height 来自当前连接的 pty-req；>0 时 RenderFrame 用它钳制 CUU 上移量
+	// （上一屏超过可视区时不跨 scrollback，ADR-071）；0 表示未知。
+	height int
+	// screenLines 为上一屏内容行数；>0 才允许原地重绘。
 	screenLines int
 }
 

@@ -257,7 +257,7 @@ func (p *pageController) render(sess pageSession) error {
 	if p.service == nil {
 		return p.writeFixed(sess, "论坛服务尚未就绪")
 	}
-	width, _, _ := sess.Window()
+	width, height, _ := sess.Window()
 	text, err := terminal.RenderScreenWithLocale(p.screen, int(width), p.locale)
 	if err != nil {
 		// 失败关闭：渲染器不接受畸形 ViewModel / 含控制字符的系统文本时，
@@ -265,8 +265,9 @@ func (p *pageController) render(sess pageSession) error {
 		return p.writeFixed(sess, "页面渲染失败，已停止输出")
 	}
 	// screenLines>0 → 屏幕连续，原地重绘；=0 → 中间插入过其它输出，追加。
-	// RenderFrame 在极窄终端发生自动折行时也会自行降级为追加。
-	frame, lines := terminal.RenderFrame(toCRLF(text), p.screenLines, int(width))
+	// RenderFrame 在极窄终端自动折行时降级追加；高度经 height 传入用于 CUU
+	// 钳制（上一屏超过可视区时不让光标跨 scrollback，ADR-071）。
+	frame, lines := terminal.RenderFrame(toCRLF(text), p.screenLines, int(width), int(height))
 	p.screenLines = lines
 	_, err = io.WriteString(sess, frame)
 	return err
