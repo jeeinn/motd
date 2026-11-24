@@ -330,7 +330,28 @@ func TestRunWhoPaginatesLargeRoster(t *testing.T) {
 	if !strings.Contains(page2.String(), "第 2/2 页") {
 		t.Errorf("第 2 页页脚不符：%q", page2.String())
 	}
-	if strings.Contains(page2.String(), "u1") {
-		t.Error("第 2 页不应含第 1 页的用户")
+	// 不重不漏：两页用户集合的并集恰好是全部 16 人，且交集为空。
+	// 不断言「某具体用户在某页」——排序依赖 LastSeenAt 的时钟精度，
+	// Windows 粗粒度（时间戳相同→按 ID 序）与 Linux 纳秒（严格递增→倒序）
+	// 会给出不同顺序，这样的断言在 CI 上是 flaky 的。
+	inPage := func(out, name string) bool {
+		return strings.Contains(out, "@"+name+" ")
+	}
+	seen := map[string]int{}
+	for i := 1; i <= whoPageSize+1; i++ {
+		name := "u" + strconv.Itoa(i)
+		p1, p2 := inPage(page1.String(), name), inPage(page2.String(), name)
+		if p1 && p2 {
+			t.Errorf("用户 %s 同时出现在两页", name)
+		}
+		if !p1 && !p2 {
+			t.Errorf("用户 %s 在两页中都缺失", name)
+		}
+		if p1 || p2 {
+			seen[name]++
+		}
+	}
+	if len(seen) != whoPageSize+1 {
+		t.Errorf("两页应覆盖 %d 名用户，实际 %d", whoPageSize+1, len(seen))
 	}
 }
