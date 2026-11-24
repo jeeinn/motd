@@ -276,10 +276,24 @@ func (p *pageController) maybeShowCommandEntryHint(out io.Writer) {
 	_, _ = io.WriteString(out, commandEntryHint)
 }
 
-// writeFixed 只输出服务端编译期常量，走 RenderSystem 路径。
+// writeFixed 只输出服务端编译期常量，走 RenderSystem 路径（普通色）。
 func (p *pageController) writeFixed(sess pageSession, text string) error {
 	p.invalidateScreen() // 非屏幕输出打断连续性，下次渲染必须追加
 	rendered, err := safe.RenderSystem(text, safe.StylePlain)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(sess, toCRLF(rendered)+"\r\n")
+	return err
+}
+
+// writeHint 输出引导类固定提示（编辑器用法、草稿状态），走 Dim 灰阶——与状态栏
+// 同色（ADR-014/027 已入白名单的 SGR 样式），区别于用户正文的普通色。
+// 仍是服务端编译期常量，走 RenderSystem 同一校验；错误/失败提示仍用 writeFixed
+// 保持醒目。样式由 RenderSystem 自带 reset 收尾，不泄漏到后续用户回显。
+func (p *pageController) writeHint(sess pageSession, text string) error {
+	p.invalidateScreen()
+	rendered, err := safe.RenderSystem(text, safe.StyleDim)
 	if err != nil {
 		return err
 	}
@@ -694,7 +708,7 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 			return p.resumeDraft(sess, d)
 		}
 		p.draft = nil
-		if err := p.writeFixed(sess, composerDraftDiscardedHint); err != nil {
+		if err := p.writeHint(sess, composerDraftDiscardedHint); err != nil {
 			return err
 		}
 	}
@@ -716,9 +730,9 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
 	if creating {
-		return p.writeFixed(sess, composerTitleHint)
+		return p.writeHint(sess, composerTitleHint)
 	}
-	return p.writeFixed(sess, composerBodyHint)
+	return p.writeHint(sess, composerBodyHint)
 }
 
 // startEditComposer 进入「编辑既有正文」态：复用 startComposer 的正文阶段
@@ -737,7 +751,7 @@ func (p *pageController) startEditComposer(sess pageSession, postID int64) error
 	p.editor = e
 	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
-	return p.writeFixed(sess, composerEditHint)
+	return p.writeHint(sess, composerEditHint)
 }
 
 // editorKey 是编辑态的单入口：取消键两阶段共用，其余按键按阶段分流。
@@ -858,7 +872,7 @@ func (p *pageController) cancelEditor(sess pageSession, clearDraft bool) error {
 		p.draft = nil
 	}
 	if hadDraft && !clearDraft {
-		return p.writeFixed(sess, composerDraftSuspendedHint)
+		return p.writeHint(sess, composerDraftSuspendedHint)
 	}
 	return p.writeFixed(sess, "（已取消编辑）")
 }
@@ -911,7 +925,7 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 	}
 	p.editor = e
 	p.echo.setSecret(false)
-	if err := p.writeFixed(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second))); err != nil {
+	if err := p.writeHint(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second))); err != nil {
 		return err
 	}
 	// A 路径屏幕已有正文回显，Load 重建缓冲后 echo.cols 被 newline()+setSecret()
@@ -929,7 +943,7 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 // fail() 原样返回业务 err（非渲染失败），不能据此跳过提示；先完成提示再回传 err。
 func (p *pageController) failWithDraftHint(sess pageSession, err error) error {
 	_ = p.fail(sess, err)
-	if werr := p.writeFixed(sess, composerDraftRetainedHint); werr != nil {
+	if werr := p.writeHint(sess, composerDraftRetainedHint); werr != nil {
 		return werr
 	}
 	return err
@@ -962,7 +976,7 @@ func (p *pageController) resumeDraft(sess pageSession, d *composerDraft) error {
 	// pasteBlock 之后，光标被甩到提示下一行而 echo.cols 仍描述正文末行，
 	// 退格会在错误位置擦除（屏幕正文不消失）；且提示会紧贴正文末字。
 	// 前置后最后输出的是正文——光标停在正文末字、cols 与之一一对应，退格正确。
-	if err := p.writeFixed(sess, composerDraftRestoredHint); err != nil {
+	if err := p.writeHint(sess, composerDraftRestoredHint); err != nil {
 		return err
 	}
 	p.echo.pasteBlock(d.body)
@@ -995,7 +1009,7 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 			e.body = input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes))
 		}
 		e.body.Start()
-		return p.writeFixed(sess, composerBodyAfterTitleHint)
+		return p.writeHint(sess, composerBodyAfterTitleHint)
 	}
 
 	editing := e.editPostID > 0
