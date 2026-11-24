@@ -93,7 +93,7 @@ func TestRenderFrameOnlyWhitelistedSequences(t *testing.T) {
 			t.Errorf("原地重绘泄露了禁止序列 %q", bad)
 		}
 	}
-	assertOnlySGRAndCursor(t, got)
+	assertOnlyWhitelistedANSI(t, got)
 }
 
 // TestRenderFrameWrapConsistency 交叉核对 RenderFrame 的降级判定与 W8 物理行计算：
@@ -163,7 +163,7 @@ func TestRenderFrameClampsCUUToViewport(t *testing.T) {
 	if c := strings.Count(got, "\r\n"); c != 23 {
 		t.Fatalf("末行不写 CRLF，应有 23 个行间换行，实际 %d", c)
 	}
-	assertOnlySGRAndCursor(t, got)
+	assertOnlyWhitelistedANSI(t, got)
 
 	// 稳定性：下一次用返回的行数重绘，行数不变。
 	_, n2 := RenderFrame(text, n, 80, height)
@@ -185,8 +185,117 @@ func TestRenderFrameNoHeightFallsBack(t *testing.T) {
 	}
 }
 
-// assertOnlySGRAndCursor 检查输出里的每个 ESC 序列都属于白名单。
-func assertOnlySGRAndCursor(t *testing.T, s string) {
+// TestRenderCleanFrameStartsWithHomeAndClear 验证整屏重绘的帧首是 H + 2J，
+// 且整帧只出现一次 H 与一次 2J（不重复清屏、不夹带其他光标控制）。
+func TestRenderCleanFrameStartsWithHomeAndClear(t *testing.T) {
+	text := crlf("版块一", "版块二")
+	got, n := RenderCleanFrame(text, 24)
+	if n != 2 {
+		t.Fatalf("应返回内容行数 2，实际 %d", n)
+	}
+	if !strings.HasPrefix(got, "\x1b[H\x1b[2J") {
+		t.Fatalf("帧首应为 ESC[H + ESC[2J，实际 %q", got)
+	}
+	if c := strings.Count(got, "\x1b[H"); c != 1 {
+		t.Fatalf("整帧应只出现 1 次 ESC[H，实际 %d", c)
+	}
+	if c := strings.Count(got, "\x1b[2J"); c != 1 {
+		t.Fatalf("整帧应只出现 1 次 ESC[2J，实际 %d", c)
+	}
+	if !strings.Contains(got, "版块一") || !strings.Contains(got, "版块二") {
+		t.Fatalf("内容行缺失: %q", got)
+	}
+	assertOnlyWhitelistedANSI(t, got)
+}
+
+// TestRenderCleanFrameTrailingCRLFWhenFits 验证 n < height 时末行也补 CRLF，
+// 光标落到第 n+1 行行首（输入位），且不多写第二个 CRLF。
+func TestRenderCleanFrameTrailingCRLFWhenFits(t *testing.T) {
+	text := crlf("甲", "乙", "丙")
+	const height = 24
+	got, n := RenderCleanFrame(text, height)
+	if n != 3 {
+		t.Fatalf("应返回内容行数 3，实际 %d", n)
+	}
+	if !strings.HasSuffix(got, "丙\r\n") {
+		t.Fatalf("n<height 时末行后应有 CRLF 把光标带到输入位，实际 %q", got)
+	}
+	if c := strings.Count(got, "\r\n"); c != n {
+		t.Fatalf("CRLF 数应等于内容行数 %d，实际 %d", n, c)
+	}
+	assertOnlyWhitelistedANSI(t, got)
+}
+
+// TestRenderCleanFrameNoTrailingCRLFWhenFull 验证 n >= height 时末行不写 CRLF，
+// 避免在屏幕底行换行触发滚屏、把首行顶出可视区。
+func TestRenderCleanFrameNoTrailingCRLFWhenFull(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines int
+		h     int
+	}{
+		{"恰好占满", 24, 24},
+		{"超过可视高度", 30, 24},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := make([]string, tc.lines)
+			for i := range items {
+				items[i] = "行"
+			}
+			got, n := RenderCleanFrame(crlf(items...), tc.h)
+			if n != tc.lines {
+				t.Fatalf("应返回内容行数 %d，实际 %d", tc.lines, n)
+			}
+			if got := strings.Count(got, "\r\n"); got != n-1 {
+				t.Fatalf("n>=height 时末行不写 CRLF，应只有 %d 个，实际 %d", n-1, got)
+			}
+			if strings.HasSuffix(got, "\r\n") {
+				t.Fatalf("末行不得以 CRLF 结尾（会滚屏）: %q", got[max(0, len(got)-8):])
+			}
+			assertOnlyWhitelistedANSI(t, got)
+		})
+	}
+}
+
+// TestRenderCleanFrameNoHeight 验证 height<=0（可视高度未知）时保守不补末行 CRLF。
+func TestRenderCleanFrameNoHeight(t *testing.T) {
+	text := crlf("甲", "乙")
+	got, n := RenderCleanFrame(text, 0)
+	if n != 2 {
+		t.Fatalf("应返回内容行数 2，实际 %d", n)
+	}
+	if c := strings.Count(got, "\r\n"); c != 1 {
+		t.Fatalf("height 未知时只应有 n-1=1 个 CRLF，实际 %d", c)
+	}
+	if strings.HasSuffix(got, "\r\n") {
+		t.Fatalf("height 未知时不得补末行 CRLF: %q", got)
+	}
+	assertOnlyWhitelistedANSI(t, got)
+}
+
+// TestRenderCleanFrameUserTextInjectionSanitized 验证帧内不出现第二个真实清屏：
+// RenderCleanFrame 不改写文本（净化在 RenderUser 层），因此传入已净化的可见图示
+// 时帧首的 H/2J 必须是该帧唯一控制序列；若文本被原样注入第二个 2J，
+// 白名单断言会暴露「整帧控制序列不止帧首那一组」。
+func TestRenderCleanFrameUserTextInjectionSanitized(t *testing.T) {
+	// 已净化文本：ESC 被渲成 ␛（U+241B），[2J 只是普通字符。
+	text := crlf("标题 ␛[2J 注入", "正文")
+	got, n := RenderCleanFrame(text, 24)
+	if n != 2 {
+		t.Fatalf("应返回内容行数 2，实际 %d", n)
+	}
+	if c := strings.Count(got, "\x1b[2J"); c != 1 {
+		t.Fatalf("真实清屏序列只应来自帧首，实际出现 %d 次: %q", c, got)
+	}
+	if !strings.Contains(got, "␛[2J") {
+		t.Fatalf("净化后的可见图示应原样保留在内容里: %q", got)
+	}
+	assertOnlyWhitelistedANSI(t, got)
+}
+
+// assertOnlyWhitelistedANSI 检查输出里的每个 ESC 序列都属于白名单
+// （ADR-027 SGR/EL/CUU + ADR-072 无参 H / 无参 2J）。
+func assertOnlyWhitelistedANSI(t *testing.T, s string) {
 	t.Helper()
 	for i := 0; i < len(s); i++ {
 		if s[i] != 0x1b {
@@ -198,16 +307,27 @@ func assertOnlySGRAndCursor(t *testing.T, s string) {
 		j := i + 2
 		for j < len(s) {
 			c := s[j]
-			if c == 'm' || c == 'K' || c == 'A' {
+			if c == 'm' || c == 'K' || c == 'A' || c == 'H' || c == 'J' {
 				break
 			}
 			if (c < '0' || c > '9') && c != ';' {
-				t.Fatalf("ESC 序列不属于 SGR/EL/CUU 白名单: %q", s[i:min(i+24, len(s))])
+				t.Fatalf("ESC 序列不属于白名单: %q", s[i:min(i+24, len(s))])
 			}
 			j++
 		}
 		if j >= len(s) {
 			t.Fatalf("未闭合的 ESC 序列: %q", s[i:])
+		}
+		// ADR-072：H 只允许无参（\x1b[H），J 只允许 ED 2（\x1b[2J）。
+		switch s[j] {
+		case 'H':
+			if j-i != 2 {
+				t.Fatalf("只允许无参 CUP home \\x1b[H，实际 %q", s[i:j+1])
+			}
+		case 'J':
+			if s[i:j+1] != "\x1b[2J" {
+				t.Fatalf("只允许 ED 2 清屏 \\x1b[2J，实际 %q", s[i:j+1])
+			}
 		}
 		i = j
 	}

@@ -142,9 +142,10 @@ func submitBody(t *testing.T, ctx context.Context, sess *fakePageSession, pc *pa
 	}
 }
 
-// cmdOnlyWhitelistedANSI 是 D5 在页面链路上的判据（ADR-027 扩充）：
-// 输出里的 ESC 只能是 SGR（m）、EL 清行（K）、CUU 上移（A）三类服务端白名单序列。
-// 清屏 2J、OSC 52、备用屏 ?1049h、光标定位 H 等一律不接受。
+// cmdOnlyWhitelistedANSI 是 D5 在页面链路上的判据（ADR-027，ADR-072 扩充）：
+// 输出里的 ESC 只能是服务端白名单序列——SGR（m）、EL 清行（K）、CUU 上移（A）、
+// **无参** CUP home（\x1b[H）、**无参** ED 2 清当前屏（\x1b[2J）。
+// 带参 CUP（\x1b[2;3H）、ED 1J/3J/无参 [J、OSC 52、备用屏 ?1049h/l 一律不接受。
 func cmdOnlyWhitelistedANSI(t *testing.T, s string) {
 	t.Helper()
 	for i := 0; i < len(s); i++ {
@@ -157,16 +158,28 @@ func cmdOnlyWhitelistedANSI(t *testing.T, s string) {
 		j := i + 2
 		for j < len(s) {
 			c := s[j]
-			if c == 'm' || c == 'K' || c == 'A' {
+			if c == 'm' || c == 'K' || c == 'A' || c == 'H' || c == 'J' {
 				break
 			}
 			if (c < '0' || c > '9') && c != ';' {
-				t.Fatalf("ESC 序列不属于 SGR/EL/CUU 白名单: %q", s[i:min(i+24, len(s))])
+				t.Fatalf("ESC 序列不属于白名单: %q", s[i:min(i+24, len(s))])
 			}
 			j++
 		}
 		if j >= len(s) {
 			t.Fatalf("未闭合的 ESC 序列: %q", s[i:])
+		}
+		// ADR-072：H 只允许无参（\x1b[H），J 只允许 ED 2（\x1b[2J）。
+		// 带参 CUP、1J/3J/无参 [J 仍判违规。
+		switch s[j] {
+		case 'H':
+			if j-i != 2 {
+				t.Fatalf("只允许无参 CUP home \\x1b[H，实际 %q", s[i:j+1])
+			}
+		case 'J':
+			if s[i:j+1] != "\x1b[2J" {
+				t.Fatalf("只允许 ED 2 清屏 \\x1b[2J，实际 %q", s[i:j+1])
+			}
 		}
 		i = j
 	}
