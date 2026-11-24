@@ -1114,4 +1114,8 @@
   4. 无 schema 迁移、无新环境变量、无键位/渲染改动；P1 落库另立 ADR 评估 ADR-010 写队列背压。
 - 验证：`composer_draft_test.go` TC-A01~A11 P0 断言集 + `composer.go` Load 纯单测；四门禁全绿 + 两条闭环专项 + archtest。
 - 关联：`ADR-026`（回显净化）、`ADR-027`（原地重绘 / 不做倒计时刷新）、`ADR-034`（多行编辑）、`ADR-010`（写事务稀缺，约束 P1 落库）。
+- **patch（v0.8.3，用户线上实测反馈）**：草稿恢复的回显光标与 `echo.cols` 错位，修两处——
+  1. **B/挂起恢复**（`resumeDraft`）：原在 `pasteBlock(正文)` 后写恢复提示，`writeFixed` 自带 CRLF 使提示贴正文末字并把光标甩下一行，而 cols 仍描述正文末行 → 退格擦错位置、提示粘连。修法：提示前置到正文回显之前，末尾输出正文，光标自然停正文末字、cols 对齐。
+  2. **A 限流原地重建**（`rebuildComposerFromDraft`）：Load 后 cols 被 `newline()`+`setSecret()` 双清为空，退格删缓冲却零擦屏。新增 `line_echo.resyncLastLine`：白名单 `CursorUp`+`CR`+`ClearToEOL` 回正文末行重写并重建 cols，只重写末行不重复正文；`up=2`（提交换行 1 行 + 提示尾部 CRLF 1 行）。**边界**：`up` 依赖限流提示不折行，极窄终端折行时可能偏差（常规宽度实测单行，成立）。
+  - 新增 5 项回归测试（提示顺序、宽字符退格精度、单行/多行 cols 重建、正文不重复），适配原 A 路径断言；测试 1028 → 1032，全门禁绿。
 

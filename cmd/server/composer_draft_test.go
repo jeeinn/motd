@@ -140,7 +140,6 @@ func TestDraftRateLimitRetainsInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	typeInto(t, ctx, sess, pc, "回复正文")
-	colsBefore := len(pc.echo.cols)
 	sess.reset()
 	submitBody(t, ctx, sess, pc)
 
@@ -156,13 +155,13 @@ func TestDraftRateLimitRetainsInPlace(t *testing.T) {
 	if pc.draft.body != "回复正文" {
 		t.Fatalf("草稿正文应为原正文，实际 %q", pc.draft.body)
 	}
-	// A 不调 pasteBlock：列宽栈不得叠加第二遍（P0-2 退格错乱根因）。
-	// setSecret(false) 复位会清空 cols（§4.4 既定），故只要求不增长。
-	if len(pc.echo.cols) > colsBefore {
-		t.Fatalf("A 重建不得向 echo.cols 叠加，%d → %d", colsBefore, len(pc.echo.cols))
+	// A 路径 resync 末行：cols 按末行重建（4 字），不是叠加旧栈；
+	// 正文只重写一次（CUU+EL 后），不得出现两遍（P0-2 退格错乱根因）。
+	if len(pc.echo.cols) != 4 {
+		t.Fatalf("重建后 cols 应按末行 4 字重建，实际 %v", pc.echo.cols)
 	}
-	if out := sess.output(); strings.Contains(out, "回复正文") {
-		t.Fatalf("A 路径不得重复回显正文: %q", out)
+	if out := sess.output(); strings.Count(out, "回复正文") != 1 {
+		t.Fatalf("A 路径正文应恰好回显一次（resync 末行），实际: %q", out)
 	}
 	if last := sess.states[len(sess.states)-1]; last != presence.StateComposing {
 		t.Fatalf("A 路径应保持 StateComposing，实际 %v", last)
@@ -478,4 +477,147 @@ func TestDraftEditDoesNotConsumeDraft(t *testing.T) {
 	if pc.draft == nil || pc.draft.body != "回复草稿" {
 		t.Fatal("/edit 不得检出或消费草稿")
 	}
+}
+
+// TestDraftResumeHintBeforeBody 对应线上 defect 1：恢复提示不得粘连在正文末尾。
+// writeFixed 自带尾部 \r\n，提示必须在正文回显之前，否则提示贴正文末字、光标甩下一行。
+func TestDraftResumeHintBeforeBody(t *testing.T) {
+	clock := fixedDraftClock()
+	_, h, _, _, _ := setupDraftRuntime(t, &clock)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	d := &composerDraft{creating: false, threadID: 9, body: "草稿正文"}
+
+	if err := pc.resumeDraft(sess, d); err != nil {
+		t.Fatal(err)
+	}
+	out := sess.output()
+	hintAt := strings.Index(out, "草稿已恢复")
+	bodyAt := strings.Index(out, "草稿正文")
+	if hintAt < 0 || bodyAt < 0 {
+		t.Fatalf("提示与正文都应出现: %q", out)
+	}
+	if hintAt > bodyAt {
+		t.Fatalf("恢复提示必须在正文之前（避免粘连 + 光标错位）: hint=%d body=%d out=%q", hintAt, bodyAt, out)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
+}
+
+// TestDraftResumeBackspaceErasesPrecisely 对应线上 defect 2：恢复后退格要真正
+// 删掉正文末字并正确擦屏。末字「乙」占 2 列，断言 \b \b 恰好 2 组且紧跟正文。
+func TestDraftResumeBackspaceErasesPrecisely(t *testing.T) {
+	clock := fixedDraftClock()
+	ctx, h, _, _, _ := setupDraftRuntime(t, &clock)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	if err := pc.resumeDraft(sess, &composerDraft{creating: false, threadID: 9, body: "草稿甲乙"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.editor.body.Text(); got != "草稿甲乙" {
+		t.Fatalf("恢复正文不符: %q", got)
+	}
+
+	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyBackspace}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.editor.body.Text(); got != "草稿甲" {
+		t.Fatalf("退格应删末字，缓冲现为 %q", got)
+	}
+	out := sess.output()
+	if strings.Count(out, "\b \b") != 2 {
+		t.Fatalf("末字占 2 列，应有 2 组退格擦除，实际 %d: %q", strings.Count(out, "\b \b"), out)
+	}
+	// 擦除序列必须紧跟在回显正文之后（同一行），不能夹在提示与正文之间。
+	// 恢复时先输出提示（自带 CRLF），再回显正文，故 "草稿甲乙" 后应紧接 2 组 \b \b。
+	if !strings.Contains(out, "草稿甲乙\b \b\b \b") {
+		t.Fatalf("退格擦除应紧跟回显正文末字（同一行）: %q", out)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
+}
+
+// TestDraftRateLimitRebuildResyncCaret 验证 A 路径（限流原地重建）的回显状态对齐：
+// 重建后 cols 必须按正文末行宽度重建，退格精确删末字并擦除，且整段正文不重复打印。
+func TestDraftRateLimitRebuildResyncCaret(t *testing.T) {
+	clock := fixedDraftClock()
+	ctx, h, rt, _, _ := setupDraftRuntime(t, &clock)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	threadID := seedFirstPost(t, ctx, pc, sess, rt)
+
+	if err := pc.showDetail(ctx, sess, threadID); err != nil {
+		t.Fatal(err)
+	}
+	sess.reset()
+	if err := pc.command(ctx, sess, command.Invocation{Name: "reply"}); err != nil {
+		t.Fatal(err)
+	}
+	typeInto(t, ctx, sess, pc, "回复正文你好") // 6 个中文字，末行宽 12 列
+	sess.reset()
+	submitBody(t, ctx, sess, pc) // 限流 → A 重建
+
+	if pc.editor == nil || pc.draft == nil {
+		t.Fatal("应进入 A 路径（编辑器与草稿都在）")
+	}
+	// cols 必须按末行重建为 6 段（一段一个中文字），不能为空。
+	if len(pc.echo.cols) != 6 {
+		t.Fatalf("重建后 cols 应按末行 6 字重建，实际 %v", pc.echo.cols)
+	}
+	rebuildOut := sess.output()
+	if strings.Count(rebuildOut, "回复正文你好") > 1 {
+		t.Fatalf("A 路径不得重复打印整段正文: %q", rebuildOut)
+	}
+	if !strings.Contains(rebuildOut, "\x1b[") {
+		t.Fatalf("resync 应发出白名单 CUU/EL 控制序列: %q", rebuildOut)
+	}
+
+	sess.reset()
+	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyBackspace}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.editor.body.Text(); got != "回复正文你" {
+		t.Fatalf("退格应删末字，缓冲现为 %q", got)
+	}
+	if strings.Count(sess.output(), "\b \b") != 2 {
+		t.Fatalf("末字「好」宽 2 列，应有 2 组 \b \b，实际 %q", sess.output())
+	}
+	cmdOnlyWhitelistedANSI(t, sess.output())
+}
+
+// TestDraftRateLimitRebuildMultiLineResync 多行正文时 resync 只重写末行，
+// 断言 cols 对应末行、退格只擦末字，前序行不受影响。
+func TestDraftRateLimitRebuildMultiLineResync(t *testing.T) {
+	clock := fixedDraftClock()
+	ctx, h, rt, _, _ := setupDraftRuntime(t, &clock)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	threadID := seedFirstPost(t, ctx, pc, sess, rt)
+
+	if err := pc.showDetail(ctx, sess, threadID); err != nil {
+		t.Fatal(err)
+	}
+	sess.reset()
+	if err := pc.command(ctx, sess, command.Invocation{Name: "reply"}); err != nil {
+		t.Fatal(err)
+	}
+	typeInto(t, ctx, sess, pc, "第一行")
+	pressEnter(t, ctx, sess, pc) // 换行进第二行
+	typeInto(t, ctx, sess, pc, "末行好")
+	sess.reset()
+	submitBody(t, ctx, sess, pc)
+
+	if got := pc.editor.body.Text(); got != "第一行\n末行好" {
+		t.Fatalf("重建正文不符: %q", got)
+	}
+	// cols 只对应末行「末行好」= 3 字。
+	if len(pc.echo.cols) != 3 {
+		t.Fatalf("cols 应对应末行 3 字，实际 %v", pc.echo.cols)
+	}
+	sess.reset()
+	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyBackspace}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.editor.body.Text(); got != "第一行\n末行" {
+		t.Fatalf("退格应删末行末字，实际 %q", got)
+	}
+	cmdOnlyWhitelistedANSI(t, sess.output())
 }

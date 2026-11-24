@@ -911,7 +911,18 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 	}
 	p.editor = e
 	p.echo.setSecret(false)
-	return p.writeFixed(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second)))
+	if err := p.writeFixed(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second))); err != nil {
+		return err
+	}
+	// A 路径屏幕已有正文回显，Load 重建缓冲后 echo.cols 被 newline()+setSecret()
+	// 双清为空，光标停在提示下一行——退格会删缓冲却零擦屏（与 B 修复前同源）。
+	// 回到正文末行重写一次以重建 cols：不重复整段正文（仅末行），白名单 CUU/EL。
+	// up=2 = 提交时 bodyKey 的 echo.newline() 1 行 + writeFixed 尾部 CRLF 1 行。
+	lines := e.body.Lines()
+	if len(lines) > 0 {
+		p.echo.resyncLastLine(lines[len(lines)-1], 2)
+	}
+	return nil
 }
 
 // failWithDraftHint 是路径 B：固定错误文案走 fail()，其后追加一行草稿保留提示。
@@ -947,9 +958,16 @@ func (p *pageController) resumeDraft(sess pageSession, d *composerDraft) error {
 		p.echo.paste(d.title)
 		p.echo.newline()
 	}
+	// 恢复提示必须在正文回显**之前**：writeFixed 自带尾部 \r\n，若放在
+	// pasteBlock 之后，光标被甩到提示下一行而 echo.cols 仍描述正文末行，
+	// 退格会在错误位置擦除（屏幕正文不消失）；且提示会紧贴正文末字。
+	// 前置后最后输出的是正文——光标停在正文末字、cols 与之一一对应，退格正确。
+	if err := p.writeFixed(sess, composerDraftRestoredHint); err != nil {
+		return err
+	}
 	p.echo.pasteBlock(d.body)
 	_ = sess.SetState(presence.StateComposing)
-	return p.writeFixed(sess, composerDraftRestoredHint)
+	return nil
 }
 
 func (p *pageController) submitEditor(ctx context.Context, sess pageSession) error {
