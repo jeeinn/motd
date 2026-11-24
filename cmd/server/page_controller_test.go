@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,21 +68,33 @@ type fakePageSession struct {
 	buf       bytes.Buffer
 	principal auth.Principal
 	states    []presence.State
+	width     uint32 // 终端列数：虚拟网格复现窄屏折行用，0 表示未显式设置
 }
 
+// newFakePageSession 保持历史默认 80 列——既有 80 列调用点行为逐字节不变。
 func newFakePageSession(userID int64) *fakePageSession {
+	return newFakePageSessionWithWidth(80, userID)
+}
+
+// newFakePageSessionWithWidth 造一个指定列数的会话替身，供
+// 24/40/80/125/200 列的可配宽度回归使用（W1）。高度固定 24、term 固定 xterm，
+// 与旧实现的非宽度字段完全一致。
+func newFakePageSessionWithWidth(width uint32, userID int64) *fakePageSession {
 	p := auth.Guest("SHA256:fake")
 	if userID > 0 {
 		p = auth.Principal{Kind: auth.KindUser, UserID: userID, KeyFingerprint: "SHA256:fake"}
 	}
-	return &fakePageSession{principal: p}
+	return &fakePageSession{principal: p, width: width}
 }
 
 func (s *fakePageSession) Write(p []byte) (int, error) { return s.buf.Write(p) }
 func (s *fakePageSession) ID() string                  { return "fake-session" }
 func (s *fakePageSession) Principal() auth.Principal   { return s.principal }
 func (s *fakePageSession) Window() (uint32, uint32, string) {
-	return 80, 24, "xterm"
+	if s.width == 0 {
+		return 80, 24, "xterm" // 直接结构体字面量构造的兜底，行为同旧实现
+	}
+	return s.width, 24, "xterm"
 }
 func (s *fakePageSession) SetState(st presence.State) error {
 	s.states = append(s.states, st)
@@ -141,6 +154,69 @@ func cmdOnlyWhitelistedANSI(t *testing.T, s string) {
 			t.Fatalf("未闭合的 ESC 序列: %q", s[i:])
 		}
 		i = j
+	}
+}
+
+// cuuRE 只认 CUU（\x1b[<n>A）。SGR（\x1b[2m/\x1b[0m）与 EL（\x1b[K）
+// 的终结符不是 A，天然不匹配；这是替代 Contains("\x1b[") 假通过判据的基础。
+var cuuRE = regexp.MustCompile(`\x1b\[(\d+)A`)
+
+// cuuParams 按出现顺序提取输出字节流里所有 CUU 的上移行数 n。
+// 只认带数字的 \x1b[<n>A（服务端 safe.CursorUp 的产物）；畸形参数跳过，不 panic。
+func cuuParams(out string) []int {
+	matches := cuuRE.FindAllStringSubmatch(out, -1)
+	params := make([]int, 0, len(matches))
+	for _, m := range matches {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		params = append(params, n)
+	}
+	return params
+}
+
+// TestCuuParamsExtractsOnlyCUU 自证：全部 CUU 数值按序提取，SGR/EL 不误报。
+// 旧判据 strings.Contains(out, "\x1b[") 在灰阶 hint（永远含 \x1b[2m）下恒真。
+func TestCuuParamsExtractsOnlyCUU(t *testing.T) {
+	got := cuuParams("前缀\x1b[2m灰阶\x1b[0m\x1b[K\x1b[2A甲\x1b[5A\x1b[K尾\x1b[10A")
+	want := []int{2, 5, 10}
+	if len(got) != len(want) {
+		t.Fatalf("CUU 参数个数不符：got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("CUU 参数[%d] 不符：got %d want %d（全量 %v）", i, got[i], want[i], got)
+		}
+	}
+
+	// 纯 SGR + EL：旧判据会假通过，cuuParams 必须为空。
+	dimOnly := "\x1b[2m[提示] 仅灰阶与清行\x1b[0m\x1b[K"
+	if n := len(cuuParams(dimOnly)); n != 0 {
+		t.Fatalf("SGR/EL 不应被判为 CUU，实际提取到 %v", cuuParams(dimOnly))
+	}
+	if n := len(cuuParams("")); n != 0 {
+		t.Fatalf("空串不应有 CUU，实际 %v", cuuParams(""))
+	}
+}
+
+// TestFakePageSessionWidth 自证：默认 80 列不变，指定宽度可在
+// 24/40/80/125/200 列下取到（W1 验收）。
+func TestFakePageSessionWidth(t *testing.T) {
+	w, h, term := newFakePageSession(1).Window()
+	if w != 80 || h != 24 || term != "xterm" {
+		t.Fatalf("默认宽度应保持 80/24/xterm，实际 %d/%d/%q", w, h, term)
+	}
+	for _, width := range []uint32{24, 40, 80, 125, 200} {
+		gotW, gotH, gotTerm := newFakePageSessionWithWidth(width, 1).Window()
+		if gotW != width || gotH != 24 || gotTerm != "xterm" {
+			t.Errorf("宽度 %d 未生效：实际 %d/%d/%q", width, gotW, gotH, gotTerm)
+		}
+	}
+	// 直接结构体字面量（无构造函数）也应回落旧默认，避免新字段引入零宽回归。
+	gotW, gotH, _ := (&fakePageSession{}).Window()
+	if gotW != 80 || gotH != 24 {
+		t.Fatalf("零值会话应回落 80/24，实际 %d/%d", gotW, gotH)
 	}
 }
 

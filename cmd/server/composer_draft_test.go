@@ -13,6 +13,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/input"
 	"github.com/jeeinn/motd/internal/application/presence"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
+	"github.com/jeeinn/motd/internal/presentation/terminal/i18n"
 )
 
 // setupDraftRuntime 与 setupMVPRuntime 同口径（真实 SQLite + 真实写入队列 +
@@ -122,9 +123,9 @@ func TestDraftRetryableErrorClassification(t *testing.T) {
 	}
 }
 
-// TestDraftRateLimitRetainsInPlace 对应 TC-A01：限流走 A 路径，编辑器原地重建，
-// 缓冲恰为原正文一次；提交后的新增输出不得再回显第二份正文（不调 pasteBlock，
-// 也不向 echo.cols 叠加列宽），保持 StateComposing。
+// TestDraftRateLimitRetainsInPlace 对应 TC-A01：限流走 A 路径（方案 B 追加重建），
+// 编辑器原地重建、缓冲恰为原正文一次；等待提示之后正文整段追加回显一遍，
+// 故提交后输出中共见两遍正文（提交前一遍 + 重建追加一遍），cols 按末行重建。
 func TestDraftRateLimitRetainsInPlace(t *testing.T) {
 	clock := fixedDraftClock()
 	ctx, h, rt, _, _ := setupDraftRuntime(t, &clock)
@@ -140,7 +141,7 @@ func TestDraftRateLimitRetainsInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	typeInto(t, ctx, sess, pc, "回复正文")
-	sess.reset()
+	// 不 reset：保留完整会话输出，验证 D6 代价——提交前回显一遍 + B 追加重建一遍。
 	submitBody(t, ctx, sess, pc)
 
 	if pc.editor == nil {
@@ -155,13 +156,13 @@ func TestDraftRateLimitRetainsInPlace(t *testing.T) {
 	if pc.draft.body != "回复正文" {
 		t.Fatalf("草稿正文应为原正文，实际 %q", pc.draft.body)
 	}
-	// A 路径 resync 末行：cols 按末行重建（4 字），不是叠加旧栈；
-	// 正文只重写一次（CUU+EL 后），不得出现两遍（P0-2 退格错乱根因）。
+	// 方案 B 追加重建：pasteBlock 逐 rune 回显，cols 按末行重建（4 字），不是叠加旧栈；
+	// 正文共两遍（提交前一遍 + 重建追加一遍），无 CUU/无 EL（P0-2 退格错乱不复发）。
 	if len(pc.echo.cols) != 4 {
 		t.Fatalf("重建后 cols 应按末行 4 字重建，实际 %v", pc.echo.cols)
 	}
-	if out := sess.output(); strings.Count(out, "回复正文") != 1 {
-		t.Fatalf("A 路径正文应恰好回显一次（resync 末行），实际: %q", out)
+	if out := sess.output(); strings.Count(out, "回复正文") != 2 {
+		t.Fatalf("B 追加重建正文应回显两遍（提交前 + 重建追加），实际: %q", out)
 	}
 	if last := sess.states[len(sess.states)-1]; last != presence.StateComposing {
 		t.Fatalf("A 路径应保持 StateComposing，实际 %v", last)
@@ -535,9 +536,9 @@ func TestDraftResumeBackspaceErasesPrecisely(t *testing.T) {
 	cmdOnlyWhitelistedANSI(t, out)
 }
 
-// TestDraftRateLimitRebuildResyncCaret 验证 A 路径（限流原地重建）的回显状态对齐：
-// 重建后 cols 必须按正文末行宽度重建，退格精确删末字并擦除，且整段正文不重复打印。
-func TestDraftRateLimitRebuildResyncCaret(t *testing.T) {
+// TestDraftRateLimitRebuildBPath 验证 A 路径（限流原地重建）走方案 B 追加重建后的回显状态对齐：
+// 正文整段追加回显一遍、无 CUU；cols 按正文末行宽度重建，退格精确删末字并擦除。
+func TestDraftRateLimitRebuildBPath(t *testing.T) {
 	clock := fixedDraftClock()
 	ctx, h, rt, _, _ := setupDraftRuntime(t, &clock)
 	sess := newFakePageSession(1)
@@ -552,7 +553,7 @@ func TestDraftRateLimitRebuildResyncCaret(t *testing.T) {
 		t.Fatal(err)
 	}
 	typeInto(t, ctx, sess, pc, "回复正文你好") // 6 个中文字，末行宽 12 列
-	sess.reset()
+	// 不 reset：保留完整会话输出，验证 D6 代价——提交前回显一遍 + B 追加重建一遍。
 	submitBody(t, ctx, sess, pc) // 限流 → A 重建
 
 	if pc.editor == nil || pc.draft == nil {
@@ -563,11 +564,12 @@ func TestDraftRateLimitRebuildResyncCaret(t *testing.T) {
 		t.Fatalf("重建后 cols 应按末行 6 字重建，实际 %v", pc.echo.cols)
 	}
 	rebuildOut := sess.output()
-	if strings.Count(rebuildOut, "回复正文你好") > 1 {
-		t.Fatalf("A 路径不得重复打印整段正文: %q", rebuildOut)
+	if strings.Count(rebuildOut, "回复正文你好") != 2 {
+		t.Fatalf("B 追加重建正文应回显两遍（提交前 + 重建追加），实际: %q", rebuildOut)
 	}
-	if !strings.Contains(rebuildOut, "\x1b[") {
-		t.Fatalf("resync 应发出白名单 CUU/EL 控制序列: %q", rebuildOut)
+	// 不能用 Contains("\x1b[")——灰阶 SGR 也含该前缀会假通过；只精确查 CUU。
+	if len(cuuParams(rebuildOut)) != 0 {
+		t.Fatalf("B 路径应无 CUU，实际 %v: %q", cuuParams(rebuildOut), rebuildOut)
 	}
 
 	sess.reset()
@@ -583,9 +585,10 @@ func TestDraftRateLimitRebuildResyncCaret(t *testing.T) {
 	cmdOnlyWhitelistedANSI(t, sess.output())
 }
 
-// TestDraftRateLimitRebuildMultiLineResync 多行正文时 resync 只重写末行，
-// 断言 cols 对应末行、退格只擦末字，前序行不受影响。
-func TestDraftRateLimitRebuildMultiLineResync(t *testing.T) {
+// TestDraftRateLimitRebuildMultiLineCols 多行正文走方案 B 追加重建时，
+// 正文整段追加回显（含前序行），cols 按末行重建；断言 cols 对应末行、
+// 退格只擦末字，前序行不受影响。
+func TestDraftRateLimitRebuildMultiLineCols(t *testing.T) {
 	clock := fixedDraftClock()
 	ctx, h, rt, _, _ := setupDraftRuntime(t, &clock)
 	sess := newFakePageSession(1)
@@ -629,7 +632,7 @@ func TestGuideHintUsesDimStyle(t *testing.T) {
 	pc := newInputHandler().newPageController(sess)
 
 	sess.reset()
-	if err := pc.writeHint(sess, composerTitleHint); err != nil {
+	if err := pc.writeHint(sess, i18n.KeyComposerTitle); err != nil {
 		t.Fatal(err)
 	}
 	hintOut := sess.output()
@@ -660,17 +663,20 @@ func TestGuideHintUsesDimStyle(t *testing.T) {
 	cmdOnlyWhitelistedANSI(t, errOut)
 }
 
-// O1-T2 单一事实来源：[提示] 前缀只在 writeHint 输出层拼接，hint 常量字面量本身
-// 不得手写前缀，防止回退到 9 处重复手写。
+// O1-T2 / W14 单一事实来源：前缀只在 writeHint 输出层查表拼接，hintCatalog 的
+// 9 条文案（hintPrefix key 本身除外）两种 locale 都不得手写前缀。
 func TestHintConstantsCarryNoPrefix(t *testing.T) {
-	hints := []string{
-		composerTitleHint, composerBodyHint, composerBodyAfterTitleHint, composerEditHint,
-		composerDraftRetainedRateHint, composerDraftSuspendedHint, composerDraftRetainedHint,
-		composerDraftRestoredHint, composerDraftDiscardedHint,
-	}
-	for _, h := range hints {
-		if strings.Contains(h, "[提示]") {
-			t.Errorf("hint 常量字面量不应手写前缀: %q", h)
+	for _, loc := range []string{i18n.LocaleZH, i18n.LocaleEN} {
+		for _, key := range i18n.Keys() {
+			if key == i18n.KeyHintPrefix {
+				continue // 该 key 的值就是前缀本身
+			}
+			h := i18n.Lookup(loc, key)
+			for _, prefix := range []string{"[提示]", "[错误]", "[Info]", "[Error]"} {
+				if strings.Contains(h, prefix) {
+					t.Errorf("%s/%s 文案不应手写前缀 %q: %q", loc, key, prefix, h)
+				}
+			}
 		}
 	}
 	// 走 writeFixed 的超限错误同样不带前缀。
@@ -685,7 +691,7 @@ func TestHintSingleCRLF(t *testing.T) {
 	sess := newFakePageSession(1)
 	pc := newInputHandler().newPageController(sess)
 	sess.reset()
-	if err := pc.writeHint(sess, composerBodyHint); err != nil {
+	if err := pc.writeHint(sess, i18n.KeyComposerBody); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(sess.output(), "\r\n"); n != 1 {

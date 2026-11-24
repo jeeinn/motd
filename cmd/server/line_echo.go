@@ -18,6 +18,7 @@ package main
 
 import (
 	"io"
+	"strings"
 
 	"github.com/jeeinn/motd/internal/application/input"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
@@ -25,13 +26,26 @@ import (
 
 // lineEcho 是每会话一个的行编辑回显器。cols 与编辑器的 runes 一一对应，
 // 记录每个输入字符实际占用的终端列数，用于宽字符（中文/Emoji）正确退格。
+// width 是终端列宽（0=未知，保持旧行为）；runes 与 cols 一一对应，保存净化后的
+// 可见文本，供超宽逻辑行跨物理行退格时重绘定位光标（B7，W10）。
 type lineEcho struct {
 	out    io.Writer
 	secret bool
 	cols   []int
+	width  int
+	runes  []string
 }
 
 func newLineEcho(out io.Writer) *lineEcho { return &lineEcho{out: out} }
+
+// newLineEchoWithWidth 注入终端列宽。宽度未知（<=0）时退化为旧的物理行假设
+// （CUU(1)、\b \b），兼容 80 列默认、直接 newLineEcho 的既有单测与无 Window 的写入器。
+func newLineEchoWithWidth(out io.Writer, width int) *lineEcho {
+	if width < 0 {
+		width = 0
+	}
+	return &lineEcho{out: out, width: width}
+}
 
 // setSecret 切换敏感字段模式：true 时只回显 '*'，不回显原文。
 // P1 的邮箱登录密码字段应调用 setSecret(true)；viewmodel.Field.Secret
@@ -39,26 +53,34 @@ func newLineEcho(out io.Writer) *lineEcho { return &lineEcho{out: out} }
 func (e *lineEcho) setSecret(v bool) {
 	e.secret = v
 	e.cols = nil
+	e.runes = nil
 }
 
-func (e *lineEcho) reset() { e.cols = nil }
+func (e *lineEcho) reset() { e.cols = nil; e.runes = nil }
 
-// rune 回显单个输入字符。返回净化结果，便于调用方判断是否保留。
-func (e *lineEcho) rune(r rune) {
+// echoRune 只输出单个净化后的 rune，不触碰列宽栈——跨物理行重绘时复用。
+// 返回净化后的可见文本，供调用方按 DisplayWidth 精确累加 cols。
+func (e *lineEcho) echoRune(r rune) string {
 	if e.secret {
 		_, _ = io.WriteString(e.out, "*")
-		e.cols = append(e.cols, 1)
-		return
+		return "*"
 	}
 	clean := safe.SanitizeText(string(r))
 	if clean != "" {
 		_, _ = io.WriteString(e.out, clean)
 	}
+	return clean
+}
+
+// rune 回显单个输入字符。返回净化结果，便于调用方判断是否保留。
+func (e *lineEcho) rune(r rune) {
+	clean := e.echoRune(r)
 	w := 0
 	for _, c := range clean {
 		w += safe.DisplayWidth(c)
 	}
 	e.cols = append(e.cols, w)
+	e.runes = append(e.runes, clean)
 }
 
 // paste 逐 rune 回显粘贴块，与编辑器按 rune 追加缓冲保持一致。
@@ -83,46 +105,63 @@ func (e *lineEcho) pasteBlock(s string) {
 }
 
 // backspace 只在编辑器确实删掉一个 rune 时调用；宽字符按显示列数擦除。
+// 宽度已知且删除使当前物理行变空时，补一步跨行归位（B7）：
+// \b \b 只清当前物理行，光标会停在空行首，与缓冲光标（上一物理行末）不符。
+// 用白名单 CUU(1) 回到上一物理行，重写其已净化的可见文本把光标定位到行末。
 func (e *lineEcho) backspace(deleted bool) {
 	if !deleted || len(e.cols) == 0 {
 		return
 	}
 	w := e.cols[len(e.cols)-1]
+	var breaks []int
+	if e.width > 0 {
+		breaks = safe.MeasureLine(strings.Join(e.runes, ""), e.width).Breaks
+	}
 	e.cols = e.cols[:len(e.cols)-1]
+	e.runes = e.runes[:len(e.runes)-1]
 	for i := 0; i < w; i++ {
 		_, _ = io.WriteString(e.out, "\b \b")
 	}
+	if e.width <= 0 || len(breaks) == 0 || len(e.runes) == 0 {
+		return
+	}
+	// 删除前末物理行的起点 == 删除后的 rune 总数 → 被删 rune 是该物理行唯一内容。
+	last := breaks[len(breaks)-1]
+	if last != len(e.runes) {
+		return
+	}
+	start := 0
+	if len(breaks) >= 2 {
+		start = breaks[len(breaks)-2]
+	}
+	rest := []rune(strings.Join(e.runes, ""))
+	if start > len(rest) {
+		return
+	}
+	_, _ = io.WriteString(e.out, safe.CursorUp(1))
+	_, _ = io.WriteString(e.out, string(rest[start:])) // 已净化文本，直接回写安全
 }
 
-// mergeBackspace 回显"空行退格跨行合并"。调用时光标停在刚被删除的空行行首
-// （列 0）：先用白名单 CUU 上移一行回到上一行，\r 回车首，EL 清掉上一行旧内容，
-// 再把合并后的上一行文本逐 rune 经 SanitizeText 重写一遍。这样光标自然停在
-// 上一行末尾（两行拼接处），用户后续输入接在那里。
+// mergeBackspace 回显「空行退格跨行合并」。调用时光标停在刚被删除的空行行首
+// （列 0）：先用白名单 CUU 上移 n 行回到上一逻辑行的起始物理行（n=上一逻辑行
+// 占用的物理行数，宽度未知时退化为 1），\r 回车首，EL 清掉起始物理行，
+// 再把合并后的上一逻辑行文本逐 rune 经 SanitizeText 重写一遍——重写会覆盖
+// 该逻辑行占用的全部物理行，消除超宽行的上方碎片。光标自然停在其末尾。
 //
 // 控制序列只由 safe 包的服务端白名单函数生成（CursorUp / ClearToEOL），
 // 绝不内联 ESC 字面量、绝不发 CUP/CUD/ED/DECSET；用户文本仍走 SanitizeText，
 // 与编辑控制分属两条写入路径（§3.5 信任域分离）。列宽栈重建为合并行各字符宽度。
 func (e *lineEcho) mergeBackspace(merged string) {
-	_, _ = io.WriteString(e.out, safe.CursorUp(1))
-	_, _ = io.WriteString(e.out, "\r")
-	_, _ = io.WriteString(e.out, safe.ClearToEOL())
-	e.cols = nil
-	for _, r := range merged {
-		e.rune(r)
+	up := 1
+	if e.width > 0 {
+		up = safe.MeasureLine(merged, e.width).Rows
 	}
-}
-
-// resyncLastLine 回到上方 up 行的行首、清行、按 rune 重写 lastLine，并重建 cols。
-// 供「屏幕已有正文回显、但缓冲被重建导致 cols 丢失」的场景（限流原地重建）使用：
-// 重写后光标自然停在末行末字、cols 与之一一对应，退格能精确擦除（ADR-067）。
-// up 是代码路径推算的行数（非用户输入），只走白名单 CUU/CR/EL，用户文本仍经
-// SanitizeText，与 mergeBackspace 同一信任域（不扩 ADR-027 白名单）。
-func (e *lineEcho) resyncLastLine(lastLine string, up int) {
 	_, _ = io.WriteString(e.out, safe.CursorUp(up))
 	_, _ = io.WriteString(e.out, "\r")
 	_, _ = io.WriteString(e.out, safe.ClearToEOL())
 	e.cols = nil
-	for _, r := range lastLine {
+	e.runes = nil
+	for _, r := range merged {
 		e.rune(r)
 	}
 }
@@ -138,6 +177,7 @@ func (e *lineEcho) newline() {
 func (e *lineEcho) preloadedSlash() {
 	_, _ = io.WriteString(e.out, "/")
 	e.cols = append(e.cols, 1)
+	e.runes = append(e.runes, "/")
 }
 
 // echoCommandKey 把斜杠命令行的按键安全地回显。

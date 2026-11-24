@@ -5,6 +5,8 @@ package terminal
 import (
 	"strings"
 	"testing"
+
+	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
 
 func crlf(lines ...string) string {
@@ -82,6 +84,52 @@ func TestRenderFrameOnlyWhitelistedSequences(t *testing.T) {
 		}
 	}
 	assertOnlySGRAndCursor(t, got)
+}
+
+// TestRenderFrameWrapConsistency 交叉核对 RenderFrame 的降级判定与 W8 物理行计算：
+// 不超宽时两者行数一致且走原地重绘；超宽时两者都判定降级追加（消除双口径）。
+func TestRenderFrameWrapConsistency(t *testing.T) {
+	esc := string(rune(0x1b))
+	for _, tc := range []struct {
+		name  string
+		text  string
+		width int
+	}{
+		{"ascii fits", crlf(strings.Repeat("a", 80)), 80},
+		{"cjk fits", crlf(strings.Repeat("中", 40)), 80},
+		{"ascii folds", crlf(strings.Repeat("a", 125)), 40},
+		{"cjk folds", crlf(strings.Repeat("中", 40)), 40},
+		{"sgr ignored", crlf(esc + "[2m" + strings.Repeat("a", 125) + esc + "[0m"), 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := safe.MeasureWrap(tc.text, tc.width)
+			got, n := RenderFrame(tc.text, 2, tc.width)
+			if info.OverWide {
+				if got != tc.text {
+					t.Fatalf("W8 判超宽时 RenderFrame 必须降级追加，实际 %q", got)
+				}
+				if strings.Contains(got, "\x1b[2A") {
+					t.Fatal("降级后不得输出 CursorUp")
+				}
+				return
+			}
+			// 不超宽：每个逻辑行恰占一个物理行，W8 行数与 RenderFrame 返回行数一致。
+			logical := strings.Count(strings.TrimSuffix(tc.text, "\r\n"), "\r\n") + 1
+			if info.Rows != logical {
+				t.Fatalf("W8 物理行数应等于逻辑行数 %d，实际 %d", logical, info.Rows)
+			}
+			wantN := logical
+			if 2 > wantN {
+				wantN = 2 // RenderFrame 返回 max(逻辑行数, prevLines)
+			}
+			if n != wantN {
+				t.Fatalf("RenderFrame 行数应为 %d，实际 %d", wantN, n)
+			}
+			if !strings.HasPrefix(got, "\x1b[2A") {
+				t.Fatalf("不超宽应走原地重绘，实际 %q", got)
+			}
+		})
+	}
 }
 
 // assertOnlySGRAndCursor 检查输出里的每个 ESC 序列都属于白名单。

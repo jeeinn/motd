@@ -11,7 +11,6 @@ package terminal
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
@@ -29,7 +28,9 @@ func RenderFrame(text string, prevLines, width int) (string, int) {
 	if n == 0 {
 		return text, 0
 	}
-	if prevLines <= 0 || (width > 0 && overWide(lines, width)) {
+	// 与编辑器回显层共用 safe.OverWide 的折行口径，消除双口径：
+	// 超宽则退回追加模式（终端会自动折行、行数不可靠，宁可刷屏也不错位）。
+	if prevLines <= 0 || (width > 0 && safe.OverWide(text, width)) {
 		return text, n
 	}
 
@@ -50,34 +51,4 @@ func RenderFrame(text string, prevLines, width int) (string, int) {
 		b.WriteString("\r\n")
 	}
 	return b.String(), total
-}
-
-// overWide 检测任一行是否超出终端宽度。SGR 序列按 0 列计，避免误判。
-func overWide(lines []string, width int) bool {
-	for _, l := range lines {
-		if visibleWidth(l) > width {
-			return true
-		}
-	}
-	return false
-}
-
-func visibleWidth(s string) int {
-	w := 0
-	for i := 0; i < len(s); {
-		if s[i] == 0x1b && i+2 < len(s) && s[i+1] == '[' {
-			j := i + 2
-			for j < len(s) && s[j] != 'm' {
-				j++
-			}
-			if j < len(s) {
-				i = j + 1
-				continue
-			}
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		w += safe.DisplayWidth(r)
-		i += size
-	}
-	return w
 }

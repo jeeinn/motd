@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-24
+
+次要版本：显示层物理行模型 + 国际化（i18n）基建 + 窄屏限流提示折行散落修复。无 schema 迁移、无新依赖、无新环境变量、无键位改动；测试函数 1041 → 1067。发版动作待用户单独授权，本条按待发版口径定稿。
+
+### Added
+
+- **物理行模型工具（W8-W9）**：新增 `internal/presentation/terminal/safe/wrap.go` 纯函数 `MeasureLine` / `MeasureWrap` / `OverWide`，按 `DisplayWidth` 逐 rune 计算逻辑行的物理行数、折行点与 pending wrap（占满末列时延后到下个字符才折，宽字符整字折、SGR 计 0 列）。（ADR-070）
+- **i18n 骨架（W11-W13）**：新增 `internal/presentation/terminal/i18n/catalog.go`，10 个 hint key × zh/en 两 locale 文案表（zh 原文逐字保留、en 含 `%s` 槽位）与 notice 前缀查表；`pageController` 加会话 locale（默认 zh，测试可注入），`writeHint` / `hintPrefix` / `noticePrefix` 一律查表，不再散落字面量。（ADR-070）
+- **双语 hint 与 `RenderScreenWithLocale`（W14）**：中英双语 hint 参数化测试；`RenderScreenWithLocale` 显式承载 locale，原 `RenderScreen` 委托 zh 保持签名与逐字节行为；locale 不进 viewmodel、不做渲染后字节替换，守 ADR-019 信任域。notice 前缀 zh `[提示]` / `[错误]` → en `[Info]` / `[Error]`。（ADR-070）
+
+### Changed
+
+- **折行口径统一（W9）**：`RenderFrame` 的 `overWide` / `visibleWidth` 重复逻辑改为共用 `safe.OverWide`，消除整屏渲染与编辑器回显层的双口径；宽度未知（`width<=0`）退化为旧行为。（ADR-070）
+- **限流原地重建改为方案 B 追加重建（W4-W7）**：删除 `resyncLastLine`，A 路径改 `writeHint` 写等待提示 + `pasteBlock` 把正文整段追加回显，光标落在正文末字、`cols` 逐 rune 重建，不再依赖"限流提示不折行"假设；不整屏重绘、倒计时仍静态。（ADR-069，修订 ADR-067 决策 2）
+
+### Fixed
+
+- **窄屏限流提示折行导致正文字符散落**：125 列提示在 <126 列终端物理折行时，`resyncLastLine(up=2)` 跳进提示中间、`EL` 只清单行清不掉碎片；方案 B 根治，虚拟网格 TC-01（24/40/125 列）与 TC-02（80×24，提示折 2 行）验证无 CUU、无碎片。（ADR-069）
+- **B7 超宽行退格残留（W10）**：`mergeBackspace` / `backspace` 按 W8 物理行数 `CursorUp(n)`，`\b \b` 仍按逻辑宽逐 rune 擦除；超宽行→Enter→Backspace 无错位残留，v0.8.3 退格精度不回退（TC-04 / TC-05）。（ADR-070）
+
 ## [0.8.4] - 2026-11-24
 
 补丁版本：编辑器引导提示优化——hint 统一灰阶并加 `[提示]` 前缀，回复成功后焦点锚定到自己的回复。无 schema 迁移、无新依赖、无新环境变量、无键位/渲染改动；测试函数 1032 → 1041。

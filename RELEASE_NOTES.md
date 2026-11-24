@@ -1,3 +1,41 @@
+## v0.9.0
+
+**发布日期**：2026-11-24
+**Git tag**：`v0.9.0`
+**Module**：`github.com/jeeinn/motd`
+
+> 待发版：编码完成、四门禁 / 两闭环 / archtest 全绿，版本号已定；发版动作（commit → PR → CI → tag → Release）与部署待用户单独授权（W18），尚未执行。下方按拟发布口径定稿，不覆盖下方 v0.8.4 及历史段落。
+
+### D6 代价（方案 B：A 路径追加重建，如实登记）
+
+1. **正文多回显一遍（刷屏）**：限流原地重建时，为重建列宽栈、保持退格精度，方案 B 在等待提示之后用 `pasteBlock` 把正文整段追加回显一遍。用户会在屏幕上看到同一段正文出现两遍（提交前一遍 + 重建追加一遍），长正文时刷屏明显。
+2. **提示离光标变远（长正文时倒计时可能被顶出屏幕）**：等待提示打印在追加回显的正文之前，光标停在正文末行末字。正文越长，提示与光标的物理行距离越大；窄屏折行叠加后，限流倒计时（如 `1m0s`）可能被顶出可视屏幕。倒计时不自动刷新（守 ADR-027）。
+
+### B4 可达面（窄屏折行不是个例）
+
+- 限流提示实测显示宽度 **125 列**（含 `[提示] ` 前缀与 `1m0s`）。任何 **< 126 列**的终端都会物理折行——**80×24**（SSH 最常见默认）、100 列、120 列全部命中；约 150 列宽屏才"正常"。故该缺陷可达面是绝大多数用户，而非边缘个例。
+- 需区分：物理折行是终端行为（可接受），光标错位散落是代码缺陷（方案 B 已消除）。
+
+## 本次修复概览（拟发布内容）
+
+- **窄屏散落根治**：限流原地重建改走方案 B——删除 `resyncLastLine`，等待提示用 `writeHint` 按 locale 查表输出，随后 `pasteBlock` 把正文整段追加回显，光标落在正文末字、`cols` 逐 rune 重建；光标落点由输出流末尾决定，提示折几行都不影响，不再有硬编码 `up` 跳进提示中间的问题。（ADR-069）
+- **退格精度保持与 B7 修复**：`lineEcho` 注入终端宽度，`mergeBackspace` / `backspace` 按物理行数计算 `CursorUp(n)`、`\b \b` 按逻辑宽逐 rune 擦除；超宽行→Enter→Backspace 无错位残留，v0.8.3 的中文宽字符退格精度不回退。B7 同源缺陷随本期 W10 一并处理。（ADR-070）
+- **i18n 基建：中英双语 hint + notice 前缀**：10 个 hint key × zh/en 两 locale 文案表（zh 原文逐字保留，默认中文行为与 v0.8.4 逐字节一致），会话 locale 默认 zh、测试可注入，前缀 zh `[提示]` / `[错误]` → en `[Info]` / `[Error]`；`RenderScreenWithLocale` 承载 locale，原 `RenderScreen` 委托 zh。locale 不进 viewmodel、不做渲染后字节替换，信任域与零回显边界不变；全量 UI 翻译不在本期范围。（ADR-070）
+- **物理行模型**：`safe/wrap.go` 纯函数 `MeasureLine` / `MeasureWrap` / `OverWide` 统一折行口径（含 pending wrap、宽字符整字折、SGR 计 0 列），`RenderFrame` 与编辑器回显层共用 `OverWide`，消除双口径；宽度未知退化为旧行为。（ADR-070）
+
+## 验证（定稿口径）
+
+- 四门禁：`git ls-files '*.go' | xargs gofmt -l` 零输出、`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿。
+- 两条闭环专项 `TestMVPSSHClosedLoop` / `TestMVPRestartAndBackupWithRealData` 绿；archtest 绿；CI Race 待发版流水线复核。
+- 虚拟网格 TC-01（24/40/125 列无 CUU、无碎片）/ TC-02（80×24 提示折 2 行无散落）/ TC-04（退格精度不回退）/ TC-05（B7 超宽行合并无错位残留），双语参数化（40 vs 200 列正文段字节与文案长度无关、前缀 zh/en 正确）全绿；`TestHintSingleCRLF` 保持不参数化。
+- 测试函数 **1041 → 1067**（ADR-069 落地阶段 1041 → 1056，ADR-070 落地后累计 1067）。无 schema 迁移、无新依赖、无新环境变量、无键位改动。
+
+## 变更明细
+
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.9.0]` 段、[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-069（方案 B 追加重建，修订 ADR-067 决策 2）与 ADR-070（物理行模型 + i18n 基建），以及设计稿 [`docs/DESIGN-v090-display-i18n.md`](docs/DESIGN-v090-display-i18n.md)。
+
+---
+
 # Release Notes — v0.8.4
 
 **发布日期**：2026-11-24

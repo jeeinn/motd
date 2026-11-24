@@ -1118,6 +1118,7 @@
   1. **B/挂起恢复**（`resumeDraft`）：原在 `pasteBlock(正文)` 后写恢复提示，`writeFixed` 自带 CRLF 使提示贴正文末字并把光标甩下一行，而 cols 仍描述正文末行 → 退格擦错位置、提示粘连。修法：提示前置到正文回显之前，末尾输出正文，光标自然停正文末字、cols 对齐。
   2. **A 限流原地重建**（`rebuildComposerFromDraft`）：Load 后 cols 被 `newline()`+`setSecret()` 双清为空，退格删缓冲却零擦屏。新增 `line_echo.resyncLastLine`：白名单 `CursorUp`+`CR`+`ClearToEOL` 回正文末行重写并重建 cols，只重写末行不重复正文；`up=2`（提交换行 1 行 + 提示尾部 CRLF 1 行）。**边界**：`up` 依赖限流提示不折行，极窄终端折行时可能偏差（常规宽度实测单行，成立）。
   - 新增 5 项回归测试（提示顺序、宽字符退格精度、单行/多行 cols 重建、正文不重复），适配原 A 路径断言；测试 1028 → 1032，全门禁绿。
+- **已修订（ADR-069）**：决策 2 已由 ADR-069 修订（v0.9.0 方案 B：追加重建，改为 `pasteBlock` 整段回显）。本条原文（含"不调 `pasteBlock`"）与上方 v0.8.3 patch 段保留作历史记录，不删改。
 
 ## ADR-068 回复成功后焦点回填到自己的回复（ADR-066 锚点机制扩展）
 
@@ -1136,4 +1137,47 @@
   4. 无 schema 迁移、无新环境变量、无键位/渲染改动。
 - 验证：O2-T1~T5（正常回复命中自己、并发插入锁定自己、软删回退首行、超上限不 panic、发帖不误伤）；`back_focus_test.go` 3 项与 `composer_draft_test.go` 全套不破；四门禁全绿 + 两条闭环专项 + archtest。
 - 关联：`ADR-066`（按 Row.ID 回填焦点、双渲染）、`ADR-027`（原地重绘帧连续性）、`ADR-014`（展示投影不进领域模型）。
+
+## ADR-069 v0.9.0 方案 B：限流原地重建改为追加重建止损（修订 ADR-067 决策 2）
+
+- 状态：已采纳（2026-11-24；设计稿 `docs/DESIGN-v090-display-i18n.md` §4.2 W4-W7，评审 B1/B3/B4 + 用户拍板 D2/D6）。
+- 背景：v0.8.4 在大视窗终端完整，但用户窄屏连续回复时正文字符散落。根因不是"窄屏边缘"：限流提示实测显示宽度 **125 列**（含 `[提示] ` 前缀与 `1m0s`），任何 **< 126 列**终端都会物理折行——80×24（SSH 最常见默认）、100 列、120 列全部命中，约 150 列宽屏才"正常"，可达面是绝大多数用户。ADR-067 的 `resyncLastLine(up=2)` 硬编码"提示 = 1 个物理行"，提示折行后 `CursorUp(2)` 跳进提示中间；`EL`（`\x1b[K`）只清当前物理行，清不掉折行产生的 H 行碎片，动态算 `up` 也是假修复。优先级仍 **P1**，依据是"数据不丢、闭环未断、可重发/恢复"，不是"全屏可规避"。
+- 决策：
+  1. **删除 `resyncLastLine`**（`line_echo.go`），A 路径 `rebuildComposerFromDraft` 不再输出任何 `CUU`。
+  2. **A 路径改为追加重建**：`writeHint` 按 locale 查表写等待提示（写 hint 的 i18n 化见 ADR-070），`setSecret(false)` 已清 `cols` 后不额外 reset，末尾直接 `p.echo.pasteBlock(e.body.Text())` 整段追加回显；光标自然停在正文末行末字，`cols` 由 `pasteBlock` 逐 rune 重建。
+  3. **明确以正文多回显一遍换光标与退格正确**：不整屏重绘、不回 Browsing 态、不引入 CUP/CUD/ED/DECSET，倒计时保持静态文案（守 ADR-027）。
+  4. **修订 ADR-067 决策 2**：其"不调 `pasteBlock`"被本条取代；原文与 v0.8.3 patch 段作历史记录保留，仅在 ADR-067 内加一行"已修订（ADR-069）"交叉引用，不删改。
+- 理由（逐条回应 P0-2「退格错乱不复发」三条理由）：
+  1. **光标落点由输出流末尾决定，不依赖硬编码 `up`**：`pasteBlock` 是最后一个写动作，光标自然停在正文末行末字；提示折成 1 行还是 4 行都不改变落点，从根本上移除"提示 = 1 物理行"的假设。
+  2. **`cols` 由 `pasteBlock` 逐 rune 重建，退格精度保持**：正文每个 rune 经 `SanitizeText` 后计入末行 `cols`，与屏幕实际显示宽度逐字对应；中文等宽字符仍按 2 列擦除（`\b \b` 两组），v0.8.3 的退格精度不回退。
+  3. **不用 CUP/CUD/ED/DECSET、不扩 ADR-027 白名单**：只用既有 `pasteBlock`、`writeHint` 与白名单内的 `\r\n`/SGR；信任域与零回显边界不变（服务端提示走 `RenderSystem`，用户正文仍走净化链）。
+- 代价 / 边界：
+  1. **正文多回显一遍（刷屏）**：同一段正文出现两遍（提交前一遍 + 重建追加一遍），长正文时刷屏明显——如实登记 D6 代价。
+  2. **提示离光标变远（长正文时倒计时可能被顶出屏幕）**：提示打印在追加正文之前，光标停在正文末字，物理行距离随正文长度与折行数增长；倒计时不自动刷新。
+  3. **不整屏重绘**（守 ADR-027），不回 Browsing，不改键位；"限流提示不折行"假设已破除，代码里不再有任何依赖它的光标回跳。
+  4. 无 schema 迁移、无新依赖、无新环境变量。
+- 验证：组 A 测试基建 W1（`fakePageSession` 可配宽度）/ W2（`cuuParams` 提取 CUU 参数）/ W3（虚拟终端网格 + pending wrap）；W4-W6 B 路径落地与三处断言语义适配，`len(cuuParams(out))==0` 取代 `Contains("\x1b[")` 防 SGR 假通过；虚拟网格 TC-01（24/40/125 列输出无 CUU、无碎片、正文紧随 hint）、TC-02（80×24 提示折 2 行仍无散落）绿；测试函数 1041 → 1056；四门禁 + 两闭环专项 + archtest 绿。
+- 关联：`ADR-026`（回显净化）、`ADR-027`（原地重绘 / ANSI 白名单）、`ADR-034`（多行编辑）、`ADR-066`（同链路焦点回填机制，本条不改）、`ADR-067`（被修订的决策 2 与 v0.8.3 patch 段）、`ADR-068`（同链路后续焦点扩展）。
+
+## ADR-070 v0.9.0 方案 C：物理行模型与 i18n 基建（统一折行口径 + 双语 hint）
+
+- 状态：已采纳（2026-11-24；设计稿 `docs/DESIGN-v090-display-i18n.md` §4.3-§4.4 W8-W14，评审 D4 升级纳入 B7）。
+- 背景：显示层缺物理行模型——`lineEcho` 只有 `out/secret/cols`，`cols` 记录逻辑列宽、不知道终端宽度；`RenderFrame` 虽有 `overWide` 降级，却只覆盖整屏渲染，编辑器回显层裸奔；`frame.go` 的 `overWide`/`visibleWidth` 与回显层形成双口径。B7 缺陷同源：`mergeBackspace` 的 `CursorUp(1)` 与 `backspace` 的 `\b \b`×逻辑宽都假设"一行 = 一个物理行"，超宽行按 Enter 后退格会错位残留。i18n 无骨架，hint/notice 前缀散落字面量，无法承载第二语言。
+- 决策：
+  1. **`safe/wrap.go` 纯函数**：`MeasureLine`/`MeasureWrap`/`OverWide`，基于 `DisplayWidth` 逐 rune 计算逻辑行的显示宽度、物理行数、折行点与 **pending wrap**（占满末列时光标留行末，下个字符到达才折——决定 `EL` 清哪行、`CUU` 落哪行）；宽字符整字折、SGR 计 0 列、零 IO、不输出 ANSI、不改白名单。
+  2. **`RenderFrame` 共用 `safe.OverWide`** 替换原 `overWide`/`visibleWidth` 重复逻辑，消除整屏渲染与编辑器回显层的双口径。
+  3. **`lineEcho` 注入 `width`**（0 = 未知，退化为旧行为）：`mergeBackspace` 按 `MeasureLine` 的物理行数输出 `CursorUp(n)`，修 B7 超宽行合并残留；`\b \b` 仍按逻辑宽逐 rune 擦除，退格精度不回退。
+  4. **i18n 骨架**：`i18n/catalog.go` 10 个 hint key（`hintPrefix` + 4 引导 + 5 草稿状态）× 2 locale（zh 现状原文逐字保留、en 译文含 `%s` 槽位），另有 notice 前缀查表；`pageController.locale` 默认 zh + 测试注入点，`writeHint`/`hintPrefix`/`noticePrefix` 一律查表；`RenderScreenWithLocale` 显式承载 locale，原 `RenderScreen` 委托 zh 保持签名与逐字节行为不变。**locale 绝不进 `viewmodel.Screen`，禁止渲染后字节替换文案**——以守 ADR-019 信任域（服务端固定文案走 `RenderSystem`，用户文本走 `RenderUser`/`SanitizeText`）。
+- 理由 / 代价 / 边界：
+  - 理由：物理行数由单一纯函数口径计算，同时修掉"显示层缺模型"与"硬编码光标跳行"两个根因，并为多语言预留通道；i18n 只在服务端固定文案通道查表，不碰用例、仓储、viewmodel 契约与键位。
+  - 代价 / 边界：
+    1. `width <= 0`（宽度未知）退化为旧行为（不折行、`Rows=1`、`Pending=false`），调用方不得假定已有物理行模型。
+    2. en 文案在极窄终端仍会物理折行——这是终端软折行行为（程序层不折行），与中文同构，不视为代码缺陷。
+    3. **全量 UI 翻译不在本期范围**（D3）：仅 hint 与 notice 前缀双语化，命令输出等后续版本再做。
+    4. B7 超宽行合并后，上方物理行的空格残留于光标下方但**无内容**；终端无删行序列，按发版红线不以填充空格绕行，故只消除"错位散落到正文"、不消除该无内容残留。
+    5. 无 schema 迁移、无新依赖、无新环境变量、无键位改动；`TestHintSingleCRLF` 保持不参数化。
+- 验证：W8 `wrap_test.go` 纯函数单测（中/英/emoji 行数、pending wrap、宽字符整字折）；W9 既有 `RenderFrame` 测试与 archtest 绿；W10 虚拟网格 TC-04（v0.8.3 退格精度不回退）/ TC-05（B7 超宽行合并后网格无上方物理行错位残留）；W11-W14 双语参数化（TC-03 40 vs 200 列正文段字节与文案长度无关、TC-06 前缀 zh `[提示]`/`[错误]` → en `[Info]`/`[Error]`，信任域白名单不变）；`TestHintSingleCRLF` 不参数化；两闭环专项 + archtest + 四门禁全绿；测试函数 1041 → 1067。
+- 关联：`ADR-019`（信任域与零回显）、`ADR-026`（回显净化）、`ADR-027`（原地重绘 / ANSI 白名单）、`ADR-034`（多行编辑）、`ADR-067`（patch 段 cols 重建历史）、`ADR-068`、`ADR-069`（方案 B 止损）。
+
+> 验证结果（2026-11-24）：四门禁 + 两条闭环专项 + archtest + 虚拟网格 TC-01~TC-05 + 双语参数化全部通过；测试函数 1041 → 1067（ADR-069 落地阶段 1041 → 1056，ADR-070 落地后累计 1067）。发版动作（commit / tag / Release / 部署）待用户单独授权，按 `AGENTS.md` §5 执行。
 
