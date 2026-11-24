@@ -124,6 +124,34 @@ func (c *Composer) Lines() []string {
 // Text 返回以 LF 连接的正文。提交后仍可读，供用例层取最终文本。
 func (c *Composer) Text() string { return strings.Join(c.Lines(), "\n") }
 
+// Load 以全文重建缓冲并激活，供草稿恢复；替代 Start 的清空语义。
+//
+// 契约（与 Feed 的「超限不改状态」同款）：
+//   - 整块构造 lines：按 \n 切分后逐行 []rune，**绝不逐字符 Feed**——否则正文里
+//     独立的 "." 行会命中 Enter 的哨兵判定被误判为提交（见 Feed 的 KeyEnter 分支）；
+//   - CRLF/CR 归一化为 LF；空文本 = 单行空缓冲；
+//   - 复用 maxLines / maxBytes 与 byteLen 校验，超限返回错误且状态不变
+//     （初始 active=false 时保持 false）；
+//   - 成功后置 active=true，调用方不再 Start()（Start 会清空）。
+func (c *Composer) Load(text string) error {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	parts := strings.Split(normalized, "\n")
+	next := make([][]rune, len(parts))
+	for i, p := range parts {
+		next[i] = []rune(p)
+	}
+	if len(next) > c.maxLines {
+		return ErrTooManyLines
+	}
+	if c.byteLen(next) > c.maxBytes {
+		return ErrTooManyBytes
+	}
+	c.lines = next
+	c.active = true
+	return nil
+}
+
 // byteLen 按 Text() 的实际形态计数：行间 LF 也算 1 字节。
 func (c *Composer) byteLen(lines [][]rune) int {
 	n := 0

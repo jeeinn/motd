@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jeeinn/motd/internal/application/forum"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	domainuser "github.com/jeeinn/motd/internal/domain/user"
 )
@@ -83,7 +84,9 @@ func (r *UserStatusReader) Status(ctx context.Context, userID int64) (domainuser
 	var raw string
 	err := r.pools.QueryRowContext(ctx, `SELECT status FROM users WHERE id = ?`, userID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("用户 %d 不存在", userID)
+		// 包装 forum.ErrNotFound：页面层 actor() 据此与事务内 checkWritePermission
+		// 的"用户不存在→ErrForbidden"口径统一（DESIGN-composer-draft §4.2）。
+		return "", fmt.Errorf("%w: 用户 %d 不存在", forum.ErrNotFound, userID)
 	}
 	if err != nil {
 		return "", err

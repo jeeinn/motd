@@ -1093,3 +1093,25 @@
 - 验证：`back_focus_test.go` 3 项（详情返回定位原帖、原帖软删回退首行、节点返回定位原节点）；既有导航/重绘/检索返回测试不破；四门禁全绿 + 两条闭环专项。
 - 关联：`ADR-027`（原地重绘帧连续性）、`ADR-063`（游标/offset 与残缺状态回退）、`ADR-014`（展示投影不进领域模型）。
 
+## ADR-067 提交失败保留会话草稿：限流 A 原地重建 / 准入拒绝 B 回屏预填
+
+- 状态：已采纳（2026-11-24；设计稿 `docs/DESIGN-composer-draft.md` v2，四方评审 + 用户拍板 D1~D5）。
+- 背景：发帖/回复命中限流（60s 冷却 / 1h 10 帖）或被只读/冻结拒绝时，`submitEditor` 先 `p.editor = nil` 再 `fail()`，标题与正文随 GC 丢失，真实用户需逐字重打。SSH 架构下服务端写不到用户终端，「本地保存」不可行，等价落点是服务端会话内存草稿。
+- 决策：
+  1. **错误分流（§4.2）**：`retryableDraftError` 只收 `*RateLimitError` / `ErrReadOnly` / `ErrForbidden`；校验错误、`ErrNotFound`、存储故障不存草稿。
+  2. **路径 A（限流）原地重建**：存草稿后 `Load(body)` 整块重建编辑器、保持 `StateComposing`，**不调 `pasteBlock`**（避免第二遍正文 + `echo.cols` 叠加致退格错乱，P0-2），只打印「约 X 秒后 Ctrl-D 重发」静态等待提示，不整屏重绘、不回 Browsing。
+  3. **路径 B（ErrReadOnly / ErrForbidden）回屏预填**：摘编辑器、回 `StateBrowsing`，`fail()` 固定文案后追加「仅本次连接」草稿提示；重进同上下文 `/reply` / `/new` 或回原帖按 `r` 时 `Load` 预填并回显一次。
+  4. **挂起回屏（D2）**：A 状态按 Esc = 挂起（保草稿、回屏、提示按 r 恢复），覆盖评审原「取消」语义；Ctrl-C = 取消并清草稿。无草稿时 Esc/Ctrl-C 维持原行为。
+  5. **`actor()` 失败分支同样存草稿（P0-1）**；账号不存在（`ErrNotFound`）在 `actor()` 统一映射 `ErrForbidden`，与事务内 `checkWritePermission` 口径一致。
+  6. **`/edit` 不检出草稿（§4.6）**：`startEditComposer` 从空缓冲开始，避免 EditPost 覆盖原文；回复/发帖草稿保持不动。
+  7. **只做内存版（D4）**：草稿挂 `pageController`，不落库、不进日志；断连即失，文案统一「临时草稿（仅本次连接）」（D5）。P1 落库登记 backlog，本期不实现。
+  8. **`Composer.Load(text)`**：整块构造 lines，绝不逐字符 Feed（防独立 `.` 行误判哨兵）；CRLF/CR→LF；超限不改状态。
+- 理由：痛点是失败链路丢输入，控制器层纯状态修补即可闭环；A/B 共用一份会话草稿，恢复入口统一（按 r / 同上下文重进）；不碰用例、仓储、渲染与键位。
+- 代价 / 边界：
+  1. 草稿仅本次连接有效，断连/重连即失（内存版既定边界，D5 管理预期）。
+  2. 倒计时不自动刷新（守 ADR-027），秒数为静态文案「约 X 秒、以服务端为准」。
+  3. **基础设施层错误语义变更**：`repo_user.go` 的 `UserStatusReader.Status` 在 `sql.ErrNoRows` 时由普通 `fmt.Errorf("用户 %d 不存在")` 改为包装 `forum.ErrNotFound`，供 `actor()` 以 `errors.Is` 识别并收敛为 `ErrForbidden`（决策 5 的落地载体）。影响面超出编辑器本身：`Status()` 另两个调用点已核对无回归——`ownerActor`（err≠nil 时吞掉、沿用零值状态）与 `AchievementService.Apply`（`fmt.Errorf("读取账号状态: %w", err)` 包装上抛，错误文本变化但判定语义不变）。架构方向仍为 infrastructure→application（archtest 通过）。
+  4. 无 schema 迁移、无新环境变量、无键位/渲染改动；P1 落库另立 ADR 评估 ADR-010 写队列背压。
+- 验证：`composer_draft_test.go` TC-A01~A11 P0 断言集 + `composer.go` Load 纯单测；四门禁全绿 + 两条闭环专项 + archtest。
+- 关联：`ADR-026`（回显净化）、`ADR-027`（原地重绘 / 不做倒计时刷新）、`ADR-034`（多行编辑）、`ADR-010`（写事务稀缺，约束 P1 落库）。
+

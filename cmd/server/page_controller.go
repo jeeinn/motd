@@ -16,9 +16,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jeeinn/motd/internal/application/auth"
@@ -73,6 +75,9 @@ type pageController struct {
 	searchPage  int
 	notice      viewmodel.Notice
 	editor      *pageEditor
+	// draft 是提交失败保留的临时草稿（仅本次连接内存），与 editor 分离：
+	// 编辑器摘除后草稿仍在，供 B 回屏兜底与 A 挂起后按 r 恢复（§4.1）。
+	draft *composerDraft
 	// v0.6.0：Konami 码检测与解锁回调（每会话一份状态机）。
 	konami   command.KonamiDetector
 	onUnlock func(context.Context, int64) error
@@ -114,6 +119,22 @@ const (
 	composerLimitHint          = "正文已达长度上限，请精简后继续（Esc 取消）"
 )
 
+// 临时草稿（仅本次连接）系列：提交失败保留输入，冷却/准入恢复后一键重发
+// （docs/DESIGN-composer-draft.md §4.4）。一律称"临时草稿（仅本次连接）"管理
+// 断连即失预期（D5）；限流剩余时长为本地数值拼入，不拼用户文本。
+const (
+	// 限流原地保留（A）：%s 为 RateLimitError.RetryAfter 本地算出的时长。
+	composerDraftRetainedRateHint = "内容已保留为临时草稿（仅本次连接）：请约 %s 后按 Ctrl-D（或单独一行 .）重发；Esc 挂起草稿回浏览屏，回到原帖按 r 恢复"
+	// A 挂起回屏确认。
+	composerDraftSuspendedHint = "草稿已保留，回到原帖按 r 即可恢复"
+	// 只读/冻结回屏兜底（B）：不含"Esc 放弃"——B 已回浏览屏，浏览态 Esc 静默。
+	composerDraftRetainedHint = "（输入内容已保留为临时草稿，仅本次连接有效；处理完成后重新 /new 或 /reply 即可恢复）"
+	// 同上下文重进预填成功。
+	composerDraftRestoredHint = "草稿已恢复：内容仍在，直接按 Ctrl-D（或单独一行 .）提交"
+	// 不同上下文新建 composer，旧草稿被覆盖。
+	composerDraftDiscardedHint = "（此前的临时草稿已不适用，重新开始输入）"
+)
+
 // pageEditor 是发帖 / 回复的编辑态（ADR-026 + P1-M4 多行）：
 //   - title 阶段：单行 runes 缓冲，Enter 确认（标题仍保持单行语义）；
 //   - body 阶段：正文交给纯应用逻辑 input.Composer，Enter 换行、哨兵/Ctrl-D 提交。
@@ -129,6 +150,28 @@ type pageEditor struct {
 	title      string
 	nodeID     int64
 	threadID   int64
+}
+
+// composerDraft 是提交失败后保留的输入草稿，仅存于当前 SSH 连接的控制器内存。
+// 不落库、不进日志、不进 RenderSystem；回显走粘贴同一条净化路径（ADR-026）。
+// 读写收敛到 saveDraft / resumeDraft / matches，与 A/B 交互解耦（§4.1）。
+type composerDraft struct {
+	creating bool   // true=新主题（含已确认标题）；false=回复
+	title    string // 发帖已确认的标题（回复为空）
+	body     string // 正文全文，LF 连接
+	nodeID   int64  // 发帖上下文
+	threadID int64  // 回复上下文
+}
+
+// matches 按发帖/回复上下文判定草稿是否可沿用；nil 草稿永不命中。
+func (d *composerDraft) matches(creating bool, nodeID, threadID int64) bool {
+	if d == nil {
+		return false
+	}
+	if creating {
+		return d.creating && d.nodeID == nodeID
+	}
+	return !d.creating && d.threadID == threadID
 }
 
 func (h *inputHandler) newPageController(out io.Writer) *pageController {
@@ -644,6 +687,18 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 		return p.writeFixed(sess, "请先打开一个主题再回复")
 	}
 
+	// 草稿预填（§4.5）：同上下文沿用恢复；不匹配则丢弃旧草稿全新开始。
+	// /edit 不走本函数，天然不检出草稿（§4.6，避免 EditPost 覆盖原文风险）。
+	if d := p.draft; d != nil {
+		if d.matches(creating, p.nodeID, p.threadID) {
+			return p.resumeDraft(sess, d)
+		}
+		p.draft = nil
+		if err := p.writeFixed(sess, composerDraftDiscardedHint); err != nil {
+			return err
+		}
+	}
+
 	stage := stageBody
 	if creating {
 		stage = stageTitle
@@ -670,6 +725,8 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 // （Enter 换行、哨兵/Ctrl-D 提交、Esc 取消），但跳过标题阶段与发帖/回复的身份检查
 // （权限已由 edit 的 CanEditPost 前置判定），提交时走 EditPost 覆盖原文。
 // 正文从空缓冲开始——用户必须重新输入完整新正文，不做就地行编辑、不预填原文。
+// §4.6：本函数**不检出草稿**（editPostID>0、EditPost 覆盖原文），
+// 回复/发帖草稿在此保持不动。
 func (p *pageController) startEditComposer(sess pageSession, postID int64) error {
 	e := &pageEditor{
 		stage: stageBody, creating: false, editPostID: postID,
@@ -690,9 +747,12 @@ func (p *pageController) editorKey(ctx context.Context, sess pageSession, m inpu
 		return nil
 	}
 	switch m.Kind {
-	case input.KeyEsc, input.KeyCtrlC:
+	case input.KeyEsc:
 		p.echo.newline()
-		return p.cancelEditor(sess)
+		return p.cancelEditor(sess, false)
+	case input.KeyCtrlC:
+		p.echo.newline()
+		return p.cancelEditor(sess, true)
 	}
 	if e.stage == stageTitle {
 		return p.titleKey(ctx, sess, m)
@@ -786,10 +846,110 @@ func (p *pageController) clampEditor(e *pageEditor) {
 	}
 }
 
-func (p *pageController) cancelEditor(sess pageSession) error {
+// cancelEditor 处理编辑态退出：
+//   - clearDraft=true（Ctrl-C）：取消并清草稿，用户明确放弃；
+//   - clearDraft=false（Esc）：无草稿时原取消行为；有草稿（A 限流后）时挂起——
+//     保草稿、回屏、提示按 r 恢复（用户拍板 D2，覆盖评审原"取消"语义）。
+func (p *pageController) cancelEditor(sess pageSession, clearDraft bool) error {
+	hadDraft := p.draft != nil
 	p.editor = nil
 	_ = sess.SetState(presence.StateBrowsing)
+	if clearDraft {
+		p.draft = nil
+	}
+	if hadDraft && !clearDraft {
+		return p.writeFixed(sess, composerDraftSuspendedHint)
+	}
 	return p.writeFixed(sess, "（已取消编辑）")
+}
+
+// retryableDraftError 判定失败是否值得保留草稿：时机/准入类（内容本身合法）保留；
+// 内容/上下文无效与存储故障不保留（§4.2）。
+func retryableDraftError(err error) bool {
+	var rl *forum.RateLimitError
+	return errors.As(err, &rl) ||
+		errors.Is(err, forum.ErrReadOnly) ||
+		errors.Is(err, forum.ErrForbidden)
+}
+
+func asRateLimit(err error) (*forum.RateLimitError, bool) {
+	var rl *forum.RateLimitError
+	ok := errors.As(err, &rl)
+	return rl, ok
+}
+
+// saveDraft 从提交中的编辑器快照一份草稿（标题/正文/上下文）。
+func (p *pageController) saveDraft(e *pageEditor, body string) *composerDraft {
+	return &composerDraft{
+		creating: e.creating,
+		title:    e.title,
+		body:     body,
+		nodeID:   e.nodeID,
+		threadID: e.threadID,
+	}
+}
+
+// rebuildComposerFromDraft 是路径 A：限流失败后原地重建编辑缓冲。
+// 不调 pasteBlock——屏幕旧回显与 Load 后缓冲内容已一致，重复回显会打印第二遍
+// 正文并向 echo.cols 叠加列宽导致退格错乱（P0-2）；只打印固定等待提示，
+// 不整屏重绘、不回 StateBrowsing。
+func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.RateLimitError) error {
+	d := p.draft
+	e := &pageEditor{
+		stage:    stageBody,
+		creating: d.creating,
+		title:    d.title,
+		nodeID:   d.nodeID,
+		threadID: d.threadID,
+		body:     input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes)),
+	}
+	if err := e.body.Load(d.body); err != nil {
+		// Load 兜底校验失败（理论不发生）：放弃原地重建，转 B 回屏。
+		p.editor = nil
+		_ = sess.SetState(presence.StateBrowsing)
+		return p.failWithDraftHint(sess, rl)
+	}
+	p.editor = e
+	p.echo.setSecret(false)
+	return p.writeFixed(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second)))
+}
+
+// failWithDraftHint 是路径 B：固定错误文案走 fail()，其后追加一行草稿保留提示。
+// fail() 原样返回业务 err（非渲染失败），不能据此跳过提示；先完成提示再回传 err。
+func (p *pageController) failWithDraftHint(sess pageSession, err error) error {
+	_ = p.fail(sess, err)
+	if werr := p.writeFixed(sess, composerDraftRetainedHint); werr != nil {
+		return werr
+	}
+	return err
+}
+
+// resumeDraft 按草稿重建编辑器并回显，供 B 恢复 / A 挂起后回原帖按 r。
+// 与 A 原地重建不同：此处编辑器新建、屏幕无旧回显，故正文回显一次（§4.5）。
+func (p *pageController) resumeDraft(sess pageSession, d *composerDraft) error {
+	e := &pageEditor{
+		stage:    stageBody,
+		creating: d.creating,
+		title:    d.title,
+		nodeID:   d.nodeID,
+		threadID: d.threadID,
+		body:     input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes)),
+	}
+	if err := e.body.Load(d.body); err != nil {
+		// 兜底校验失败：草稿失效，清掉后全新开始。
+		p.draft = nil
+		return p.writeFixed(sess, "草稿已失效，请重新输入")
+	}
+	p.editor = e
+	p.echo.setSecret(false)
+	// 发帖草稿跳过标题阶段直接进 stageBody；标题行先行回显。
+	if d.creating && d.title != "" {
+		p.echo.paste(d.title)
+		p.echo.newline()
+	}
+	p.echo.pasteBlock(d.body)
+	_ = sess.SetState(presence.StateComposing)
+	return p.writeFixed(sess, composerDraftRestoredHint)
 }
 
 func (p *pageController) submitEditor(ctx context.Context, sess pageSession) error {
@@ -830,6 +990,14 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 		var err error
 		actor, err = p.actor(ctx, sess)
 		if err != nil {
+			// P0-1：actor 失败（只读/冻结/不存在账号）同样存草稿并回屏，
+			// 走与写失败 B 路径同一套草稿保留文案（§4.2），让用户知道内容没丢。
+			if retryableDraftError(err) {
+				p.draft = p.saveDraft(e, text)
+				p.editor = nil
+				_ = sess.SetState(presence.StateBrowsing)
+				return p.failWithDraftHint(sess, err)
+			}
 			return p.cancelEditorWithNotice(sess, err)
 		}
 	}
@@ -853,12 +1021,28 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 
 	threadID, nodeID, nodeSlug := e.threadID, e.nodeID, p.nodeSlug
 	creating := e.creating
-	p.editor = nil
-	_ = sess.SetState(presence.StateBrowsing)
 
 	if writeErr != nil {
+		if retryableDraftError(writeErr) {
+			p.draft = p.saveDraft(e, text)
+			if rl, ok := asRateLimit(writeErr); ok {
+				// A：限流原地重建，保持 Composing，不整屏重绘、不摘编辑器。
+				return p.rebuildComposerFromDraft(sess, rl)
+			}
+			// B：ErrReadOnly / ErrForbidden 回浏览屏，草稿保留。
+			p.editor = nil
+			_ = sess.SetState(presence.StateBrowsing)
+			return p.failWithDraftHint(sess, writeErr)
+		}
+		// 不可重试：维持现状。
+		p.editor = nil
+		_ = sess.SetState(presence.StateBrowsing)
 		return p.fail(sess, writeErr)
 	}
+
+	p.editor = nil
+	p.draft = nil // 成功提交清除草稿
+	_ = sess.SetState(presence.StateBrowsing)
 	if editing {
 		p.notice = viewmodel.Notice{
 			Kind: viewmodel.NoticeSuccess, Code: "edited", Message: "已保存修改",
@@ -893,6 +1077,12 @@ func (p *pageController) actor(ctx context.Context, sess pageSession) (forum.Act
 	}
 	status, err := p.users.Status(ctx, principal.UserID)
 	if err != nil {
+		// 账号被删（ErrNotFound）与事务内 checkWritePermission 把"用户不存在"
+		// 收敛为 ErrForbidden 的口径一致（§4.2），可留草稿；真实读取故障原样上抛，
+		// 不伪装成权限拒绝。
+		if errors.Is(err, forum.ErrNotFound) {
+			return forum.Actor{}, forum.ErrForbidden
+		}
 		return forum.Actor{}, err
 	}
 	return forum.ActorFromPrincipal(principal, status), nil
