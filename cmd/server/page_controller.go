@@ -911,7 +911,18 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 	}
 	p.editor = e
 	p.echo.setSecret(false)
-	return p.writeFixed(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second)))
+	if err := p.writeFixed(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second))); err != nil {
+		return err
+	}
+	// A 路径屏幕已有正文回显，Load 重建缓冲后 echo.cols 被 newline()+setSecret()
+	// 双清为空，光标停在提示下一行——退格会删缓冲却零擦屏（与 B 修复前同源）。
+	// 回到正文末行重写一次以重建 cols：不重复整段正文（仅末行），白名单 CUU/EL。
+	// up=2 = 提交时 bodyKey 的 echo.newline() 1 行 + writeFixed 尾部 CRLF 1 行。
+	lines := e.body.Lines()
+	if len(lines) > 0 {
+		p.echo.resyncLastLine(lines[len(lines)-1], 2)
+	}
+	return nil
 }
 
 // failWithDraftHint 是路径 B：固定错误文案走 fail()，其后追加一行草稿保留提示。

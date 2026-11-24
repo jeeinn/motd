@@ -112,6 +112,21 @@ func (e *lineEcho) mergeBackspace(merged string) {
 	}
 }
 
+// resyncLastLine 回到上方 up 行的行首、清行、按 rune 重写 lastLine，并重建 cols。
+// 供「屏幕已有正文回显、但缓冲被重建导致 cols 丢失」的场景（限流原地重建）使用：
+// 重写后光标自然停在末行末字、cols 与之一一对应，退格能精确擦除（ADR-067）。
+// up 是代码路径推算的行数（非用户输入），只走白名单 CUU/CR/EL，用户文本仍经
+// SanitizeText，与 mergeBackspace 同一信任域（不扩 ADR-027 白名单）。
+func (e *lineEcho) resyncLastLine(lastLine string, up int) {
+	_, _ = io.WriteString(e.out, safe.CursorUp(up))
+	_, _ = io.WriteString(e.out, "\r")
+	_, _ = io.WriteString(e.out, safe.ClearToEOL())
+	e.cols = nil
+	for _, r := range lastLine {
+		e.rune(r)
+	}
+}
+
 // newline 结束当前输入行并清空列宽栈。
 func (e *lineEcho) newline() {
 	_, _ = io.WriteString(e.out, "\r\n")
