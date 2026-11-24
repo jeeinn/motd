@@ -947,9 +947,16 @@ func (p *pageController) resumeDraft(sess pageSession, d *composerDraft) error {
 		p.echo.paste(d.title)
 		p.echo.newline()
 	}
+	// 恢复提示必须在正文回显**之前**：writeFixed 自带尾部 \r\n，若放在
+	// pasteBlock 之后，光标被甩到提示下一行而 echo.cols 仍描述正文末行，
+	// 退格会在错误位置擦除（屏幕正文不消失）；且提示会紧贴正文末字。
+	// 前置后最后输出的是正文——光标停在正文末字、cols 与之一一对应，退格正确。
+	if err := p.writeFixed(sess, composerDraftRestoredHint); err != nil {
+		return err
+	}
 	p.echo.pasteBlock(d.body)
 	_ = sess.SetState(presence.StateComposing)
-	return p.writeFixed(sess, composerDraftRestoredHint)
+	return nil
 }
 
 func (p *pageController) submitEditor(ctx context.Context, sess pageSession) error {

@@ -479,3 +479,59 @@ func TestDraftEditDoesNotConsumeDraft(t *testing.T) {
 		t.Fatal("/edit 不得检出或消费草稿")
 	}
 }
+
+// TestDraftResumeHintBeforeBody 对应线上 defect 1：恢复提示不得粘连在正文末尾。
+// writeFixed 自带尾部 \r\n，提示必须在正文回显之前，否则提示贴正文末字、光标甩下一行。
+func TestDraftResumeHintBeforeBody(t *testing.T) {
+	clock := fixedDraftClock()
+	_, h, _, _, _ := setupDraftRuntime(t, &clock)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	d := &composerDraft{creating: false, threadID: 9, body: "草稿正文"}
+
+	if err := pc.resumeDraft(sess, d); err != nil {
+		t.Fatal(err)
+	}
+	out := sess.output()
+	hintAt := strings.Index(out, "草稿已恢复")
+	bodyAt := strings.Index(out, "草稿正文")
+	if hintAt < 0 || bodyAt < 0 {
+		t.Fatalf("提示与正文都应出现: %q", out)
+	}
+	if hintAt > bodyAt {
+		t.Fatalf("恢复提示必须在正文之前（避免粘连 + 光标错位）: hint=%d body=%d out=%q", hintAt, bodyAt, out)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
+}
+
+// TestDraftResumeBackspaceErasesPrecisely 对应线上 defect 2：恢复后退格要真正
+// 删掉正文末字并正确擦屏。末字「乙」占 2 列，断言 \b \b 恰好 2 组且紧跟正文。
+func TestDraftResumeBackspaceErasesPrecisely(t *testing.T) {
+	clock := fixedDraftClock()
+	ctx, h, _, _, _ := setupDraftRuntime(t, &clock)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	if err := pc.resumeDraft(sess, &composerDraft{creating: false, threadID: 9, body: "草稿甲乙"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.editor.body.Text(); got != "草稿甲乙" {
+		t.Fatalf("恢复正文不符: %q", got)
+	}
+
+	if err := pc.editorKey(ctx, sess, input.KeyMsg{Kind: input.KeyBackspace}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.editor.body.Text(); got != "草稿甲" {
+		t.Fatalf("退格应删末字，缓冲现为 %q", got)
+	}
+	out := sess.output()
+	if strings.Count(out, "\b \b") != 2 {
+		t.Fatalf("末字占 2 列，应有 2 组退格擦除，实际 %d: %q", strings.Count(out, "\b \b"), out)
+	}
+	// 擦除序列必须紧跟在回显正文之后（同一行），不能夹在提示与正文之间。
+	// 恢复时先输出提示（自带 CRLF），再回显正文，故 "草稿甲乙" 后应紧接 2 组 \b \b。
+	if !strings.Contains(out, "草稿甲乙\b \b\b \b") {
+		t.Fatalf("退格擦除应紧跟回显正文末字（同一行）: %q", out)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
+}
