@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
+次要版本：新增 `/whoami`、`/who` 两条命令并退役 `/karma` 命令入口。含此前未单独发布的 v0.7.3 主题列表样式调整。无 schema 迁移、无新依赖、无新环境变量；测试函数 991 → 1011。
+
 ### Added
 
 - **`/whoami`（别名 `/me`）**：查看本人资料——账号 `@username（ID）`、注册时间、声望与等级（ADR-065）。
@@ -15,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `/whoami` 复用既有等级阈值（`karmaLevel`/`progressDesc`），不另造口径；`/who` 名单从单次 presence 快照派生，活跃态在前、`LastSeenAt` 倒序，访客不列名。
+- 活跃口径统一：presence 提取单一谓词 `ActiveWithin`（含心跳窗口），状态栏、`/stats`、`/who` 三处共用，避免给出不同「活跃 N」。
 
 ### Removed
 
