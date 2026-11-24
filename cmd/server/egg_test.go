@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jeeinn/motd/internal/application/command"
+	domainuser "github.com/jeeinn/motd/internal/domain/user"
 )
 
 func TestEggTextIsFixedCorpus(t *testing.T) {
@@ -43,7 +44,7 @@ func TestEggRegistryInjectsCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newInputHandler().withCommands(reg)
-	for _, name := range []string{"fortune", "cowsay", "xkcd", "blame", "sudo", "karma"} {
+	for _, name := range []string{"fortune", "cowsay", "xkcd", "blame", "sudo", "matrix"} {
 		line := "/" + name
 		if name == "blame" {
 			line += " @someone"
@@ -90,6 +91,17 @@ func TestEggHelpGroupIsSeparateFromAdmin(t *testing.T) {
 		}
 		if c.Group == command.GroupAdmin && c.Name == "fortune" {
 			t.Errorf("彩蛋命令不得归入管理员组")
+		}
+	}
+}
+
+// ADR-065：/karma 入口删除后，cmd 的 karmaLevel 与 domain/user.Level 是两套阈值
+// 实现，必须逐点对拍，防口径漂移误伤状态栏等级渲染。
+func TestKarmaLevelMatchesDomainLevel(t *testing.T) {
+	for karma := int64(0); karma < 300; karma++ {
+		level, _ := karmaLevel(karma)
+		if want := int(domainuser.Level(karma)); level != want {
+			t.Errorf("karma=%d: karmaLevel=L%d，domain Level=L%d，不一致", karma, level, want)
 		}
 	}
 }

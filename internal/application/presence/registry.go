@@ -197,6 +197,13 @@ func (r *Registry) Online() int {
 	return len(r.sessions)
 }
 
+// ActiveWithin 判断会话在 now 时刻是否处于活跃窗口：状态为浏览/编辑且心跳未超时。
+// 供 Registry.Active 与基于 Snapshot 的只读统计（/who 命令）共用，保证活跃口径
+// 单一——否则状态栏、/stats、/who 三处会给出不同的「活跃 N」（ADR-065）。
+func ActiveWithin(s Session, now time.Time, timeout time.Duration) bool {
+	return s.State.Active() && now.Sub(s.LastSeenAt) <= timeout
+}
+
 // Active 是「在心跳窗口内且非 Idle」的会话数，与 Online 独立统计（§2.7）。
 func (r *Registry) Active() int {
 	r.mu.RLock()
@@ -204,11 +211,17 @@ func (r *Registry) Active() int {
 	now := r.now()
 	n := 0
 	for _, s := range r.sessions {
-		if s.State.Active() && now.Sub(s.LastSeenAt) <= r.timeout {
+		if ActiveWithin(s, now, r.timeout) {
 			n++
 		}
 	}
 	return n
+}
+
+// HeartbeatTimeout 返回本注册表的心跳超时，供基于 Snapshot 的只读统计复用
+// Active 口径，避免在调用方硬编码超时值造成口径漂移（ADR-065）。
+func (r *Registry) HeartbeatTimeout() time.Duration {
+	return r.timeout
 }
 
 // Reap 清理心跳超时的会话，返回被清理的 ID（排序保证结果可判定）。

@@ -3,6 +3,7 @@ package terminal
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jeeinn/motd/internal/application/viewmodel"
@@ -36,6 +37,25 @@ func TestRenderScreenThreadsAuthorUsernameAndCompactReplies(t *testing.T) {
 	}
 	if strings.Contains(line, "#7") || strings.Contains(line, "3回复") {
 		t.Errorf("旧作者/回复数格式未清除: %q", line)
+	}
+}
+
+// v0.7.3 顺序契约：回复数 rN 必须排在时间之前（用户 2026-11-23 反馈）。
+// CreatedAt 与 Replies 同时存在时，metaTail 输出 " rN MM-DD HH:MM"，不得回退为时间在前。
+func TestMetaTailRepliesBeforeTime(t *testing.T) {
+	withDisplayLocation(t, time.UTC)
+	row := viewmodel.Row{
+		Index: 1, ID: 109, Score: 0, Title: "顺序锚点",
+		Meta: viewmodel.RowMeta{AuthorID: 7, Author: "alice", Replies: 3, CreatedAt: sampleUnix},
+	}
+	got := metaID(row, viewmodel.ScreenThreads) + authorSegment(row) + metaTail(row, viewmodel.ScreenThreads)
+	want := " id=109 @alice r3 11-14 22:13"
+	if got != want {
+		t.Fatalf("元信息顺序不符:\n got %q\nwant %q", got, want)
+	}
+	// 反向守卫：时间不得出现在 rN 之前。
+	if strings.Index(got, "r3") > strings.Index(got, "11-14") {
+		t.Fatalf("回复数必须在时间之前: %q", got)
 	}
 }
 

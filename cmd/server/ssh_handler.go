@@ -496,8 +496,12 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 			// v0.5.1 / P3-M6：彩蛋都是固定语料，经安全渲染路径输出。
 			// 参数（如 /blame @user）只做个数校验，绝不回显原文（ADR-026）。
 			writeEgg(sess, h.eggText(inv.Name)+"\r\n")
-		case "karma":
-			writeEgg(sess, h.runKarma(sess.Principal())+"\r\n")
+		case "whoami":
+			// ADR-065：本人资料（账号 / 注册时间 / 声望等级），分段渲染。
+			h.runWhoami(ctx, sess, sess.Principal())
+		case "who":
+			// ADR-065：在线人员名单（参数分页），所有人可见。
+			h.runWho(ctx, sess, inv)
 		case "stats":
 			// v0.7.1：社区统计看板。所有人可见（含访客），输出全是固定文案 + 本地数字。
 			writeSystem(sess, h.runStats(ctx)+"\r\n")
@@ -568,7 +572,8 @@ func (h *inputHandler) runLogout(ctx context.Context, sess *sshd.Session) string
 }
 
 // writeSystem 经安全渲染路径输出**服务端固定文案**（ADR-019 / ADR-026）。
-// 适用于彩蛋语料、/karma、/stats 等「全由常量与本地数字拼成」的多行文本。
+// 适用于彩蛋语料、/stats、/who 汇总行等「全由常量与本地数字拼成」的多行文本。
+// 含用户数据的行（/whoami 账号、/who 名单）分段走 segSystem/segUser，不进这里。
 //
 // 传入文本里的 \n 由 RenderSystem 校验（它拒绝 \r），故先规范化换行再渲染，
 // 最后统一转 CRLF。渲染失败时退化为不输出——绝不把原始文本裸写到终端。
@@ -629,26 +634,9 @@ func (h *inputHandler) eggText(name string) string {
 	}
 }
 
-// runKarma 显示当前用户的 karma / 等级 / 距下一级的进度（v0.5.1）。
-// 复用 M2 的 KarmaReader 可选接口——等级只显示、不做权限（ADR-014）。
-func (h *inputHandler) runKarma(p auth.Principal) string {
-	if !p.IsUser() {
-		return "请先 /login github 登录后查看声望"
-	}
-	kr, ok := h.users.(appuser.KarmaReader)
-	if !ok {
-		return "声望查询尚未就绪"
-	}
-	karma, err := kr.Karma(context.Background(), p.UserID)
-	if err != nil {
-		return "声望查询失败，请稍后重试"
-	}
-	level, next := karmaLevel(karma)
-	return fmt.Sprintf("声望 %d · 等级 L%d · %s", karma, level, progressDesc(level, next))
-}
-
 // karmaLevel 与 domain/user.Level 的阈值对齐（L2=10 / L3=50 / L4=200）。
-// next=0 表示已达最高等级。
+// next=0 表示已达最高等级。ADR-065：/karma 命令入口删除后，本函数由 /whoami 复用，
+// 与 user.Level 的对拍见 TestKarmaLevelMatchesDomainLevel。
 func karmaLevel(karma int64) (level int, next int64) {
 	switch {
 	case karma < 10:

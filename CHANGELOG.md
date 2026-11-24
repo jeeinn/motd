@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.8.0] - 2026-11-24
+
+次要版本：新增 `/whoami`、`/who` 两条命令并退役 `/karma` 命令入口。含此前未单独发布的 v0.7.3 主题列表样式调整。无 schema 迁移、无新依赖、无新环境变量；测试函数 991 → 1011。
+
+### Added
+
+- **`/whoami`（别名 `/me`）**：查看本人资料——账号 `@username（ID）`、注册时间、声望与等级（ADR-065）。
+- **`/who [页]`**：查看当前在线人员名单，页长 15、参数分页；汇总行给出在线/活跃/访客计数；所有人可见（含访客）。（ADR-065）
+
+### Changed
+
+- `/whoami` 复用既有等级阈值（`karmaLevel`/`progressDesc`），不另造口径；`/who` 名单从单次 presence 快照派生，活跃态在前、`LastSeenAt` 倒序，访客不列名。
+- 活跃口径统一：presence 提取单一谓词 `ActiveWithin`（含心跳窗口），状态栏、`/stats`、`/who` 三处共用，避免给出不同「活跃 N」。
+
+### Removed
+
+- **`/karma` 命令入口删除**（不做别名过渡）：声望/等级展示并入 `/whoami`；`KarmaReader` 端口、状态栏等级渲染与计分能力层保留不动。（ADR-065）
+
+## [0.7.3] - 2026-11-23
+
+补丁版本：调整主题列表行元信息顺序，回复数 `rN` 移到时间之前。无 schema 迁移、无新依赖、无新环境变量，行为与鉴权零变化。测试 990 → 991。
+
+### Changed
+
+- **主题列表行元信息顺序**：`id=<id> @<username> r<N> MM-DD HH:MM`——回复数 `rN` 由时间之后提到时间之前（此前为 `id=<id> @<username> MM-DD HH:MM r<N>`）。仅 `ScreenThreads` 列表行受影响；详情页回复行、搜索结果屏不投影回复数，格式不变；分隔符、`rN` 紧凑形态与显示时机（`ScreenThreads` 且 `N>0`）沿袭 v0.3.3 / ADR-052，其余符号一律不动。
+
 ## [0.7.2] - 2026-11-22
 
 补丁版本：修 `/help` 把彩蛋命令显示在「管理员命令」标题之下。无 schema 迁移、无新依赖、无新环境变量，鉴权零变化。
@@ -323,7 +351,8 @@ P3 稳定运营版本：成就与 karma 从占位变为真实数据，CI 加竞�
 - SSH 入口仅公钥认证、禁 root；host key 在数据目录首次启动时生成，不随仓库分发。
 - 令牌不落库、不进日志、不进呈现结构。
 
-[Unreleased]: https://github.com/jeeinn/motd/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/jeeinn/motd/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/jeeinn/motd/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/jeeinn/motd/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/jeeinn/motd/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/jeeinn/motd/compare/v0.6.0...v0.7.0

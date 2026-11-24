@@ -826,6 +826,7 @@
 - 代价 / 边界：每次主题列表多一次 DB 往返（1 次，非 N+1），分页 20 行时聚合 20 个 thread_id；索引名硬绑定，若将来改名 / 删除该索引，查询会直接报错而非静默退化，需同步改 `replyCountsQuery`。**技术债**：若将来 posts 规模显著增长（远超当前 21 行），`INDEXED BY` 会阻止优化器按新数据分布选择更优计划，届时须重新评估是否移除该提示，不要把它当作永久正确。小表上 SEARCH 与 SCAN 性能接近，本版未取得可测提速。计数是读时快照，与 posts 写入之间无事务一致性要求（展示值，非业务判定）；不进领域模型、不进写事务（archtest AST 守卫负向注入验证）。不显示 0 回复的 r（沿用 v0.3.3 的 N>0 条件），搜索屏与详情页不显示。
 - 验证：全量测试全绿（860 → 871，+11：application 4、sqlite 仓储 / 首帖隐藏边界 / EXPLAIN / 真实 SQLite 端到端 5、archtest 守卫与负向注入 2），`go build ./... && go vet ./... && go test -count=1 ./...` 通过。EXPLAIN 证据（`TestReplyCountsQueryUsesThreadIndex -v` 可复现：灌 15 行 + ANALYZE 生成 sqlite_stat1）——对照·不锁索引：`SCAN posts` + `USE TEMP B-TREE FOR GROUP BY`；生产·`INDEXED BY idx_posts_thread`：`SEARCH posts USING INDEX idx_posts_thread (thread_id=?)`。另有独立探针实测：100k posts 大表上不锁索引也会自动转 `SEARCH`，印证 SCAN 是优化器按数据规模的正常选择。端到端证据：真实 SQLite 经 `Service.ScreenThreads`——建主题后 Replies=0（不显示 r）→ 回复一条后 Replies=1（r1）→ 作者软删该回复后回到 0（r 消失）；三条主题计数互不串，B 加两条回复只影响 B。首帖隐藏边界：首帖置 hidden 后投影回复数 = 1 = 详情页可见 Rows 数，且正文取可见第一条。P0 工程门禁对本次改动文件零新增命中（全库 270 处为既有命中，含 `data/` 演练副本）；无迁移、无新依赖、生产 `data/` 未触碰、未 commit。
 - 关联：`ADR-047`（作者名批量投影同构）、`ADR-014`（展示投影不进领域模型）、`ADR-010`/`ADR-032`（写事务稀缺）、`ADR-051`（详情页首帖口径）、`docs/P2-PLAN.md §11`（方案 B 与 DoD）。
+- **patch（v0.7.3，用户 2026-11-23 反馈）**：主题列表行元信息顺序调整——回复数 `rN` 由时间之后提到时间之前，行尾形态由 `id=<id> @<username> MM-DD HH:MM r<N>` 变为 `id=<id> @<username> r<N> MM-DD HH:MM`。改动只在 `metaTail` 的 `parts` 拼接顺序：`ScreenThreads && Replies > 0` 的 ` r%d` 段先于 `formatTime` 段 append；`rN` 格式、显示时机（仅 `ScreenThreads`、`N>0`）、分隔符与其余符号一律不动，详情页回复行与搜索结果屏本就不投影回复数，零变化。信任域边界不变：两段固定文本（id= / 回复数 / 时间）仍走 `sys()`→`RenderSystem`，作者段仍走 `ext()`→`RenderUser`（ADR-014/019）。新增 `TestMetaTailRepliesBeforeTime` 锁定「r3 在 11-14 22:13 之前」的组合顺序；全量四门禁绿，测试 990 → 991，无迁移、无新依赖。
 
 ## ADR-053 隐藏可逆：unhide 而非隐藏内容列表
 
@@ -1051,3 +1052,24 @@
   7. 昨日日期一律 `AddDate(0,0,-1)`，禁止 `now.Add(-24h)`：`MOTD_DISPLAY_TIMEZONE` 可配任意时区，跨 DST 切换日用 24 小时减会落到同一天或跳一天（症状：「昨日数字莫名等于前日」）；更根本的理由是「昨日登录」与「昨日在线峰值」现在同屏相邻，两行的「昨日」若指向不同日期，用户会读成我们算错。
 - 验证：`repo_stats_test.go` 7 项（UPSERT 只升不降/写 0 不打回、`updated_at` 只在变高时推进、跨天隔离、非法日期与形状被拒、注册数只算 active、按日去重登录、只数 login_success、0011 对象存在）；`stats_test.go` 5 项（本地日历日期、展示时区归属、峰值自洽、`--` 两条件、读失败不兜 0）；`stats_command_test.go` 3 项（6 行文案逐字、`--` 变体 + 图例、行宽）；`stats_sampler_test.go` 5 项（首行必写、只写变高、跨天归零、失败重试、nil 安全）；`login_hook_test.go` 6 项（审计先行、失败不短路、nil 安全、`/stats` 固定文案与零回显）。测试函数 948 → 989。
 - 关联：`ADR-046`（展示时区）、`ADR-016`（presence 纯内存）、`ADR-019/026`（信任域与零回显）、`ADR-010`（写队列）、`P4.5-PLAN.md §4`。
+
+## ADR-065 `/whoami` 与 `/who`：本人资料命令、在线名单，`/karma` 入口删除
+
+- 状态：已采纳（2026-11-23，`feat/whoami-who` 分支；设计稿 `docs/DESIGN-whoami-who.md` §11 决策记录）。
+- 背景：用户要求「查看已登录状态/我的信息（账号、注册时间、等级）」与「列出当前在线人员（类 Linux `who`，人多可分页）」。Principal 只带 `UserID`，现有端口无个人资料读口；`/karma` 只显示声望等级，与新命令重叠。
+- 决策：
+  1. **命令**：`/whoami`（别名 `/me`）查看本人资料；`/who [页]` 列在线人员。`/info` 不启用（语义过宽，留给未来实例信息）。`/who` 参数只接受正整数页码，非数字 / `@xxx` / 0 / 负数给固定用法提示，不查库、不回显原文。
+  2. **`/whoami` 输出**：账号 `@username（ID）`、注册时间（`formatKeyTime` 时区口径）、声望与等级（复用 `karmaLevel`/`progressDesc`，阈值不另造）。访客给固定提示；端口缺失 / DB 失败 / 记录不存在统一固定文案。
+  3. **新只读端口 `ProfileReader.ProfilesByIDs(ctx, []int64)`**：批量 IN 查询零 N+1，落 `UserStatusReader`；返回 `ProfileView{Username, UserID, Karma, Status, CreatedAt}`，不含凭证、身份源、邮箱。`/whoami` 传单元素、`/who` 传名单共用。
+  4. **`/who` 形态**：内联块 + 参数分页（页长 15），不做专用屏、不接 n/p 键（候选 B 留待在线规模真正增长后评估）。单次 `Snapshot()` 派生在线/活跃/访客计数与名单，避免多次快照漂移；活跃态（浏览/编辑）在前，其余按 `LastSeenAt` 倒序，稳定排序；访客连接（UserID=0，含认证中）不列名，只计入汇总。用户名经批量投影，查不到回退 `#ID`。
+  5. **`/karma` 命令入口直接删除**（不做别名过渡）：删彩蛋条目、`case "karma"` 分发与 `runKarma`；**能力层保留**——`karmaLevel`/`progressDesc` 由 `/whoami` 复用，`KarmaReader` 端口与 repo 实现保留（状态栏持续消费），等级阈值测试与 `karma_display_test.go` 不动。
+  6. **信任域（评审 P0 修正）**：固定标签与本地数字走 `RenderSystem`；`@username` 是 DB 用户数据，单独走 `RenderUser` 净化链，两段绝不拼进同一次渲染（初版「净化后嵌入整串交 writeSystem」违反 ADR-019，已改为分段 `segSystem`/`segUser`）。
+  7. **可见性**：两条命令所有人（含访客）可用，不加 `requireAdmin`——只读公开信息，在线数本就在状态栏公开；ADR-049 白名单只卡治理写操作。
+- 理由：`whoami`/`who` 是 Unix 成对语义，比 `/info` 精确；参数分页以零屏模型改动满足「分页查看」，专用屏成本与个位数并发不匹配；删 `/karma` 而非保留别名，避免两条命令长期重叠，同时能力层不删保证状态栏与未来复用不受影响。
+- 代价 / 边界：
+  1. `/who` 块打印后留在原屏，n/p 键不响应（与 `/stats` 同构）；翻页靠再输 `/who <页>`。
+  2. 名单基于单次快照，翻页期间连接上下线会造成页间漂移；个人论坛规模下接受，不做快照冻结。
+  3. v1 不展示 provider / 邮箱、发帖回复计数、成就列表；A 看 B（`/finger`）延迟立项，届时先定字段级隐私白名单。
+  4. `karmaLevel`（cmd）与 `domain/user.Level` 是两套阈值实现，由 `TestKarmaLevelMatchesDomainLevel` 逐点对拍防漂移。
+- 验证：`who_command_test.go` 15 项（计数/排序/投影回退/时长文案/状态词、访客提示、端口缺失、DB 失败、成功分段、注入无 ESC、非法参数、空快照、happy path、页界、16 人分页）；`repo_profile_test.go` 2 项（批量投影/空输入）；`TestKarmaLevelMatchesDomainLevel` 对拍；四门禁全绿 + 两条闭环专项。
+- 关联：`ADR-016`（presence 纯内存）、`ADR-019/026`（信任域/零回显）、`ADR-057`（karma 计分，能力层保留）、`ADR-049`（授权边界）、`ADR-014`（展示投影不进领域模型）。

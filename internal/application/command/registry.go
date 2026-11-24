@@ -119,6 +119,10 @@ var defaultCommands = []Command{
 	{Name: "latest", Usage: "/latest", Summary: "全论坛最新主题（跨版块）", MaxArgs: 0},
 	// v0.7.1 / P4.5-M1：社区统计看板。进程级只读命令，所有人可见（含访客）。
 	{Name: "stats", Usage: "/stats", Summary: "论坛统计（在线/登录/注册）", MaxArgs: 0},
+	// ADR-065：本人资料（/whoami，别名 /me）与在线人员（/who [页]）。
+	// 均为只读公开信息，所有人可见（含访客），不做管理员判定。
+	{Name: "whoami", Usage: "/whoami", Summary: "查看我的账号信息与等级", MaxArgs: 0, Aliases: []string{"me"}},
+	{Name: "who", Usage: "/who [页]", Summary: "查看当前在线人员（可分页）", MinArgs: 0, MaxArgs: 1},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 

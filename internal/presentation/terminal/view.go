@@ -119,9 +119,9 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 		if err := ext(&b, text, contentWidth); err != nil {
 			return "", err
 		}
-		// 元信息分信任域渲染：id=/时间/回复数是本地数值与固定字符，走 sys()；
+		// 元信息分信任域渲染：id=/回复数/时间是本地数值与固定字符，走 sys()；
 		// 作者名来自 users 表，是用户数据，必须走 ext()（ADR-014/019）。
-		// 两段固定文本夹住作者段，保持「id= → 作者 → 时间/回复数」的既有顺序。
+		// 两段固定文本夹住作者段，保持「id= → 作者 → 回复数/时间」的既有顺序。
 		if fixed := metaID(r, s.Kind); fixed != "" {
 			if err := sys(&b, fixed, safe.StyleDim); err != nil {
 				return "", err
@@ -360,15 +360,15 @@ func metaID(r viewmodel.Row, k viewmodel.ScreenKind) string {
 	return ""
 }
 
-// metaTail 返回时间、回复数与 node 占位（纯本地数值与固定字符，RenderSystem 路径）。
-// v0.3.3：回复数由 " N回复" 改为紧凑的 " rN"；其余符号一律不动。
+// metaTail 返回回复数、时间与 node 占位（纯本地数值与固定字符，RenderSystem 路径）。
+// v0.7.3：回复数 rN 提到时间之前（用户 2026-11-23 反馈）；v0.3.3 由 " N回复" 改为紧凑 " rN"，其余符号一律不动。
 func metaTail(r viewmodel.Row, k viewmodel.ScreenKind) string {
 	var parts []string
-	if at := formatTime(r.Meta.CreatedAt); at != "" {
-		parts = append(parts, " "+at)
-	}
 	if k == viewmodel.ScreenThreads && r.Meta.Replies > 0 {
 		parts = append(parts, fmt.Sprintf(" r%d", r.Meta.Replies))
+	}
+	if at := formatTime(r.Meta.CreatedAt); at != "" {
+		parts = append(parts, " "+at)
 	}
 	if r.Meta.Node != "" {
 		parts = append(parts, " ")

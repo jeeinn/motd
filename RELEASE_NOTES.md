@@ -1,47 +1,48 @@
-# Release Notes — v0.7.2
+# Release Notes — v0.8.0
 
-**发布日期**：2026-11-22
-**Git tag**：`v0.7.2`
+**发布日期**：2026-11-24
+**Git tag**：`v0.8.0`
 **Module**：`github.com/jeeinn/motd`
 
-> 补丁版本：修 `/help` 把彩蛋命令显示在「管理员命令（需白名单指纹授权）」标题之下。无 schema 迁移、无新依赖、无新环境变量，鉴权零变化。测试 989 → 990。
+> 次要版本：新增 `/whoami`（本人资料）与 `/who`（在线名单）两条命令，退役 `/karma` 命令入口。
+> 含此前未单独发布的 v0.7.3 主题列表样式调整。无 schema 迁移、无新依赖、无新环境变量；测试函数 991 → 1011。
 
 ## 本版变化
 
-### Fixed
+### Added
 
-- **`/help` 的分组边界丢失，彩蛋命令被读成「需要管理员权限」**。修复前：
-
-  ```
-  管理员命令（需白名单指纹授权）：
-    /hide [id] … /node archive <slug>                    ← 真管理员（7 条）
-    /fortune /cowsay /xkcd /blame /sudo /karma /matrix   ← 彩蛋，被吞进同一标题下
-  ```
-
-  修复后：
+- **`/whoami`（别名 `/me`）——查看本人资料**。登录后输出：
 
   ```
-  管理员命令（需白名单指纹授权）：
-    /hide [id] … /node archive <slug>
-
-  彩蛋命令（无需权限，纯娱乐）：
-    /fortune /cowsay /xkcd /blame /sudo /karma /matrix
+  我的信息
+    账号：@alice（ID 7）
+    注册：2026-11-15 06:13:20 CST
+    声望 12 · 等级 L2 · 距 L3 还需 38 声望
   ```
 
-  **根因**（排版边界，不是分组误标）：`eggRegistry` 构造插件命令时没设 `Group`（属普通分组），`WithCommands` 把彩蛋 append 到内置命令表末尾，而内置表最后一段正是管理员组；`Help()` 只用一个 `inAdminGroup` 布尔、仅在**首次**遇到管理员命令时插一次说明行，之后再无分组边界，彩蛋就落在该标题之下。
+  账号、用户 ID、注册时间、声望与等级（含距下一级进度）。访客给固定提示；端口缺失 / DB 失败 / 记录不存在统一固定文案，不回显错误链。新增只读端口 `ProfileReader.ProfilesByIDs`（批量 IN 查询零 N+1），不含凭证、身份源、邮箱。
 
-  **修法**：新增 `command.GroupEgg` 与固定说明行「彩蛋命令（无需权限，纯娱乐）」；`Help()` 改用 `map` 按分组首次出现插头（对任意分组通用，不再只认管理员）；`eggRegistry` 两条构造路径（插件元数据 + `EggCommands()` 兜底）都补 `Group`；彩蛋清单在 `EggCommands()` 里带 `Group`，保持「命令表是唯一事实来源」。
-- `CHANGELOG.md` 补记缺失的 `[0.7.0]` / `[0.7.1]` compare 链接，并同步 `[Unreleased]` 基准到 `v0.7.2`。
+- **`/who [页]`——查看当前在线人员**。无参为第 1 页，页长 15；汇总行给出在线 / 活跃 / 访客计数，名单按「活跃态在前、其余 `LastSeenAt` 倒序」排列，访客连接只计入汇总不列名。所有人（含访客）可见。参数只接受正整数页码，非数字 / `0` / 负数 / `@xxx` 给固定用法提示，不查库、不回显原文。
 
-## 设计取舍（为什么不直接隐藏）
+### Changed
 
-`?` / `/help` 是这套 TUI 里彩蛋唯一的发现入口（`/xkcd` 等还刻意做成纯本地清单、不联网）。把它们从帮助里隐藏会让功能事实上不存在；而「混在管理员区」比隐藏更糟——它同时误导权限认知，用户会怀疑自己权限不足，而不是认为排版有问题。因此选择「独立成段、明说不需权限」，既消除误导又保留可发现性。
+- **活跃口径统一**：presence 层提取单一谓词 `ActiveWithin(s, now, timeout)`（浏览/编辑态且心跳窗口内），状态栏、`/stats`、`/who` 三处共用同一判定，避免三个入口给出不同的「活跃 N」。
+- **信任域隔离（评审 P0 修正）**：固定标签与本地数字走 `RenderSystem`，`@username` 作为 DB 用户数据单独走 `RenderUser` 净化链，两段绝不拼进同一次渲染（ADR-019）。
 
-`Group` 始终只是展示元数据：`Parse` 与鉴权完全不看它，白名单准入仍只在 `forum.requireAdmin` 单点判定。
+### Removed
+
+- **`/karma` 命令入口直接删除**（不做别名过渡）：声望 / 等级展示并入 `/whoami`。能力层完整保留——`karmaLevel` / `progressDesc` 由 `/whoami` 复用，`KarmaReader` 端口与 repo 实现保留（状态栏持续消费），等级阈值测试与 `karma_display_test.go` 不动，投票计分逻辑不变。
+
+## 设计取舍
+
+- `whoami` / `who` 是 Unix 成对语义，比 `/info` 精确；`/info` 语义过宽，保留给未来实例 / 调试信息。
+- `/who` 用内联块 + 参数分页而非专用屏：个人论坛并发为个位数，专用屏要改 viewmodel / renderer / pageController 五处，成本不匹配；n/p 键不响应该块，翻页靠再输 `/who <页>`。
+- A 看 B（`/finger`）本期不立项：涉及他人注册时间 / 邮箱 / provider 等隐私字段，等产品有真实用户量与明确场景后再评估，立项前先定字段级隐私白名单。
+- 单快照派生计数与名单，翻页期间连接上下线会造成页间漂移；个人论坛规模下接受，不做快照冻结。
 
 ## 升级说明
 
-无 schema 迁移、无新环境变量、无新依赖。替换二进制并重启即可，配置与数据零改动。
+无 schema 迁移、无新环境变量、无新依赖。替换二进制并重启即可，配置与数据零改动。命令集合变化：`/karma` 下线，新增 `/whoami`（= `/me`）与 `/who`；习惯 `/karma` 的用户改用 `/whoami` 查看声望等级。
 
 ## 已知问题与限制
 
@@ -50,15 +51,14 @@
 
 ## 验证
 
-- 四门禁：`gofmt` 零输出、`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿；测试函数 **990**。
-- 新增/扩展断言：两个分组说明各恰好出现一次、顺序为「管理员 → 彩蛋 → 键位」、彩蛋命令不得归入管理员组、无彩蛋命令时不得出现彩蛋说明行（防止无条件插头）。
-- 真实 SSH 会话实测 `?` 输出：彩蛋已独立成段，管理员区只剩 7 条真管理员命令。
-- CI 双 job（Build/Vet/Test + Race detector）全绿。
+- 四门禁：`gofmt` 零输出（含未跟踪新增文件）、`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿；测试函数 **1011**。
+- 新增 `who_command_test.go`（17 项：分段渲染、ESC / 双向控制符注入、心跳窗口对齐、分页边界、别名与 happy path）、`repo_profile_test.go`（2 项批量投影）、`TestKarmaLevelMatchesDomainLevel`（cmd / domain 阈值逐点对拍）。
+- 两条闭环专项 `TestMVPSSHClosedLoop` / `TestMVPRestartAndBackupWithRealData` 绿；archtest 绿。
 
 ## 破坏性变更
 
-无。帮助文本排版变化，命令集合与权限完全不变。
+`/karma` 命令入口移除（改用 `/whoami`）；其余命令、权限、数据契约完全不变，声望 / 等级计分能力与状态栏显示不受影响。
 
 ## 变更明细
 
-见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.7.2]` 段、[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-061 patch 段。
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.8.0]` 段、[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-065，以及设计稿 [`docs/DESIGN-whoami-who.md`](docs/DESIGN-whoami-who.md) §11 决策记录。
