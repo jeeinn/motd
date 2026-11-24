@@ -85,12 +85,17 @@ func TestRenderFrameFallsBackOnNarrowTerminal(t *testing.T) {
 	}
 }
 
+// TestRenderFrameOnlyWhitelistedSequences 校验**局部覆盖路径**的控制序列集合。
+// 注意：H 与 2J 现已属白名单（供 RenderCleanFrame 整屏重绘），但 RenderFrame 是
+// 局部覆盖语义，不应发起整屏清屏或绝对定位——故仍在此处逐条排除。这样与
+// assertOnlyWhitelistedANSI（按全局白名单放行 H/2J）构成"全局允许 + 本路径自限"
+// 的双层约束，避免把"白名单有此能力"误当成"局部重绘可以用它"。
 func TestRenderFrameOnlyWhitelistedSequences(t *testing.T) {
 	text := crlf("> 1. \x1b[1m标题\x1b[0m", "状态栏")
 	got, _ := RenderFrame(text, 2, 80, 24)
 	for _, bad := range []string{"\x1b[2J", "\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[H", "\x1b[2K"} {
 		if strings.Contains(got, bad) {
-			t.Errorf("原地重绘泄露了禁止序列 %q", bad)
+			t.Errorf("局部覆盖路径不应出现整屏清屏/定位或禁止序列 %q", bad)
 		}
 	}
 	assertOnlyWhitelistedANSI(t, got)
