@@ -112,6 +112,12 @@ const (
 // 可靠区分该组合与普通 Enter，P1 不做主提交键（二轮拍板，ADR-034）；
 // archtest + 单测双重断言。
 const (
+	// hintPrefix 是告知类引导/草稿提示的统一前缀，与 noticePrefix 的 default
+	// 分支（NoticeSuccess → "[提示] " StyleDim，view.go）逐字节对齐：发布成功与
+	// 引导 hint 同为灰阶，醒目感来自方括号文字锚点而非颜色。单点拼在 writeHint，
+	// 常量字面量本身不带前缀（单一事实来源，防回退到手写 9 处）。
+	hintPrefix = "[提示] "
+
 	composerTitleHint          = "新建主题：输入标题后按 Enter 确认（Esc 取消）"
 	composerBodyHint           = "回复：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
 	composerBodyAfterTitleHint = "标题已接收：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
@@ -289,11 +295,13 @@ func (p *pageController) writeFixed(sess pageSession, text string) error {
 
 // writeHint 输出引导类固定提示（编辑器用法、草稿状态），走 Dim 灰阶——与状态栏
 // 同色（ADR-014/027 已入白名单的 SGR 样式），区别于用户正文的普通色。
-// 仍是服务端编译期常量，走 RenderSystem 同一校验；错误/失败提示仍用 writeFixed
-// 保持醒目。样式由 RenderSystem 自带 reset 收尾，不泄漏到后续用户回显。
+// 前缀 hintPrefix 在此单点拼接，与 noticePrefix 的 Success/default 分支对齐；
+// 常量字面量不带前缀。仍是服务端编译期常量，走 RenderSystem 同一校验；
+// 错误/失败提示仍用 writeFixed 保持醒目。样式由 RenderSystem 自带 reset 收尾，
+// 不泄漏到后续用户回显。
 func (p *pageController) writeHint(sess pageSession, text string) error {
 	p.invalidateScreen()
-	rendered, err := safe.RenderSystem(text, safe.StyleDim)
+	rendered, err := safe.RenderSystem(hintPrefix+text, safe.StyleDim)
 	if err != nil {
 		return err
 	}
@@ -931,7 +939,7 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 	// A 路径屏幕已有正文回显，Load 重建缓冲后 echo.cols 被 newline()+setSecret()
 	// 双清为空，光标停在提示下一行——退格会删缓冲却零擦屏（与 B 修复前同源）。
 	// 回到正文末行重写一次以重建 cols：不重复整段正文（仅末行），白名单 CUU/EL。
-	// up=2 = 提交时 bodyKey 的 echo.newline() 1 行 + writeFixed 尾部 CRLF 1 行。
+	// up=2 = 提交时 bodyKey 的 echo.newline() 1 行 + writeHint 尾部 CRLF 1 行。
 	lines := e.body.Lines()
 	if len(lines) > 0 {
 		p.echo.resyncLastLine(lines[len(lines)-1], 2)
@@ -1035,6 +1043,7 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 	}
 
 	var writeErr error
+	var newPostID int64 // 仅回复分支捕获：用于成功后把焦点回填到自己刚发的回复（ADR-068）
 	if editing {
 		// 编辑：只覆盖既有正文，actor 仅用于 canModify 判权；EDIT 不查账号状态
 		// （与删除同口径：作者权不是治理权，前置 CanEditPost 已统一拒绝访客/非作者）。
@@ -1046,7 +1055,7 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 			NodeID: e.nodeID, Title: e.title, Body: text,
 		})
 	} else {
-		_, writeErr = p.service.CreatePost(ctx, actor, forum.CreatePostInput{
+		newPostID, writeErr = p.service.CreatePost(ctx, actor, forum.CreatePostInput{
 			ThreadID: e.threadID, Body: text,
 		})
 	}
@@ -1088,7 +1097,14 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 	if creating {
 		return p.showThreads(ctx, sess, nodeID, nodeSlug, "", 0)
 	}
-	return p.showDetail(ctx, sess, threadID)
+	// 回复成功：showDetail 把焦点重置为首条回复，按新 postID 回填到自己刚发的回复
+	//（ADR-068，复用 ADR-066 restoreFocus，按 Row.ID 定位）。未命中（软删 / 超
+	// MaxPostsPerThread 不在返回集合）由 restoreFocus 自然回退首行，不劣化现状。
+	if err := p.showDetail(ctx, sess, threadID); err != nil {
+		return err
+	}
+	p.restoreFocus(newPostID)
+	return p.render(sess)
 }
 
 func (p *pageController) cancelEditorWithNotice(sess pageSession, err error) error {

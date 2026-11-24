@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-24
+
+补丁版本：编辑器引导提示优化——hint 统一灰阶并加 `[提示]` 前缀，回复成功后焦点锚定到自己的回复。无 schema 迁移、无新依赖、无新环境变量、无键位/渲染改动；测试函数 1032 → 1041。
+
+### Changed
+
+- **引导 hint 改灰阶并加 `[提示]` 前缀**：`writeHint` 走 `StyleDim`（与状态栏同色）并单点拼接 `[提示] `，覆盖 4 条编辑器用法引导 + 5 条草稿状态提示；错误/反馈提示保持 `StylePlain` 普通色、不加前缀。不扩 ANSI 白名单，前缀只在输出层拼接、常量字面量保持单一事实来源。（ADR-067 延续）
+- **回复成功后焦点指向自己的回复**：`submitEditor` 捕获 `CreatePost` 返回的新 postID，回复成功分支 `showDetail` 判 err 后按 postID 回填焦点（复用 ADR-066 `restoreFocus`，按 Row.ID 定位），未命中（软删 / 超 200 条）回退首行；编辑/发帖分支不动。（ADR-068）
+
 ## [0.8.3] - 2026-11-24
 
 补丁版本：修草稿恢复时提示与正文粘连、退格无法精确擦除。无 schema 迁移、无新依赖、无新环境变量、无键位/渲染改动；测试函数 1028 → 1032。

@@ -1119,3 +1119,21 @@
   2. **A 限流原地重建**（`rebuildComposerFromDraft`）：Load 后 cols 被 `newline()`+`setSecret()` 双清为空，退格删缓冲却零擦屏。新增 `line_echo.resyncLastLine`：白名单 `CursorUp`+`CR`+`ClearToEOL` 回正文末行重写并重建 cols，只重写末行不重复正文；`up=2`（提交换行 1 行 + 提示尾部 CRLF 1 行）。**边界**：`up` 依赖限流提示不折行，极窄终端折行时可能偏差（常规宽度实测单行，成立）。
   - 新增 5 项回归测试（提示顺序、宽字符退格精度、单行/多行 cols 重建、正文不重复），适配原 A 路径断言；测试 1028 → 1032，全门禁绿。
 
+## ADR-068 回复成功后焦点回填到自己的回复（ADR-066 锚点机制扩展）
+
+- 状态：已采纳（2026-11-24；设计稿 `docs/DESIGN-hint-reply-focus.md` O2）。
+- 背景：发表回复成功后 `showDetail` 经 `screenOf` 把 `FocusedIndex` 重置为首条回复，用户自己刚发的回复没有 `> ` 光标指示，需重新下滚寻找。
+- 决策：
+  1. **复用 ADR-066 `restoreFocus(anchor)`，不改其实现**：`submitEditor` 捕获 `CreatePost` 返回的新 postID，回复成功分支先判 `showDetail` 的 err（失败直接返回，不在失败屏上回填），成功后 `restoreFocus(newPostID)`，再二次 `render`（沿用 ADR-066 双渲染）。
+  2. **仅回复分支**：编辑（`editing`）不推进 `last_reply_at`、不做焦点锚定；发帖（`creating=true`）回列表，焦点维持首行，均不动。
+  3. **未命中回退首行**：新回复被软删，或主题已有 ≥200 条可见 Post（`MaxPostsPerThread`，新回复 ID 最大、不在 `ListPosts` 返回集合）时，`restoreFocus` 保留 `screenOf` 首行默认，不报错、不落空焦点，不劣化现状。
+  4. **不改 ADR-066 原文**：其"`restoreFocus` 只挂 `back()`"口径保持；本条是同一锚点机制在"提交后落点"场景的扩展使用。
+- 理由：`> ` 是键盘光标位置（`view.go` 仅比较 `r.Index == FocusedIndex`），无选中/已读业务语义；按自己 postID 精准命中，不受并发插入他人回复的排序影响。控制器层纯状态修补，不碰用例、仓储、viewmodel、渲染与键位。
+- 代价 / 边界：
+  1. 回复成功多一帧原地重绘；`<200` 条常规情形新回复必在 Rows，稳定命中。
+  2. 超 200 条新回复不可见与焦点不命中同源，属详情屏内容分页缺陷（设计稿 O3，独立 P1 backlog），本期不修。
+  3. 误删/误改不依赖光标：`/delete` 无参删主题、`/edit` 无参取首帖，移动光标不改变目标。
+  4. 无 schema 迁移、无新环境变量、无键位/渲染改动。
+- 验证：O2-T1~T5（正常回复命中自己、并发插入锁定自己、软删回退首行、超上限不 panic、发帖不误伤）；`back_focus_test.go` 3 项与 `composer_draft_test.go` 全套不破；四门禁全绿 + 两条闭环专项 + archtest。
+- 关联：`ADR-066`（按 Row.ID 回填焦点、双渲染）、`ADR-027`（原地重绘帧连续性）、`ADR-014`（展示投影不进领域模型）。
+
