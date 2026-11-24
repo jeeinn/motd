@@ -396,13 +396,42 @@ func (p *pageController) open(ctx context.Context, sess pageSession) error {
 func (p *pageController) back(ctx context.Context, sess pageSession) error {
 	switch p.screen.Kind {
 	case viewmodel.ScreenThreadDetail:
-		return p.showThreads(ctx, sess, p.nodeID, p.nodeSlug, p.cursor, p.offset)
+		// 锚点必须在重建前捕获：返回后按 threadID 在新列表里定位原帖，
+		// 而不是让 screenOf 把焦点重置为首行（ADR-066）。
+		anchor := p.threadID
+		if err := p.showThreads(ctx, sess, p.nodeID, p.nodeSlug, p.cursor, p.offset); err != nil {
+			return err
+		}
+		p.restoreFocus(anchor)
+		return p.render(sess)
 	case viewmodel.ScreenThreads:
-		return p.showNodes(ctx, sess)
+		// showNodes 会把 nodeID 清零，锚点先捕获；按 nodeID 定位原节点。
+		anchor := p.nodeID
+		if err := p.showNodes(ctx, sess); err != nil {
+			return err
+		}
+		p.restoreFocus(anchor)
+		return p.render(sess)
 	case viewmodel.ScreenSearchResults:
 		return p.showNodes(ctx, sess)
 	default:
 		return nil
+	}
+}
+
+// restoreFocus 在重建屏后按锚点行 ID 回填焦点；未命中或锚点 <=0 时保留
+// screenOf 的首行默认。按 Row.ID 而非显示序号（Index）定位：列表重查后同一帖
+// 可能换位置，按序号会落到另一篇（ADR-066）。
+func (p *pageController) restoreFocus(anchor int64) {
+	if anchor <= 0 {
+		return
+	}
+	for _, r := range p.screen.Rows {
+		if r.ID == anchor {
+			p.screen.Selection.FocusedIndex = r.Index
+			p.screen.Selection.TopRowIndex = r.Index
+			return
+		}
 	}
 }
 
