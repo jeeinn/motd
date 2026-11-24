@@ -621,3 +621,117 @@ func TestDraftRateLimitRebuildMultiLineResync(t *testing.T) {
 	}
 	cmdOnlyWhitelistedANSI(t, sess.output())
 }
+
+// TestGuideHintUsesDimStyle 引导 hint 走灰阶（StyleDim，与状态栏同色），
+// 错误/反馈提示走普通色（StylePlain）保持醒目；两者都是白名单 SGR。
+func TestGuideHintUsesDimStyle(t *testing.T) {
+	sess := newFakePageSession(1)
+	pc := newInputHandler().newPageController(sess)
+
+	sess.reset()
+	if err := pc.writeHint(sess, composerTitleHint); err != nil {
+		t.Fatal(err)
+	}
+	hintOut := sess.output()
+	if !strings.Contains(hintOut, "\x1b[2m") {
+		t.Fatalf("引导 hint 应为灰阶 \x1b[2m: %q", hintOut)
+	}
+	// O1-T1：告知类引导 hint 统一带 [提示] 前缀，与发布成功的 notice 锚点对齐。
+	if !strings.Contains(hintOut, "[提示] ") {
+		t.Fatalf("引导 hint 应带 [提示] 前缀: %q", hintOut)
+	}
+	if !strings.Contains(hintOut, "新建主题") {
+		t.Fatalf("hint 文本缺失: %q", hintOut)
+	}
+	cmdOnlyWhitelistedANSI(t, hintOut)
+
+	sess.reset()
+	if err := pc.writeFixed(sess, "内容不能为空，请重新输入（Esc 取消）"); err != nil {
+		t.Fatal(err)
+	}
+	errOut := sess.output()
+	if strings.Contains(errOut, "\x1b[2m") {
+		t.Fatalf("错误提示不应为灰阶: %q", errOut)
+	}
+	// O1-T1：即时校验错误走 writeFixed 普通色，不挂 [提示] 标签。
+	if strings.Contains(errOut, "[提示]") {
+		t.Fatalf("错误提示不应带 [提示] 前缀: %q", errOut)
+	}
+	cmdOnlyWhitelistedANSI(t, errOut)
+}
+
+// O1-T2 单一事实来源：[提示] 前缀只在 writeHint 输出层拼接，hint 常量字面量本身
+// 不得手写前缀，防止回退到 9 处重复手写。
+func TestHintConstantsCarryNoPrefix(t *testing.T) {
+	hints := []string{
+		composerTitleHint, composerBodyHint, composerBodyAfterTitleHint, composerEditHint,
+		composerDraftRetainedRateHint, composerDraftSuspendedHint, composerDraftRetainedHint,
+		composerDraftRestoredHint, composerDraftDiscardedHint,
+	}
+	for _, h := range hints {
+		if strings.Contains(h, "[提示]") {
+			t.Errorf("hint 常量字面量不应手写前缀: %q", h)
+		}
+	}
+	// 走 writeFixed 的超限错误同样不带前缀。
+	if strings.Contains(composerLimitHint, "[提示]") {
+		t.Errorf("超限错误提示不应带 [提示] 前缀: %q", composerLimitHint)
+	}
+}
+
+// O1-T3 窄屏回归：writeHint 程序层不折行，输出仅 1 个尾部 CRLF（加前缀只增显示列，
+// 不增换行；极窄终端软折行由终端负责，是既有边界）。
+func TestHintSingleCRLF(t *testing.T) {
+	sess := newFakePageSession(1)
+	pc := newInputHandler().newPageController(sess)
+	sess.reset()
+	if err := pc.writeHint(sess, composerBodyHint); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(sess.output(), "\r\n"); n != 1 {
+		t.Fatalf("writeHint 应仅 1 个 CRLF，实际 %d: %q", n, sess.output())
+	}
+}
+
+// TestEditorGuideHintsAreDim 集成验证：进入发帖/回复编辑器时输出的引导 hint
+// 带灰阶 SGR（对应用户截图里的两条 hint），区别于用户正文。
+func TestEditorGuideHintsAreDim(t *testing.T) {
+	clock := fixedDraftClock()
+	ctx, h, rt, _, _ := setupDraftRuntime(t, &clock)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	threadID := seedFirstPost(t, ctx, pc, sess, rt)
+
+	sess.reset()
+	if err := pc.showDetail(ctx, sess, threadID); err != nil {
+		t.Fatal(err)
+	}
+	sess.reset()
+	if err := pc.command(ctx, sess, command.Invocation{Name: "reply"}); err != nil {
+		t.Fatal(err)
+	}
+	out := sess.output()
+	if !strings.Contains(out, "\x1b[2m") || !strings.Contains(out, "回复：输入正文") {
+		t.Fatalf("回复引导 hint 应为灰阶: %q", out)
+	}
+	cmdOnlyWhitelistedANSI(t, out)
+
+	// 发帖标题引导 hint 同样为灰阶：先进版块列表再按 Enter 进入版块。
+	sess2 := newFakePageSession(1)
+	pc2 := h.newPageController(sess2)
+	if err := pc2.showNodes(ctx, sess2); err != nil {
+		t.Fatal(err)
+	}
+	if err := pc2.key(ctx, sess2, actionOpen); err != nil {
+		t.Fatal(err)
+	}
+	sess2.reset()
+	if err := pc2.command(ctx, sess2, command.Invocation{Name: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	out2 := sess2.output()
+	if !strings.Contains(out2, "\x1b[2m") || !strings.Contains(out2, "新建主题") {
+		t.Fatalf("发帖标题引导 hint 应为灰阶: %q", out2)
+	}
+	cmdOnlyWhitelistedANSI(t, out2)
+}

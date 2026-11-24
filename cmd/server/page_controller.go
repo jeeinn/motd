@@ -112,6 +112,12 @@ const (
 // 可靠区分该组合与普通 Enter，P1 不做主提交键（二轮拍板，ADR-034）；
 // archtest + 单测双重断言。
 const (
+	// hintPrefix 是告知类引导/草稿提示的统一前缀，与 noticePrefix 的 default
+	// 分支（NoticeSuccess → "[提示] " StyleDim，view.go）逐字节对齐：发布成功与
+	// 引导 hint 同为灰阶，醒目感来自方括号文字锚点而非颜色。单点拼在 writeHint，
+	// 常量字面量本身不带前缀（单一事实来源，防回退到手写 9 处）。
+	hintPrefix = "[提示] "
+
 	composerTitleHint          = "新建主题：输入标题后按 Enter 确认（Esc 取消）"
 	composerBodyHint           = "回复：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
 	composerBodyAfterTitleHint = "标题已接收：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
@@ -276,10 +282,26 @@ func (p *pageController) maybeShowCommandEntryHint(out io.Writer) {
 	_, _ = io.WriteString(out, commandEntryHint)
 }
 
-// writeFixed 只输出服务端编译期常量，走 RenderSystem 路径。
+// writeFixed 只输出服务端编译期常量，走 RenderSystem 路径（普通色）。
 func (p *pageController) writeFixed(sess pageSession, text string) error {
 	p.invalidateScreen() // 非屏幕输出打断连续性，下次渲染必须追加
 	rendered, err := safe.RenderSystem(text, safe.StylePlain)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(sess, toCRLF(rendered)+"\r\n")
+	return err
+}
+
+// writeHint 输出引导类固定提示（编辑器用法、草稿状态），走 Dim 灰阶——与状态栏
+// 同色（ADR-014/027 已入白名单的 SGR 样式），区别于用户正文的普通色。
+// 前缀 hintPrefix 在此单点拼接，与 noticePrefix 的 Success/default 分支对齐；
+// 常量字面量不带前缀。仍是服务端编译期常量，走 RenderSystem 同一校验；
+// 错误/失败提示仍用 writeFixed 保持醒目。样式由 RenderSystem 自带 reset 收尾，
+// 不泄漏到后续用户回显。
+func (p *pageController) writeHint(sess pageSession, text string) error {
+	p.invalidateScreen()
+	rendered, err := safe.RenderSystem(hintPrefix+text, safe.StyleDim)
 	if err != nil {
 		return err
 	}
@@ -694,7 +716,7 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 			return p.resumeDraft(sess, d)
 		}
 		p.draft = nil
-		if err := p.writeFixed(sess, composerDraftDiscardedHint); err != nil {
+		if err := p.writeHint(sess, composerDraftDiscardedHint); err != nil {
 			return err
 		}
 	}
@@ -716,9 +738,9 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
 	if creating {
-		return p.writeFixed(sess, composerTitleHint)
+		return p.writeHint(sess, composerTitleHint)
 	}
-	return p.writeFixed(sess, composerBodyHint)
+	return p.writeHint(sess, composerBodyHint)
 }
 
 // startEditComposer 进入「编辑既有正文」态：复用 startComposer 的正文阶段
@@ -737,7 +759,7 @@ func (p *pageController) startEditComposer(sess pageSession, postID int64) error
 	p.editor = e
 	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
-	return p.writeFixed(sess, composerEditHint)
+	return p.writeHint(sess, composerEditHint)
 }
 
 // editorKey 是编辑态的单入口：取消键两阶段共用，其余按键按阶段分流。
@@ -858,7 +880,7 @@ func (p *pageController) cancelEditor(sess pageSession, clearDraft bool) error {
 		p.draft = nil
 	}
 	if hadDraft && !clearDraft {
-		return p.writeFixed(sess, composerDraftSuspendedHint)
+		return p.writeHint(sess, composerDraftSuspendedHint)
 	}
 	return p.writeFixed(sess, "（已取消编辑）")
 }
@@ -911,13 +933,13 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 	}
 	p.editor = e
 	p.echo.setSecret(false)
-	if err := p.writeFixed(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second))); err != nil {
+	if err := p.writeHint(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second))); err != nil {
 		return err
 	}
 	// A 路径屏幕已有正文回显，Load 重建缓冲后 echo.cols 被 newline()+setSecret()
 	// 双清为空，光标停在提示下一行——退格会删缓冲却零擦屏（与 B 修复前同源）。
 	// 回到正文末行重写一次以重建 cols：不重复整段正文（仅末行），白名单 CUU/EL。
-	// up=2 = 提交时 bodyKey 的 echo.newline() 1 行 + writeFixed 尾部 CRLF 1 行。
+	// up=2 = 提交时 bodyKey 的 echo.newline() 1 行 + writeHint 尾部 CRLF 1 行。
 	lines := e.body.Lines()
 	if len(lines) > 0 {
 		p.echo.resyncLastLine(lines[len(lines)-1], 2)
@@ -929,7 +951,7 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 // fail() 原样返回业务 err（非渲染失败），不能据此跳过提示；先完成提示再回传 err。
 func (p *pageController) failWithDraftHint(sess pageSession, err error) error {
 	_ = p.fail(sess, err)
-	if werr := p.writeFixed(sess, composerDraftRetainedHint); werr != nil {
+	if werr := p.writeHint(sess, composerDraftRetainedHint); werr != nil {
 		return werr
 	}
 	return err
@@ -962,7 +984,7 @@ func (p *pageController) resumeDraft(sess pageSession, d *composerDraft) error {
 	// pasteBlock 之后，光标被甩到提示下一行而 echo.cols 仍描述正文末行，
 	// 退格会在错误位置擦除（屏幕正文不消失）；且提示会紧贴正文末字。
 	// 前置后最后输出的是正文——光标停在正文末字、cols 与之一一对应，退格正确。
-	if err := p.writeFixed(sess, composerDraftRestoredHint); err != nil {
+	if err := p.writeHint(sess, composerDraftRestoredHint); err != nil {
 		return err
 	}
 	p.echo.pasteBlock(d.body)
@@ -995,7 +1017,7 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 			e.body = input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes))
 		}
 		e.body.Start()
-		return p.writeFixed(sess, composerBodyAfterTitleHint)
+		return p.writeHint(sess, composerBodyAfterTitleHint)
 	}
 
 	editing := e.editPostID > 0
@@ -1021,6 +1043,7 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 	}
 
 	var writeErr error
+	var newPostID int64 // 仅回复分支捕获：用于成功后把焦点回填到自己刚发的回复（ADR-068）
 	if editing {
 		// 编辑：只覆盖既有正文，actor 仅用于 canModify 判权；EDIT 不查账号状态
 		// （与删除同口径：作者权不是治理权，前置 CanEditPost 已统一拒绝访客/非作者）。
@@ -1032,7 +1055,7 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 			NodeID: e.nodeID, Title: e.title, Body: text,
 		})
 	} else {
-		_, writeErr = p.service.CreatePost(ctx, actor, forum.CreatePostInput{
+		newPostID, writeErr = p.service.CreatePost(ctx, actor, forum.CreatePostInput{
 			ThreadID: e.threadID, Body: text,
 		})
 	}
@@ -1074,7 +1097,14 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 	if creating {
 		return p.showThreads(ctx, sess, nodeID, nodeSlug, "", 0)
 	}
-	return p.showDetail(ctx, sess, threadID)
+	// 回复成功：showDetail 把焦点重置为首条回复，按新 postID 回填到自己刚发的回复
+	//（ADR-068，复用 ADR-066 restoreFocus，按 Row.ID 定位）。未命中（软删 / 超
+	// MaxPostsPerThread 不在返回集合）由 restoreFocus 自然回退首行，不劣化现状。
+	if err := p.showDetail(ctx, sess, threadID); err != nil {
+		return err
+	}
+	p.restoreFocus(newPostID)
+	return p.render(sess)
 }
 
 func (p *pageController) cancelEditorWithNotice(sess pageSession, err error) error {
