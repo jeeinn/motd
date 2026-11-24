@@ -429,9 +429,21 @@ sha256sum bin/motd-linux-amd64            # 记录到交付报告
 
 **路径 B（2026-11-20 实战）：目标机上构建。** 先探测网络：`curl -I -m 10 https://proxy.golang.org/` 若超时，改用国内代理。
 
+> **探针口径（2026-11-24 实测修正）：不要用 `.info` 测镜像可用性，必须测 `.zip` 或直接 `go mod download`。**
+> `.info` 只有几百字节，走的是完全不同的链路成功率；用它测速会得出相反结论。同机实测：
+>
+> | 镜像 | `@v/<VERSION>.info` | `@v/<VERSION>.zip` |
+> | --- | --- | --- |
+> | `proxy.golang.com.cn` | 200 / 2.66s（看着最快） | **`connection reset`**（下载中断） |
+> | `goproxy.cn` | 200 / 12.1s（看着最慢） | 未走通 |
+> | `mirrors.aliyun.com/goproxy` | 200 / 5.4s | 200 / **459ms 完成** |
+>
+> 结论：该机优先 `https://mirrors.aliyun.com/goproxy,direct`；判定可用性用 `curl -o /dev/null -w '%{http_code}' -m 45 <mirror>/github.com/jeeinn/motd/@v/<VERSION>.zip`。
+
 ```bash
 dnf install -y --setopt=install_weak_deps=False golang   # 1.27.3，满足 go.mod 的 1.26.3
-export GOPROXY=https://goproxy.cn,direct GOSUMDB=off GOTOOLCHAIN=local
+export GOPROXY=https://mirrors.aliyun.com/goproxy,direct GOSUMDB=off GOTOOLCHAIN=local
+# 备选：GOPROXY=https://goproxy.cn,direct（.info 慢但可用于小仓库；大 zip 优先 aliyun）
 
 mkdir -p /root/motd-build/src && cd /root/motd-build
 go mod init local/motdbuild 2>/dev/null || true
@@ -572,6 +584,41 @@ ls -lh /var/lib/motd/backups
 - 若后续用 `scripts/backup.sh`：该脚本只单独读 `MOTD_DB_PATH` / `MOTD_BACKUP_DIR` / `MOTDCTL_BIN` 三项，**不加载** `.env`；cron 里必须显式 export 或用 systemd timer 的 `EnvironmentFile=`。
 - 交付报告必须明确列出未配置项：`MOTD_GITHUB_CLIENT_ID`（Device Flow 不可用）、`MOTD_ADMIN_FINGERPRINTS`（留空 = 无管理员）、邮箱 SMTP，以及与默认值的偏差（如探针端口、环境文件路径）。
 
+### 9.5.1 升级前回退点（`motdctl backup` 本身不够）
+
+> 2026-11-24 `v0.8.2 → v0.9.0` 实战补充：`motdctl backup` **只产 `.db` 与 `.sha256`**，不含 host key、不含旧二进制。只靠它无法把一台正在运行的机器回退到升级前状态。
+
+升级场景（§10.2 判定为「升级」）在动任何文件之前执行：
+
+```bash
+set -e
+D=/var/lib/motd/pre-upgrade-<旧版本号>        # 如 pre-upgrade-v082
+
+# ① 归档副本（供日后按 §4 恢复数据）
+su -s /bin/bash motd -c \
+  '/opt/motd/bin/motdctl backup --db /var/lib/motd/motd.db --dir /var/lib/motd/backups'
+
+# ② 回退目录：db + wal + shm + host key + 双旧二进制
+install -d -m 0700 "$D"
+cp -a /var/lib/motd/motd.db /var/lib/motd/motd.db-wal /var/lib/motd/motd.db-shm "$D"/
+cp -a /var/lib/motd/ssh_host_ed25519_key "$D"/
+cp -a /opt/motd/bin/motd /opt/motd/bin/motdctl "$D"/
+
+# ③ 校验：副本必须与现网逐字节一致
+sha256sum /var/lib/motd/motd.db "$D/motd.db"
+sha256sum /var/lib/motd/ssh_host_ed25519_key "$D/ssh_host_ed25519_key"
+```
+
+要点：
+
+- **`-wal` / `-shm` 必须一起备份**：只拷 `motd.db` 可能丢掉尚未 checkpoint 的事务，回滚后数据会退到更早的时点。
+- **host key 必须备份**：换了 key 客户端直接报 `host key changed`（§10.5），数据库恢复补救不了。
+- **旧二进制必须备份**：最短回滚路径是「放回旧二进制 + 重启」，完全不碰数据库。
+- 目录 `0700`，仅 root 可读；不得在报告或日志里输出其中任何文件内容。
+- **只回滚二进制**：`systemctl stop motd` → 放回 `motd` / `motdctl` → `start`；不需要 §4 的 FTS 重建。
+- **连数据库一起回滚**：必须走 §4 全流程，**包括 `motdctl fts-rebuild`**，漏掉会让 `/search` 返回空（ADR-033）。
+- 回退目录在升级成功且观察期满后再清理；删除属破坏性操作，须用户确认。
+
 ### 9.6 方式二：便携版自部署（二进制 + `.env` + `screen`）
 
 > 适用：用户在自己的目录（如 `/data/motd`）用自己编译的二进制运行，不装系统服务、不需要 root。
@@ -674,18 +721,18 @@ ls -lh /var/lib/motd/backups
 echo '=== IDENTITY ===';  whoami; hostname; cat /etc/os-release | head -4; uname -m
 echo '=== TOOLS ===';     command -v go git curl systemctl ss firewall-cmd 2>&1
 echo '=== EXISTING ===';  systemctl status motd --no-pager 2>&1 | head -10
-echo '=== DIRS ===';      ls -ld /opt/motd /var/lib/motd /etc/motd /etc/motd/motd.env /etc/sysconfig/motd 2>&1
+echo '=== DIRS ===';      ls -ld /opt/motd /var/lib/motd /etc/motd /etc/motd/motd.env /etc/sysconfig/motd 2>&1   # 只看 /etc/motd 是目录还是文件；`/etc/motd/motd.env` 报 No such file 是 CentOS 的正常现象，不代表异常
 echo '=== PORTS ===';     ss -tlnp | grep -E ':(2222|8080|18080)\b' || echo 'no listener'
 echo '=== FIREWALL ===';  firewall-cmd --list-ports 2>&1
 echo '=== RESOURCES ==='; df -h / | tail -1; free -h | head -2
-echo '=== NETWORK ===';   curl -sS -o /dev/null -w 'goproxy_cn=%{http_code}\n' -m 10 https://goproxy.cn/github.com/jeeinn/motd/@v/<VERSION>.info   # 换成目标 tag
+echo '=== NETWORK ===';   for m in https://mirrors.aliyun.com/goproxy https://goproxy.cn https://proxy.golang.com.cn; do echo -n "$m zip="; curl -sS -o /dev/null -w '%{http_code} %{time_total}s\n' -m 45 "$m/github.com/jeeinn/motd/@v/<VERSION>.zip"; done   # 必须测 .zip；.info 会误判（见 §9.1 对照表）
 ```
 
 **STOP 条件（命中即停，不继续写文件）**：
 
 | 观测 | 判定 | 处置 |
 | --- | --- | --- |
-| `motd.service` 已存在且 `active` | 这是升级，不是首装 | 先备份数据库与 host key，征询用户后走升级流程；**禁止覆盖** `/var/lib/motd/motd.db` 与 `ssh_host_ed25519_key` |
+| `motd.service` 已存在且 `active` | 这是升级，不是首装 | 先按 §9.5.1 建**回退点**（db + wal + shm + host key + 旧二进制，并校验 sha256），再走升级流程；**禁止覆盖** `/var/lib/motd/motd.db` 与 `ssh_host_ed25519_key` |
 | `2222` 被其他进程占用 | 端口冲突 | 报告占用者，请用户指定端口；不要 `kill` 他人进程 |
 | 无 root / 无 sudo | 无法建目录、装包、改 firewall | STOP 并回报所需权限 |
 | 磁盘可用 < 2 GiB 或内存可用 < 1 GiB | 构建/运行资源不足 | 降低 `-p 1` 并设 `GOMEMLIMIT`，或 STOP |
@@ -695,7 +742,8 @@ echo '=== NETWORK ===';   curl -sS -o /dev/null -w 'goproxy_cn=%{http_code}\n' -
 
 | 观测 | 决策 |
 | --- | --- |
-| `github.com` / `proxy.golang.org` 超时、`goproxy.cn` 可达 | 目标机构建时设 `GOPROXY=https://goproxy.cn,direct GOSUMDB=off`（§9.1 路径 B） |
+| `github.com` / `proxy.golang.org` 超时 | 目标机构建，按 §9.1 对照表选镜像：**优先 `https://mirrors.aliyun.com/goproxy,direct`**（实测 `.zip` 459ms 下完）；`proxy.golang.com.cn` 的 `.info` 虽快但 `.zip` 会 `connection reset`，不可用 |
+| 内存总 1.6 GiB / 可用约 1.1 GiB（小规格 VPS 常见） | 构建必须 `GOMEMLIMIT=900MiB GOGC=50 -p 2`（§9.1 路径 B）；不加限制有 OOM 被 kill 风险。依赖已缓存时构建约 5s，超时可先怀疑网络而非内存 |
 | 工具只有**文本** SFTP 写入能力，没有二进制上传 | 走目标机构建；不要把 14 MiB 二进制 base64 分块塞进工具参数（实测不可行且污染上下文） |
 | `/etc/motd` 是目录 | `ENV_FILE=/etc/motd/motd.env` |
 | `/etc/motd` 是普通文件（CentOS/RHEL 常见） | `ENV_FILE=/etc/sysconfig/motd`（实战路径） |
@@ -707,17 +755,19 @@ echo '=== NETWORK ===';   curl -sS -o /dev/null -w 'goproxy_cn=%{http_code}\n' -
 
 ### 10.4 幂等执行序列（每步带验收门）
 
+> **升级场景（§10.2 判定为「升级」）必须在第 1 步之前先建回退点**（§9.5.1：db + wal + shm + host key + 旧二进制）。第 6 步的 `motdctl backup` 只是归档副本，**不能替代回退点**。
+
 1. **工具链与源码**：按 §10.2 结果安装 Go / 设置代理，下载指定 tag 的源码（§9.1 路径 B）。
    *门*：`go version` 满足 `go.mod`，`$MODDIR/go.mod` 存在。
 2. **账号与目录**：按 §9.2 创建用户、目录、权限，二进制就位。
    *门*：`su -s /bin/bash motd -c 'cd /opt/motd && /opt/motd/bin/motdctl --help'` 有输出。权限错误在这里拦住，进入 systemd 就变成 `200/CHDIR` 重启循环。
-3. **环境文件与单元**：方式一按 §9.3 判端口、写 `$ENV_FILE`（0600）、写 `/etc/systemd/system/motd.service`，`daemon-reload && enable --now`；方式二按 §9.6 写 `/data/motd/.env` 并用 `screen` 启动。
+3. **环境文件与单元**：方式一先 `ls -ld /etc/motd` 判定 `$ENV_FILE`——**CentOS/RHEL 上它是普通登录横幅文件，直接写 `/etc/motd/motd.env` 会失败**，应落到 `/etc/sysconfig/motd`（§9.3 判定逻辑）；再按 §9.3 判端口、写 `$ENV_FILE`（0600）、写 `/etc/systemd/system/motd.service`，`daemon-reload && enable --now`；方式二按 §9.6 写 `/data/motd/.env` 并用 `screen` 启动。
    *门*：方式一 `systemctl is-active motd` = `active`、日志 `配置来源 env_only`；方式二 `screen -ls` 有会话、日志 `配置来源 file=/data/motd/.env`。两者均须 `migrations_applied=9`。
 4. **网络放行**：仅在用户授权对外时 `firewall-cmd --permanent --add-port=2222/tcp && firewall-cmd --reload`。
    *门*：`firewall-cmd --list-ports` 含 `2222/tcp`；外部 `Test-NetConnection` 或 `ssh -p 2222` 可达。
 5. **功能验收**：执行 §9.4 全部四项，特别是 host key 重启指纹一致与访客 `ssh` 进入。
    *门*：`/healthz` 版本等于目标 tag；`HOSTKEY_STABLE=yes`；访客能看到版块列表。
-6. **备份冒烟**：执行 §9.5 的 `motdctl backup`，记录文件名与 sha256；定时策略另行征询。
+6. **备份冒烟**：执行 §9.5 的 `motdctl backup`，记录文件名与 sha256（这是**归档副本**，不是回退点，回退点见 §9.5.1）；定时策略另行征询。
 7. **输出报告**：按 §10.6 模板逐项填报，含偏差与未配置项。
 
 任何一步验收门失败：**停止后续步骤**，保留现场（日志、路径、命令），报告失败点与已尝试的修复，不做破坏性重试。
@@ -729,8 +779,10 @@ echo '=== NETWORK ===';   curl -sS -o /dev/null -w 'goproxy_cn=%{http_code}\n' -
 | `status=200/CHDIR` + `Changing to the requested working directory failed` | `/opt/motd` 或二进制为 `0750 root:root`，`motd` 用户无执行/进入权 | `chgrp motd` 程序目录与二进制（或 0755），**不要**改 `User=root` |
 | `/healthz` 回显 `dev` | 构建漏了 `-X main.version=<VERSION>` | 用带 ldflags 的命令重建并替换二进制，重启 |
 | `bind: address already in use`（8080） | 已有探针/服务占用默认端口 | 改用 `127.0.0.1:18080`，更新 `$ENV_FILE` 后重启 |
-| 模块下载全超时 | `github.com` / `proxy.golang.org` 在国内 VPS 不可达 | `GOPROXY=https://goproxy.cn,direct GOSUMDB=off` |
-| `permission denied` 写 module cache | module cache 只读 | 复制到可写目录再 `go build` |
+| 模块下载全超时 | `github.com` / `proxy.golang.org` 在国内 VPS 不可达 | 换 `GOPROXY=https://mirrors.aliyun.com/goproxy,direct GOSUMDB=off` |
+| `.info` 200 但 `go mod download` 报 `connection reset` / `unexpected EOF` | 用 `.info` 判镜像可用性会误判；`.zip` 走的是另一条链路（实测 `proxy.golang.com.cn` 如此） | 换 `mirrors.aliyun.com/goproxy` 重下；判定一律用 `.zip` 端点（§9.1） |
+| `go build` 无输出即被 `Killed` / `signal: killed` | 小内存 VPS 未限并行与堆上限，OOM | `GOMEMLIMIT=900MiB GOGC=50 go build -p 2`（§9.1 路径 B） |
+| `permission denied` 写 module cache | module cache 只读（0555） | `cp -a` 到可写目录 + `chmod -R u+w` 再 `go build` |
 | 客户端报 `host key changed` | host key 被重新生成（通常是数据目录被删/换目录） | 停止变更；从备份恢复 `ssh_host_ed25519_key`，确认 `MOTD_DATA_DIR` 未变 |
 | `audit_dropped > 0` 或 `audit_failed` 持续增长 | 审计缓冲溢出，认证动作 fail-closed | 先查 SQLite 写队列堵塞，不要盲目调小 flush 间隔（§3） |
 | 登录提示「未配置 MOTD_GITHUB_CLIENT_ID」 | 凭据留空 | 属预期降级；向用户索取 client_id 并写入 0600 环境文件后重启 |
@@ -747,7 +799,8 @@ echo '=== NETWORK ===';   curl -sS -o /dev/null -w 'goproxy_cn=%{http_code}\n' -
 启动证据：migrations_applied=9；配置来源 env_only；client_id_configured=<true|false>
 host key：SHA256:<...>，重启前后一致 = yes/no
 验收：访客 SSH 进入 yes/no；备份冒烟 <文件名> + sha256；恢复演练 <未做/已做>
-偏差：探针端口、环境文件路径、unit 来源（仓库无模板）
+回退点：<未做（首装）/ 目录 + db 与 host key 的 sha256 与现网一致 = yes/no>
+偏差：探针端口、环境文件路径、unit 来源（仓库无模板）、镜像选择（aliyun / goproxy.cn / 其他）
 未配置：GitHub client_id / 管理员指纹 / 邮箱 SMTP / 每日备份策略
 ```
 
