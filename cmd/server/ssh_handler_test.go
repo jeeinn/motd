@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -140,5 +142,114 @@ func TestFormatResultNeverEchoesUserInput(t *testing.T) {
 	out = formatResult(reg, inv, err)
 	if !strings.Contains(out, "/open") || strings.Contains(out, " 3") {
 		t.Fatalf("只应回显白名单命令名，不应回显参数: %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /matrix 全屏动画（ADR-072 §5）：进入/退出清屏、三条中断路径、合规红线
+// ---------------------------------------------------------------------------
+
+func TestMatrixEntersAndExitsWithCleanFrame(t *testing.T) {
+	var b bytes.Buffer
+	h := newInputHandler()
+	// height=10 → frames=max(8, 8)=8，跑满约 400ms。
+	h.runMatrix(context.Background(), &b, make(chan input.KeyMsg), 10, nil)
+	out := b.String()
+	if !strings.HasPrefix(out, "\x1b[H\x1b[2J") {
+		t.Fatalf("动画应以进入清屏 H+2J 开头，实际 %q", out[:min(24, len(out))])
+	}
+	if !strings.HasSuffix(out, "\x1b[H\x1b[2J") {
+		t.Fatalf("动画应以退出清屏 H+2J 结尾（供调用方重绘原页），实际 %q", out[max(0, len(out)-24):])
+	}
+	if !strings.Contains(out, "[Esc 返回]") {
+		t.Fatal("首行必须提示退出方式")
+	}
+	// 提示 1 行 + 8 帧，每行一个 CRLF。
+	if n := strings.Count(out, "\r\n"); n != 9 {
+		t.Fatalf("应有 1 行提示 + 8 帧共 9 个换行，实际 %d", n)
+	}
+}
+
+func TestMatrixEscInterrupts(t *testing.T) {
+	var b bytes.Buffer
+	h := newInputHandler()
+	msgs := make(chan input.KeyMsg, 1)
+	msgs <- input.KeyMsg{Kind: input.KeyEsc}
+	h.runMatrix(context.Background(), &b, msgs, 24, nil)
+	out := b.String()
+	// 首帧前就被中断：只有提示行，没有雨帘。
+	if n := strings.Count(out, "\r\n"); n != 1 {
+		t.Fatalf("Esc 应立即中断（只剩提示行），实际 %d 个换行: %q", n, out)
+	}
+	if !strings.HasSuffix(out, "\x1b[H\x1b[2J") {
+		t.Fatalf("Esc 退出也必须清屏收尾，实际 %q", out[max(0, len(out)-24):])
+	}
+	if !strings.Contains(out, "[Esc 返回]") {
+		t.Fatal("Esc 路径仍应输出提示行")
+	}
+}
+
+func TestMatrixContextCancel(t *testing.T) {
+	var b bytes.Buffer
+	h := newInputHandler()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.runMatrix(ctx, &b, make(chan input.KeyMsg), 24, nil)
+	out := b.String()
+	if n := strings.Count(out, "\r\n"); n != 1 {
+		t.Fatalf("ctx 取消后应立即停止（只剩提示行），实际 %d 个换行: %q", n, out)
+	}
+	if !strings.HasSuffix(out, "\x1b[H\x1b[2J") {
+		t.Fatalf("断连退出必须清屏收尾，避免留脏屏: %q", out[max(0, len(out)-24):])
+	}
+}
+
+func TestMatrixNaturalEnd(t *testing.T) {
+	var b bytes.Buffer
+	h := newInputHandler()
+	// nil channel 永不发送：只能靠 ticker 跑满 frames 后自然结束。
+	h.runMatrix(context.Background(), &b, nil, 12, nil)
+	out := b.String()
+	// height=12 → frames=10。
+	if n := strings.Count(out, "\r\n"); n != 11 {
+		t.Fatalf("自然结束应写满 1 行提示 + 10 帧，实际 %d 个换行", n)
+	}
+	if !strings.HasSuffix(out, "\x1b[H\x1b[2J") {
+		t.Fatalf("自然结束也必须清屏收尾: %q", out[max(0, len(out)-24):])
+	}
+}
+
+func TestMatrixNoForbiddenSequences(t *testing.T) {
+	var b bytes.Buffer
+	h := newInputHandler()
+	h.runMatrix(context.Background(), &b, nil, 10, nil)
+	out := b.String()
+	cmdOnlyWhitelistedANSI(t, out)
+	for _, bad := range []string{
+		"\x1b[?1049h", "\x1b[?1049l", // 备用屏
+		"\x1b[3J", "\x1b[1J", "\x1b[J", // 清历史 / 其他 ED
+		"\x1b[2;3H", "\x1b[1;1H", "\x1b[H\x1b[2;", // 带参 CUP
+		"\x1b]52", "\x1b]0;", "\x1b]8", // OSC
+	} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("动画泄露禁止序列 %q: %q", bad, out)
+		}
+	}
+}
+
+// TestMatrixEscViaPollInterrupts 覆盖真实链路的 Esc：单独按下的 ESC 需要
+// KeyDecoder.Poll 判定（25ms 窗口），动画期间主循环阻塞、无人 Poll，
+// 因此 runMatrix 必须自己每帧补判一次——msgs 永远为空，只有 poll 能给出 Esc。
+func TestMatrixEscViaPollInterrupts(t *testing.T) {
+	var b bytes.Buffer
+	h := newInputHandler()
+	poll := func() []input.KeyMsg { return []input.KeyMsg{{Kind: input.KeyEsc}} }
+	h.runMatrix(context.Background(), &b, nil, 24, poll)
+	out := b.String()
+	if n := strings.Count(out, "\r\n"); n != 1 {
+		t.Fatalf("Poll 判定 Esc 后应立即中断（只剩提示行），实际 %d 个换行: %q", n, out)
+	}
+	if !strings.HasSuffix(out, "\x1b[H\x1b[2J") {
+		t.Fatalf("Esc（Poll 路径）退出也必须清屏收尾: %q", out[max(0, len(out)-24):])
 	}
 }

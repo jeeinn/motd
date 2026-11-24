@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
+	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
@@ -448,6 +449,72 @@ func TestMVPNavigationRedrawsCleanFrame(t *testing.T) {
 	for _, bad := range []string{"\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[?1049l", "\x1b[3J", "\x1b[1J", "\x1b[2;3H"} {
 		if strings.Contains(segment, bad) {
 			t.Fatalf("重绘泄露禁止序列 %q: %q", bad, segment)
+		}
+	}
+}
+
+// ADR-072 §5：/matrix 全屏动画在真实 SSH 上进入清屏 → 提示 + 雨帘 → 退出清屏，
+// 随后 handle 的 matrix 分支重绘原页面（动画期未改任何页面状态）。
+func TestMatrixRedrawsPageAfterExit(t *testing.T) {
+	_, h, rt, pools, _ := setupMVPRuntime(t)
+	// /matrix 属彩蛋组，只在真实装配（main.go 的 withCommands）里注册；
+	// 测试 handler 默认只有 defaultRegistry，这里显式合并同一份彩蛋定义。
+	eggReg, err := command.WithCommands(command.EggCommands())
+	if err != nil {
+		t.Fatalf("合并彩蛋命令: %v", err)
+	}
+	h = h.withCommands(eggReg)
+	srv, err := sshd.New(sshd.Config{
+		Addr:     "127.0.0.1:0",
+		DataDir:  t.TempDir(),
+		MaxConns: 10,
+		Resolver: auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
+		Presence: rt.Presence,
+		Handler:  h,
+	})
+	if err != nil {
+		t.Fatalf("启动 SSH 服务: %v", err)
+	}
+	serveCtx, cancel := context.WithCancel(context.Background())
+	go func() { _ = srv.Serve(serveCtx) }()
+	addr := srv.Addr()
+	t.Cleanup(func() {
+		cancel()
+		srv.Close()
+	})
+	if addr == "" {
+		t.Fatal("SSH 监听未就绪")
+	}
+
+	c := dialMVP(t, addr, newMVPKey(t))
+	defer c.close()
+	mark := c.out.mark()
+	c.out.waitSince(t, mark, "/dev/ai")
+
+	matrixMark := c.out.mark()
+	c.send(t, "/matrix\r")
+	c.out.waitSince(t, matrixMark, "[Esc 返回]")
+
+	// 动画自然结束（约 1.1s）后应重绘原页面：等页面专属中文标题出现。
+	pageMark := c.out.mark()
+	c.out.waitSince(t, pageMark, "版块列表")
+	segment := c.out.text()[pageMark:]
+	if !strings.Contains(segment, "/dev/ai") {
+		t.Fatalf("动画结束后未重绘原页面内容: %q", segment)
+	}
+	// 最后一帧必须是页面整屏重绘（H + 2J 打头且含页面标题）。
+	last := segment[strings.LastIndex(segment, "\x1b[H\x1b[2J"):]
+	if !strings.HasPrefix(last, "\x1b[H\x1b[2J") || !strings.Contains(last, "版块列表") {
+		t.Fatalf("退出后的最后一帧应是原页面: %q", last)
+	}
+	// 退出清屏紧跟重绘：两次连续 H+2J（前者由 defer 收口，后者由 render 发出）。
+	if !strings.Contains(c.out.text()[matrixMark:], "\x1b[H\x1b[2J\x1b[H\x1b[2J") {
+		t.Fatalf("退出清屏后应紧跟页面重绘: %q", c.out.text()[matrixMark:])
+	}
+	cmdOnlyWhitelistedANSI(t, segment)
+	for _, bad := range []string{"\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[?1049l", "\x1b[3J", "\x1b[1J"} {
+		if strings.Contains(segment, bad) {
+			t.Fatalf("动画/重绘泄露禁止序列 %q", bad)
 		}
 	}
 }
