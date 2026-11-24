@@ -10,8 +10,9 @@ package main
 //     （分层安全渲染，§3.5 / ADR-019），不直接 Write 用户字节。
 //
 // 明确不做（范围守门，见 docs/MVP-DELIVERY.md）：独立登录引导页由 P0-19
-// 最小交互层承接；帮助浮层由 ?/help 注册表文本承接；搜索占位留 P1；
-// 不做全屏重绘 / 光标定位，避免引入清屏类 ANSI 破坏 §3.5 的信任域边界。
+// 最小交互层承接；帮助浮层由 ?/help 注册表文本承接；搜索占位留 P1。
+// v0.9.0 / ADR-072：页面改为整屏干净重绘（ESC[H + ESC[2J），不再记忆上一屏
+// 行数、也不再走「追加 vs 原地覆盖」双模式——每次渲染都从左上角重画。
 
 import (
 	"context"
@@ -88,9 +89,6 @@ type pageController struct {
 	// locale 是会话显示语言（默认 zh），只用于服务端固定文案/前缀查表；
 	// 绝不塞进 viewmodel.Screen——RenderScreen 仍是不locale的纯函数（见 view.go）。
 	locale string
-	// 上一屏占用的行数（ADR-027）。>0 表示屏幕连续、可原地重绘；
-	// 任何非屏幕输出（提示/回显/登录文本）都会把它清零退回追加模式。
-	screenLines int
 	// P1-M5 邮箱认证：pending 状态每会话一份，/register|/recover 后供
 	// /verify 使用；重连即失效（验证码 TTL 仅 10 分钟）。emailFlow 非空时优先吃按键。
 	pendingEmail   string
@@ -252,29 +250,32 @@ func (p *pageController) active() int {
 	return p.presence.Active()
 }
 
-// render 把当前 Screen 交给终端 Renderer，并在页面层完成 LF→CRLF。
+// render 把当前 Screen 交给终端 Renderer，并在页面层完成 LF→CRLF，
+// 再按整屏干净重绘组装帧（ESC[H 回左上角 + ESC[2J 清当前屏，ADR-072）。
+//
+// 不再记住上一屏行数：每次渲染都从 (1,1) 重画，因此窗口缩放后不会因旧行数
+// 陈旧而错位，也不会残留上一屏更短时下方的空白带。height 只用于决定末行是否
+// 补 CRLF（n>=height 时不补，避免底行换行触发滚屏把首行顶出可视区）。
 func (p *pageController) render(sess pageSession) error {
 	if p.service == nil {
 		return p.writeFixed(sess, "论坛服务尚未就绪")
 	}
 	width, height, _ := sess.Window()
+	if height == 0 {
+		// 无 pty-req 高度信息（如 ssh -T）时兜底 24 行：否则 RenderCleanFrame
+		// 取保守分支不补末行 CRLF，后续追加会贴在内容末行尾部（ADR-072 边界）。
+		height = 24
+	}
 	text, err := terminal.RenderScreenWithLocale(p.screen, int(width), p.locale)
 	if err != nil {
 		// 失败关闭：渲染器不接受畸形 ViewModel / 含控制字符的系统文本时，
 		// 宁可只给一行固定提示，也不把可疑内容写进 PTY。
 		return p.writeFixed(sess, "页面渲染失败，已停止输出")
 	}
-	// screenLines>0 → 屏幕连续，原地重绘；=0 → 中间插入过其它输出，追加。
-	// RenderFrame 在极窄终端自动折行时降级追加；高度经 height 传入用于 CUU
-	// 钳制（上一屏超过可视区时不让光标跨 scrollback，ADR-071）。
-	frame, lines := terminal.RenderFrame(toCRLF(text), p.screenLines, int(width), int(height))
-	p.screenLines = lines
+	frame, _ := terminal.RenderCleanFrame(toCRLF(text), int(height))
 	_, err = io.WriteString(sess, frame)
 	return err
 }
-
-// invalidateScreen 由调用方在输出任何非屏幕文本前调用（ADR-027）。
-func (p *pageController) invalidateScreen() { p.screenLines = 0 }
 
 // maybeShowCommandEntryHint 只在本次会话首次按 / 进入命令输入时打印提示，
 // 之后静默。实测一次会话里 help/top/verify/recover 后各刷一次，滚动严重。
@@ -288,8 +289,9 @@ func (p *pageController) maybeShowCommandEntryHint(out io.Writer) {
 }
 
 // writeFixed 只输出服务端编译期常量，走 RenderSystem 路径（普通色）。
+// 追加一行；其后的下一次页面渲染会整屏清屏回页面（ADR-072），
+// 这行提示留在 scrollback 可上翻。
 func (p *pageController) writeFixed(sess pageSession, text string) error {
-	p.invalidateScreen() // 非屏幕输出打断连续性，下次渲染必须追加
 	rendered, err := safe.RenderSystem(text, safe.StylePlain)
 	if err != nil {
 		return err
@@ -305,7 +307,6 @@ func (p *pageController) writeFixed(sess pageSession, text string) error {
 // 错误/失败提示仍用 writeFixed 保持醒目。样式由 RenderSystem 自带 reset 收尾，
 // 不泄漏到后续用户回显。
 func (p *pageController) writeHint(sess pageSession, key string, args ...any) error {
-	p.invalidateScreen()
 	text := i18n.Lookup(p.locale, i18n.KeyHintPrefix) + i18n.Lookup(p.locale, key, args...)
 	rendered, err := safe.RenderSystem(text, safe.StyleDim)
 	if err != nil {

@@ -5,7 +5,6 @@ import (
 
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
-	"github.com/jeeinn/motd/internal/presentation/terminal"
 )
 
 // /login 发起屏的 ViewModel 投影（P1-M2：与论坛四页共用 Screen + Renderer）。
@@ -47,15 +46,4 @@ func loginScreen(v auth.LoginView, sb viewmodel.StatusBar) viewmodel.Screen {
 			},
 		},
 	}
-}
-
-// renderLoginScreen 把 ViewModel 交给共享渲染器，并在呈现层完成 LF→CRLF。
-// prevLines 是上一屏行数：0 表示此前插入过非屏幕文本，退回追加模式（ADR-027）。
-func renderLoginScreen(out *loginPresenter, v auth.LoginView, prevLines int) (string, int, error) {
-	text, err := terminal.RenderScreen(loginScreen(v, out.status), out.width)
-	if err != nil {
-		return "", 0, err
-	}
-	frame, lines := terminal.RenderFrame(toCRLF(text), prevLines, out.width, out.height)
-	return frame, lines, nil
 }

@@ -394,9 +394,9 @@ func TestMVPLoginCommandHintOnRealSSH(t *testing.T) {
 	c.out.waitSince(t, mark, "未知命令")
 }
 
-// ADR-027：真实 SSH 客户端连按 j/k 时应原地重绘（CUU + EL），
-// 不再每次追加一整屏；且清屏 / OSC / 备用屏等禁止序列绝不出现。
-func TestMVPNavigationRedrawsInPlace(t *testing.T) {
+// ADR-072：真实 SSH 客户端连按 j/k 时应整屏干净重绘（H + 2J），
+// 不再追加整屏、也不再用 CUU+EL 局部覆盖；清历史 / OSC / 备用屏等仍绝不出现。
+func TestMVPNavigationRedrawsCleanFrame(t *testing.T) {
 	_, h, rt, pools, _ := setupMVPRuntime(t)
 	srv, err := sshd.New(sshd.Config{
 		Addr:     "127.0.0.1:0",
@@ -429,13 +429,23 @@ func TestMVPNavigationRedrawsInPlace(t *testing.T) {
 	c.send(t, "jjj") // 焦点 1 → 4
 	c.out.waitSince(t, mark, ">  4")
 	segment := c.out.text()[mark:]
-	if !regexp.MustCompile(`\x1b\[\d+A`).MatchString(segment) {
-		t.Fatalf("连续导航应原地重绘（CUU 上移），实际 %q", segment)
+	// jjj 触发三次导航渲染 → 三帧，每帧以 H + 2J 打头。
+	if n := strings.Count(segment, "\x1b[2J"); n != 3 {
+		t.Fatalf("三次导航应产生三帧整屏重绘（3 个 2J），实际 %d: %q", n, segment)
 	}
-	if !strings.Contains(segment, "\x1b[K") {
-		t.Fatalf("重绘应逐行 EL 清行，实际 %q", segment)
+	if n := strings.Count(segment, "\x1b[H"); n != 3 {
+		t.Fatalf("三次导航应产生三次 ESC[H，实际 %d: %q", n, segment)
 	}
-	for _, bad := range []string{"\x1b[2J", "\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[H"} {
+	if !strings.HasPrefix(segment, "\x1b[H\x1b[2J") {
+		t.Fatalf("导航帧应以 H + 2J 打头，实际 %q", segment[:min(24, len(segment))])
+	}
+	if strings.Contains(segment, "\x1b[K") {
+		t.Fatalf("整屏重绘不再逐行 EL 补清: %q", segment)
+	}
+	if regexp.MustCompile(`\x1b\[\d+A`).MatchString(segment) {
+		t.Fatalf("整屏重绘不需要 CUU 上移: %q", segment)
+	}
+	for _, bad := range []string{"\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[?1049l", "\x1b[3J", "\x1b[1J", "\x1b[2;3H"} {
 		if strings.Contains(segment, bad) {
 			t.Fatalf("重绘泄露禁止序列 %q: %q", bad, segment)
 		}

@@ -10,6 +10,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
 	"github.com/jeeinn/motd/internal/presentation/terminal"
+	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
 
 func renderScreenToString(sc viewmodel.Screen) (string, error) {
@@ -95,9 +96,12 @@ func TestLoginScreenSeparatesFixedAndExternalText(t *testing.T) {
 
 func TestLoginPresenterShowStartRendersScreenWithCRLF(t *testing.T) {
 	var b bytes.Buffer
-	p := &loginPresenter{status: viewmodel.StatusBar{
-		Online: 2, Active: 1, Identity: viewmodel.Identity{Guest: true}, Level: 1,
-	}}
+	p := &loginPresenter{
+		status: viewmodel.StatusBar{
+			Online: 2, Active: 1, Identity: viewmodel.Identity{Guest: true}, Level: 1,
+		},
+		width: 80, height: 24,
+	}
 	if err := p.showStart(&b, testLoginView()); err != nil {
 		t.Fatal(err)
 	}
@@ -114,24 +118,45 @@ func TestLoginPresenterShowStartRendersScreenWithCRLF(t *testing.T) {
 	if strings.Contains(out, "\n") && !strings.Contains(out, "\r\n") {
 		t.Fatal("不得出现裸 LF")
 	}
-	// SGR 上色允许；清屏 / 清行 / 光标上移不允许出现在首次追加渲染里。
-	for _, banned := range []string{"\x1b[2J", "\x1b[K", "\x1b[1A"} {
+	// ADR-072：发起屏是整屏状态更新 → 以 H + 2J 开头，整帧各出现一次。
+	if !strings.HasPrefix(out, "\x1b[H\x1b[2J") {
+		t.Fatalf("发起屏应以 ESC[H + ESC[2J 开头，实际 %q", out[:min(24, len(out))])
+	}
+	if n := strings.Count(out, "\x1b[H"); n != 1 {
+		t.Fatalf("整帧应只出现 1 次 ESC[H，实际 %d", n)
+	}
+	if n := strings.Count(out, "\x1b[2J"); n != 1 {
+		t.Fatalf("整帧应只出现 1 次 ESC[2J，实际 %d", n)
+	}
+	// 整屏重绘不再逐行补清、也不上移光标。
+	for _, banned := range []string{"\x1b[K", "\x1b[1A", "\x1b[2K", "\x1b[3J", "\x1b[1J"} {
 		if strings.Contains(out, banned) {
-			t.Fatalf("首次渲染不应含 %q: %q", banned, out)
+			t.Fatalf("整屏重绘不应含 %q: %q", banned, out)
 		}
 	}
-	if p.screenLines <= 0 {
-		t.Fatal("应记住本屏行数，供后续原地重绘判定")
+	if !strings.HasSuffix(out, "\r\n") {
+		t.Fatalf("n<height 时末行应补 CRLF（光标到输入位），实际 %q", out[len(out)-8:])
 	}
 }
 
-func TestLoginPresenterLineBreaksScreenContinuity(t *testing.T) {
+// TestLoginPresenterLineAppendsWithoutClear：逐行反馈（轮询/成功屏）保持追加，
+// 不整屏清屏——否则用户看不到上一步状态，也无法回看（ADR-072 §4.3）。
+func TestLoginPresenterLineAppendsWithoutClear(t *testing.T) {
+	var b bytes.Buffer
 	p := &loginPresenter{}
-	p.screenLines = 9
-	if err := p.line(&bytes.Buffer{}, "等待授权中", 0); err != nil {
+	if err := p.line(&b, "等待授权中", safe.StylePlain); err != nil {
 		t.Fatal(err)
 	}
-	if p.screenLines != 0 {
-		t.Fatal("非屏幕文本必须打断连续性，避免 CursorUp 覆盖错位置")
+	out := b.String()
+	if !strings.HasPrefix(out, "等待授权中") {
+		t.Fatalf("追加输出应直接以文案开头，实际 %q", out)
+	}
+	for _, banned := range []string{"\x1b[H", "\x1b[2J", "\x1b[K", "\x1b["} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("逐行追加不得含控制序列 %q: %q", banned, out)
+		}
+	}
+	if !strings.HasSuffix(out, "\r\n") {
+		t.Fatalf("追加行应以 CRLF 收尾: %q", out)
 	}
 }

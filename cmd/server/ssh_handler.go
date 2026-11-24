@@ -248,7 +248,8 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	// 页面状态每会话独立：inputHandler 是进程级单例，绝不能把光标 / 当前节点
 	// 之类的 UI 状态放在 handler 上（原则二：内存状态只是运行时状态）。
 	pc := h.newPageController(sess)
-	_, _ = fmt.Fprintf(sess, "motd %s\r\n", version)
+	// 版本行不再写在这里：首帧的整屏重绘（ESC[H + ESC[2J）会立即把它擦掉，
+	// 且 2J 不进 scrollback，等于整场会话都看不到。版本改由 /stats 提供。
 	_ = sess.SetState(presence.StateBrowsing)
 	_ = pc.showNodes(ctx, sess)
 
@@ -310,8 +311,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	// 其余按键零回显；非登录态走原有的命令表分发。
 	handleOne := func(m input.KeyMsg) bool {
 		if flow != nil && flow.active {
-			// 登录轮询持续输出固定文本行，屏幕连续性一直被打断（ADR-027）。
-			pc.invalidateScreen()
 			if isLoginCancelKey(m) {
 				flow.cancel(ctx, sess)
 				flow = nil
@@ -322,7 +321,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 		}
 		if pc.emailFlow != nil {
 			// 邮箱分步输入优先于编辑态与命令表；密码字段隐藏回显（ADR-026）。
-			pc.invalidateScreen()
 			done, cancelled := pc.emailFlow.step(ctx, pc, m)
 			if cancelled || done {
 				pc.clearEmailFlow() // 复位 secret 掩码（step 内已 finish，这里保证 flow 一定被摘掉）
@@ -331,8 +329,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			return false
 		}
 		if pc.editor != nil {
-			// 编辑态有逐字符回显与固定提示，属于非屏幕输出（ADR-027）。
-			pc.invalidateScreen()
 			// 编辑态优先于命令表；输入经 lineEcho 净化后回显（ADR-026）。
 			_ = pc.editorKey(ctx, sess, m)
 			return false
@@ -341,7 +337,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 		case outcomeQuit:
 			return true
 		case outcomeStartLogin:
-			pc.invalidateScreen() // 登录发起屏会插入多行文本
 			f, ok := h.newLoginFlow()
 			if !ok {
 				_, _ = io.WriteString(sess, auth.LoginTextNotReady+"\r\n")
@@ -403,7 +398,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 				continue
 			}
 			pollResultC = nil
-			pc.invalidateScreen() // 轮询状态行 / 成功屏打断了屏幕连续性
 			done, delay, _ := flow.applyPoll(ctx, sess, sess, pm.result, pm.err)
 			if done || !flow.active {
 				flow = nil
@@ -442,15 +436,6 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 	wasEditing, beforeLen := cl.active, len(cl.runes)
 	action, line, pasteLen := applyKey(cl, m)
 	echoCommandKey(pc.echo, m, wasEditing, beforeLen, len(cl.runes), action)
-	// ADR-027：只有纯导航键保持屏幕连续（可原地重绘）；
-	// 其它动作都会产生提示 / 回显 / 结果文本，光标离开屏幕末尾，
-	// 下一次渲染必须退回追加模式，否则 CursorUp 会覆盖错位置。
-	switch action {
-	case actionMoveDown, actionMoveUp, actionOpen, actionBack,
-		actionNextPage, actionPrevPage, actionNone:
-	default:
-		pc.invalidateScreen()
-	}
 	// 固定提示统一从纯函数取；空串即「零输出」（浏览态 Esc 走 actionNone）。
 	if notice := actionNotice(action, pasteLen); notice != "" {
 		_, _ = io.WriteString(sess, notice)
@@ -529,7 +514,6 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 				if h.email == nil {
 					_, _ = io.WriteString(sess, emailTextNotReady+"\r\n")
 				} else {
-					pc.invalidateScreen()
 					pc.clearEmailFlow() // 若已有邮箱流程未结束，先复位其 secret 掩码
 					pc.emailFlow = newEmailFlow(emailFlowLogin, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false, h.onLogin)
 				}

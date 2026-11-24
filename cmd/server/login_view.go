@@ -20,6 +20,7 @@ import (
 
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/presentation/terminal"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
 
@@ -29,18 +30,17 @@ type loginPresenter struct {
 	status viewmodel.StatusBar
 	// width 来自当前连接的 pty-req；0 时 Renderer 按 80 列降级。
 	width int
-	// height 来自当前连接的 pty-req；>0 时 RenderFrame 用它钳制 CUU 上移量
-	// （上一屏超过可视区时不跨 scrollback，ADR-071）；0 表示未知。
+	// height 来自当前连接的 pty-req；>0 时 RenderCleanFrame 用它决定末行是否
+	// 补 CRLF（n>=height 不补，防底行换行滚屏，ADR-072）；0 表示未知、保守不补。
 	height int
-	// screenLines 为上一屏内容行数；>0 才允许原地重绘。
-	screenLines int
 }
 
 // line 渲染一行服务端固定文本。text 必须是编译期常量或由本地数值拼成的
 // 可信文本；任何来自响应的字符串都不允许传进来。
+//
+// 逐行反馈（device code 轮询、成功屏）保持**追加**语义：日志式的多步输出
+// 若每次清屏会当场丢内容，用户需要能回看（ADR-072 §4.3）。
 func (p *loginPresenter) line(out io.Writer, text string, style safe.Style) error {
-	// 非屏幕文本打断连续性：下一次 Screen 必须追加，不能用 CursorUp 覆盖。
-	p.screenLines = 0
 	rendered, err := safe.RenderSystem(text, style)
 	if err != nil {
 		return err
@@ -52,7 +52,6 @@ func (p *loginPresenter) line(out io.Writer, text string, style safe.Style) erro
 // external 渲染一行外部数据（GitHub 响应的 user_code / verification_uri、
 // 或派生出的 username）。先经 ProjectLoginView 的格式白名单，再走净化路径。
 func (p *loginPresenter) external(out io.Writer, text string) error {
-	p.screenLines = 0
 	_, err := io.WriteString(out, toCRLF(safe.RenderUser(text, safe.Options{}))+"\r\n")
 	return err
 }
@@ -65,14 +64,17 @@ func toCRLF(s string) string {
 // 状态栏与论坛同源。固定文案与外部字段在 loginScreen 里已经分流到
 // RenderSystem / RenderUser 两条路径，这里只负责把渲染结果写进 PTY。
 //
+// 发起屏是**整屏状态更新**，与普通导航页一致走 RenderCleanFrame（H + 2J）：
+// 从左上角重画，消除残留与空行；其后的轮询状态行仍按追加输出（line/external）。
+//
 // 渲染失败时失败关闭：只输出一行服务端固定文案，绝不把可疑 ViewModel
 // 或外部原文原样写回终端。
 func (p *loginPresenter) showStart(out io.Writer, v auth.LoginView) error {
-	frame, lines, err := renderLoginScreen(p, v, p.screenLines)
+	text, err := terminal.RenderScreen(loginScreen(v, p.status), p.width)
 	if err != nil {
 		return p.line(out, auth.LoginTextDeviceCodeInvalidated, safe.StylePlain)
 	}
-	p.screenLines = lines
+	frame, _ := terminal.RenderCleanFrame(toCRLF(text), p.height)
 	_, err = io.WriteString(out, frame)
 	return err
 }

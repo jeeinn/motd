@@ -290,7 +290,6 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 		if inv.Name == "recover" {
 			kind = emailFlowRecover
 		}
-		pc.invalidateScreen()
 		pc.clearEmailFlow() // 若旧流程尚未结束就被新命令取代，先复位其 secret 掩码
 		pc.emailFlow = newEmailFlow(kind, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false, h.onLogin)
 	case "verify":
@@ -298,7 +297,6 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 			_, _ = io.WriteString(sess, emailTextNoPending+"\r\n")
 			return
 		}
-		pc.invalidateScreen()
 		pc.clearEmailFlow() // 同上：新命令取代旧流程时先复位
 		// v0.3.1：收密码前先做只读预检。原先 FindLatestActiveToken 排在
 		// hashPassword 之后，无效码也要白输两遍 19MiB argon2 才报错。
@@ -314,7 +312,6 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 			_, _ = io.WriteString(sess, emailTextNoPending+"\r\n")
 			return
 		}
-		pc.invalidateScreen()
 		if err := h.email.Resend(ctx, pc.pendingEmail, sess.RemoteIPHash()); err != nil {
 			writeEmailError(sess, err)
 			return
