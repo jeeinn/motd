@@ -260,3 +260,82 @@ func TestComposerLinesReturnsDefensiveCopy(t *testing.T) {
 		t.Fatalf("Lines() 副本被改动影响了内部状态: %q", got)
 	}
 }
+
+func TestComposerLoadRestoresMultilineAndNormalizesCRLF(t *testing.T) {
+	c := NewComposer()
+	if err := c.Load("行1\r\n行2\r行3"); err != nil {
+		t.Fatalf("Load 意外失败: %v", err)
+	}
+	if !c.Active() {
+		t.Fatal("Load 成功后应激活")
+	}
+	if got, want := c.Text(), "行1\n行2\n行3"; got != want {
+		t.Fatalf("CRLF/CR 应归一化为 LF: got=%q want=%q", got, want)
+	}
+	if got, want := len(c.Lines()), 3; got != want {
+		t.Fatalf("应有 3 行，实际 %d", got)
+	}
+}
+
+func TestComposerLoadEmptyGivesSingleEmptyLine(t *testing.T) {
+	c := NewComposer()
+	if err := c.Load(""); err != nil {
+		t.Fatalf("Load 空文本意外失败: %v", err)
+	}
+	if !c.Active() {
+		t.Fatal("Load 空文本后应激活")
+	}
+	if got, want := c.Text(), ""; got != want {
+		t.Fatalf("空文本应为空正文: got=%q", got)
+	}
+	if got, want := len(c.Lines()), 1; got != want {
+		t.Fatalf("空文本应为单行空缓冲，实际 %d 行", got)
+	}
+}
+
+func TestComposerLoadSentinelLineStaysInBuffer(t *testing.T) {
+	// 防回归：整块 Load 不得把独立的 "." 行当成提交哨兵。
+	c := NewComposer()
+	if err := c.Load("第一行\n.\n第三行"); err != nil {
+		t.Fatalf("Load 意外失败: %v", err)
+	}
+	if !c.Active() {
+		t.Fatal("含独立 '.' 行的 Load 不得触发提交")
+	}
+	if got, want := c.Text(), "第一行\n.\n第三行"; got != want {
+		t.Fatalf("哨兵行应整块留在正文: got=%q want=%q", got, want)
+	}
+	// Load 后继续 Feed 仍正常（缓冲可续输）。
+	if _, err := c.Feed(KeyMsg{Kind: KeyRune, Rune: 'x'}); err != nil {
+		t.Fatalf("Load 后 Feed 意外失败: %v", err)
+	}
+	if got := c.Text(); !strings.HasSuffix(got, "x") {
+		t.Fatalf("Load 后续输应接在末尾: %q", got)
+	}
+}
+
+func TestComposerLoadTooManyLinesRejectedKeepsState(t *testing.T) {
+	c := NewComposer(WithMaxLines(2))
+	if err := c.Load("a\nb\nc"); !errors.Is(err, ErrTooManyLines) {
+		t.Fatalf("超行数上限应报 ErrTooManyLines，实际 %v", err)
+	}
+	if c.Active() {
+		t.Fatal("超限 Load 不得激活")
+	}
+	if c.lines != nil {
+		t.Fatalf("超限 Load 不得改动缓冲: %q", c.Text())
+	}
+}
+
+func TestComposerLoadTooManyBytesRejectedKeepsState(t *testing.T) {
+	c := NewComposer(WithMaxBytes(4))
+	if err := c.Load("ab\ncd"); !errors.Is(err, ErrTooManyBytes) {
+		t.Fatalf("超字节上限应报 ErrTooManyBytes，实际 %v", err)
+	}
+	if c.Active() {
+		t.Fatal("超限 Load 不得激活")
+	}
+	if c.lines != nil {
+		t.Fatalf("超限 Load 不得改动缓冲: %q", c.Text())
+	}
+}
