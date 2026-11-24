@@ -66,15 +66,18 @@ func sgrOnly(s string) bool {
 	return true
 }
 
-// allowedANSI 是 ansi.go 里 ESC 字面量的完整白名单（ADR-027）：
-// 纯 SGR、EL 清行、CUU 上移模板。其余一律拒绝，且模板里的 %d 只由
-// 服务端按「上一屏行数」填充，不接收用户输入。
+// allowedANSI 是 ansi.go 里 ESC 字面量的完整白名单（ADR-027，ADR-072 扩充）：
+// 纯 SGR、EL 清行、CUU 上移模板，以及整屏重绘所需的**无参** CUP home [H
+// 与**无参** ED 2 [2J。其余一律拒绝，且模板里的 %d 只由服务端按「上一屏行数」
+// 填充，不接收用户输入。
+//
+// 注意 [J（无参 ED）**不在**白名单：放开的是明确的 2J，而不是整个 ED 家族。
 func allowedANSI(s string) bool {
 	if sgrOnly(s) {
 		return true
 	}
 	switch s {
-	case "\x1b[K", "\x1b[%dA":
+	case "\x1b[K", "\x1b[%dA", "\x1b[H", "\x1b[2J":
 		return true
 	}
 	return false
@@ -96,7 +99,7 @@ func TestSafeRendererANSIOnlyFromTable(t *testing.T) {
 			if file != "ansi.go" {
 				t.Errorf("%s 出现 \\x1b 字面量：ESC 序列只能定义在 ansi.go 的常量表", file)
 			} else if !allowedANSI(v) {
-				t.Errorf("ansi.go 里的 ESC 字面量必须属于 SGR/EL/CUU 白名单，实际 %q", v)
+				t.Errorf("ansi.go 里的 ESC 字面量必须属于 SGR/EL/CUU/H/2J 白名单，实际 %q", v)
 			}
 		}
 	}
@@ -105,9 +108,12 @@ func TestSafeRendererANSIOnlyFromTable(t *testing.T) {
 	}
 }
 
+// TestSafeGuardDetectsInjectedANSI 自证守卫仍然有效：注入一个**仍禁止**的
+// ED 3J（清 scrollback）字面量，collectANSILiterals 必须检出，且 allowedANSI
+// 必须拒绝。样本不能用 2J/[H——它们已被 ADR-072 放开，否则此测试会永远通过。
 func TestSafeGuardDetectsInjectedANSI(t *testing.T) {
 	tmp := t.TempDir()
-	src := "package safe\n\nconst injected = \"\\x1b[2J\"\n"
+	src := "package safe\n\nconst injected = \"\\x1b[3J\"\n"
 	if err := os.WriteFile(filepath.Join(tmp, "bad.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -119,31 +125,36 @@ func TestSafeGuardDetectsInjectedANSI(t *testing.T) {
 		t.Fatalf("注入的 ESC 字面量必须被检出，实际 %v", found)
 	}
 	if allowedANSI(found["bad.go"][0]) {
-		t.Fatal("注入的清屏序列不能被误判为合法白名单序列")
+		t.Fatal("注入的清历史序列不能被误判为合法白名单序列")
 	}
 }
 
-// TestCursorControlGuardRejectsForbiddenSequences 是 ADR-027 的负向注入：
-// 放开 EL/CUU 之后，清屏、光标定位、备用屏、OSC 剪贴板/标题、带参数 EL
-// 必须仍然被拒。逐条验证，避免「白名单放宽一次，红线全线失守」。
+// TestCursorControlGuardRejectsForbiddenSequences 是 ADR-027/ADR-072 的负向注入：
+// 放开无参 H 与 2J 之后，清历史 3J、1J、无参 ED [J、带参 CUP、CUD、备用屏
+// 进出、OSC 剪贴板/标题、带参数 EL 必须仍然被拒。逐条验证，避免
+// 「白名单放宽一次，红线全线失守」。
 func TestCursorControlGuardRejectsForbiddenSequences(t *testing.T) {
 	bad := []string{
-		"\x1b[2J",          // ED 清屏
-		"\x1b[J",           // ED 无参数
-		"\x1b[H", "\x1b[f", // CUP 光标定位
+		"\x1b[J",             // ED 无参数（仍禁）
+		"\x1b[1J",            // ED 1：清光标前（仍禁）
+		"\x1b[3J",            // ED 3：清 scrollback（永禁）
+		"\x1b[f",             // CUP 带参等价式（仍禁）
+		"\x1b[2;3H",          // CUP 带参（只放开无参 [H）
 		"\x1b[B",             // CUD 下移
-		"\x1b[?1049h",        // DECSET 备用屏
+		"\x1b[?1049h",        // DECSET 进入备用屏
+		"\x1b[?1049l",        // DECRST 退出备用屏
 		"\x1b[2K",            // 带参数的 EL（只允许无参数 K）
 		"\x1b]52;c;YWJj\x07", // OSC 52 剪贴板
 		"\x1b]0;pwned\x07",   // OSC 改窗口标题
-		"\x1b[31m\x1b[2J",    // SGR 后面夹带清屏
+		"\x1b[31m\x1b[3J",    // SGR 后面夹带清历史
+		"\x1b[31m\x1b[2;3H",  // SGR 后面夹带带参 CUP
 	}
 	for _, s := range bad {
 		if allowedANSI(s) {
 			t.Errorf("禁止序列被误判为合法: %q", s)
 		}
 	}
-	for _, s := range []string{"\x1b[0m", "\x1b[1;4m", "\x1b[K", "\x1b[%dA"} {
+	for _, s := range []string{"\x1b[0m", "\x1b[1;4m", "\x1b[K", "\x1b[%dA", "\x1b[H", "\x1b[2J"} {
 		if !allowedANSI(s) {
 			t.Errorf("白名单序列被误拒: %q", s)
 		}
@@ -160,7 +171,10 @@ func TestUserContentPathHasNoCursorControl(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, banned := range []string{"CursorUp(", "ClearToEOL(", "cursorUpFmt", "clearToEOLANSI"} {
+		for _, banned := range []string{
+			"CursorUp(", "ClearToEOL(", "CursorHome(", "ClearScreen(",
+			"cursorUpFmt", "clearToEOLANSI", "cursorHomeANSI", "clearScreenANSI",
+		} {
 			if strings.Contains(string(b), banned) {
 				t.Errorf("%s 不得引用光标控制 %q：用户内容路径与服务端控制必须分离", name, banned)
 			}
@@ -168,8 +182,9 @@ func TestUserContentPathHasNoCursorControl(t *testing.T) {
 	}
 }
 
-// TestCursorControlsOnlyUsedByFrame 保证光标控制只有一个消费点：
-// presentation/terminal 的 RenderFrame。cmd 层只通过它间接使用。
+// TestCursorControlsOnlyUsedByFrame 保证光标/清屏控制只有一个消费点：
+// presentation/terminal 的 frame.go（RenderFrame / RenderCleanFrame）。
+// cmd 层只通过它们间接使用。
 func TestCursorControlsOnlyUsedByFrame(t *testing.T) {
 	root := findModuleRoot(t)
 	internalDir := filepath.Join(root, "internal")
@@ -177,6 +192,7 @@ func TestCursorControlsOnlyUsedByFrame(t *testing.T) {
 		"internal/presentation/terminal/safe/ansi.go": true, // 定义处
 		"internal/presentation/terminal/frame.go":     true, // 唯一调用处
 	}
+	calls := []string{"CursorUp(", "ClearToEOL(", "CursorHome(", "ClearScreen("}
 	err := filepath.WalkDir(internalDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -190,7 +206,14 @@ func TestCursorControlsOnlyUsedByFrame(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if !strings.Contains(string(b), "CursorUp(") && !strings.Contains(string(b), "ClearToEOL(") {
+		used := false
+		for _, c := range calls {
+			if strings.Contains(string(b), c) {
+				used = true
+				break
+			}
+		}
+		if !used {
 			return nil
 		}
 		if !allowed[rel] {
@@ -255,10 +278,11 @@ func TestCrossLineMergeNoRawANSI(t *testing.T) {
 	}
 }
 
-// TestCrossLineMergeRejectsInjectedForbiddenANSI 是负向注入：把 CUP/CUD/ED/
-// DECSET/带参 EL 塞进跨行回显样本，守卫与 allowedANSI 都必须拒绝。
+// TestCrossLineMergeRejectsInjectedForbiddenANSI 是负向注入：把带参 CUP/CUD/
+// ED 1J/3J/无参 [J/DECSET 塞进跨行回显样本，守卫与 allowedANSI 都必须拒绝。
+// 样本不再含单独的无参 [H 与 2J——它们已被 ADR-072 放开，留在这里会误判。
 func TestCrossLineMergeRejectsInjectedForbiddenANSI(t *testing.T) {
-	for _, seq := range []string{"\x1b[H", "\x1b[f", "\x1b[B", "\x1b[2J", "\x1b[J", "\x1b[?1049h"} {
+	for _, seq := range []string{"\x1b[1;1H", "\x1b[2;3H", "\x1b[f", "\x1b[B", "\x1b[1J", "\x1b[3J", "\x1b[J", "\x1b[?1049h"} {
 		src := "package main\nconst bad = " + strconv.Quote(seq) + "\n"
 		tmp := filepath.Join(t.TempDir(), "line_echo.go")
 		if err := os.WriteFile(tmp, []byte(src), 0o600); err != nil {

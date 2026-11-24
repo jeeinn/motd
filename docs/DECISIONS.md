@@ -418,11 +418,11 @@
 - 状态：已采纳（2026-11-18，V 先生在 `MVP-DELIVERY.md §10.3` 的 A/B 方案中选 **A「一次到位」**）
 - 结论：
   1. 连续导航（`j/k/Enter/h/q/n/p`）**原地重绘**，不再每次追加整屏；
-  2. `safe/ansi.go` 白名单从「纯 SGR」扩为「SGR + EL `\x1b[K` + CUU `\x1b[nA` 模板」，两者**只由服务端按上一屏行数生成**，绝不接收用户输入；
-  3. 仍明确禁止 ED 清屏 `2J`、CUP `H/f`、CUD `B`、DECSET 备用屏 `?1049h`、OSC 52 剪贴板、OSC 窗口标题、带参数 EL；用户内容路径（`RenderUser` / `SanitizeText`）不触达任何光标控制；
-  4. `presentation/terminal.RenderFrame` 是光标控制的**唯一消费点**（纯函数）；`pageController` 只负责记住上一屏行数；
-  5. 屏幕连续性：任何非屏幕输出（命令提示、逐字符回显、编辑器、登录文本、错误提示）都 `invalidateScreen()`，下次退回追加模式，避免 `CursorUp` 覆盖错位置；
-  6. 极窄终端发生自动折行时自动降级为追加（宁可多输出也不错位）。
+  2. `safe/ansi.go` 白名单从「纯 SGR」扩为「SGR + EL `\x1b[K` + CUU `\x1b[nA` 模板」，两者**只由服务端按上一屏行数生成**，绝不接收用户输入；（已修订：ADR-072 把白名单扩为 SGR / EL / CUU / 无参 CUP home / 无参 ED 2，仍只由服务端生成，用户内容路径不触达。）
+  3. 仍明确禁止 ED 清屏 `2J`、CUP `H/f`、CUD `B`、DECSET 备用屏 `?1049h`、OSC 52 剪贴板、OSC 窗口标题、带参数 EL；用户内容路径（`RenderUser` / `SanitizeText`）不触达任何光标控制；（已修订：ADR-072 解禁**无参** `\x1b[H` 与**无参** `\x1b[2J`；带参 CUP、带参 EL、`1J`/`3J`、CUD、DECSET、OSC 仍永禁。）
+  4. `presentation/terminal.RenderFrame` 是光标控制的**唯一消费点**（纯函数）；`pageController` 只负责记住上一屏行数；（已修订：ADR-072 新增 `RenderCleanFrame` 为受限第二消费点，`pageController.render()` 恒用整屏重绘、不再记住上一屏行数，`screenLines` 与 `invalidateScreen()` 一并删除。）
+  5. 屏幕连续性：任何非屏幕输出（命令提示、逐字符回显、编辑器、登录文本、错误提示）都 `invalidateScreen()`，下次退回追加模式，避免 `CursorUp` 覆盖错位置；（已修订：ADR-072 每次渲染都是整屏重绘，不存在「追加模式」，`invalidateScreen()` 无语义已删除；上述输出各自保持追加 / 行内覆盖方式，由下一次整屏渲染自然回到页面。）
+  6. 极窄终端发生自动折行时自动降级为追加（宁可多输出也不错位）。（已修订：ADR-072 整屏重绘无「追加降级」分支；超宽行的物理折行由物理行模型处理，渲染路径不再有降级态。）
 - 理由：
   - **体验**：追加式整屏重绘让用户每按一次 `j` 就滚一屏，实测判定不可用；原地重绘是标准 TUI 形态。
   - **带宽**：§1.2 的 1 Mbps 约束下先解决视觉；当前仍逐行重发整屏内容，**不提前引入 §3.3 的 Frame 增量协议**（那是 P1 浏览器端设计，FF09 避免过度设计）。
@@ -437,6 +437,8 @@
   - `cmd/server` 补 `TestNavigationRedrawsInPlace` 与真实 SSH `TestMVPNavigationRedrawsInPlace`；`cmdOnlySGR` 升为 `cmdOnlyWhitelistedANSI`。
   - **真实 Windows OpenSSH 客户端实测**：连按 `jjj` → 3 次 `\x1b[8A`、24 次 `\x1b[K`（3×8 行）、清屏/OSC/备用屏 0 次；`go build` / `go vet` / `go test -count=1 ./...` 0 FAIL（479 测试函数）。
 - 关联：`DEVIATIONS.md` R22、`docs/MVP-DELIVERY.md §11`。
+- 边界澄清（2026-11-24）：`RenderFrame` 现按**可视高度**钳制 CUU 上移量并在帧末归位光标（见 `ADR-071`）；本 ADR 的白名单与六条结论不变，`width > 0` 超宽降级追加之外新增高度维钳制。
+- **已修订（ADR-072，2026-11-24）**：本条结论 2/3/4/5/6 已由 `ADR-072`（v0.9.0 全屏干净重绘：无参 `H` / `2J` 整屏重绘）修订；**结论 1（导航原地重绘）语义不变**。原文与上方边界澄清保留供追溯，不删改。
 
 ## ADR-028 领域事件事务性发件箱（outbox）：写内落库、提交后投递
 
@@ -1118,6 +1120,7 @@
   1. **B/挂起恢复**（`resumeDraft`）：原在 `pasteBlock(正文)` 后写恢复提示，`writeFixed` 自带 CRLF 使提示贴正文末字并把光标甩下一行，而 cols 仍描述正文末行 → 退格擦错位置、提示粘连。修法：提示前置到正文回显之前，末尾输出正文，光标自然停正文末字、cols 对齐。
   2. **A 限流原地重建**（`rebuildComposerFromDraft`）：Load 后 cols 被 `newline()`+`setSecret()` 双清为空，退格删缓冲却零擦屏。新增 `line_echo.resyncLastLine`：白名单 `CursorUp`+`CR`+`ClearToEOL` 回正文末行重写并重建 cols，只重写末行不重复正文；`up=2`（提交换行 1 行 + 提示尾部 CRLF 1 行）。**边界**：`up` 依赖限流提示不折行，极窄终端折行时可能偏差（常规宽度实测单行，成立）。
   - 新增 5 项回归测试（提示顺序、宽字符退格精度、单行/多行 cols 重建、正文不重复），适配原 A 路径断言；测试 1028 → 1032，全门禁绿。
+- **已修订（ADR-069）**：决策 2 已由 ADR-069 修订（v0.9.0 方案 B：追加重建，改为 `pasteBlock` 整段回显）。本条原文（含"不调 `pasteBlock`"）与上方 v0.8.3 patch 段保留作历史记录，不删改。
 
 ## ADR-068 回复成功后焦点回填到自己的回复（ADR-066 锚点机制扩展）
 
@@ -1137,3 +1140,108 @@
 - 验证：O2-T1~T5（正常回复命中自己、并发插入锁定自己、软删回退首行、超上限不 panic、发帖不误伤）；`back_focus_test.go` 3 项与 `composer_draft_test.go` 全套不破；四门禁全绿 + 两条闭环专项 + archtest。
 - 关联：`ADR-066`（按 Row.ID 回填焦点、双渲染）、`ADR-027`（原地重绘帧连续性）、`ADR-014`（展示投影不进领域模型）。
 
+## ADR-069 v0.9.0 方案 B：限流原地重建改为追加重建止损（修订 ADR-067 决策 2）
+
+- 状态：已采纳（2026-11-24；设计稿 `docs/DESIGN-v090-display-i18n.md` §4.2 W4-W7，评审 B1/B3/B4 + 用户拍板 D2/D6）。
+- 背景：v0.8.4 在大视窗终端完整，但用户窄屏连续回复时正文字符散落。根因不是"窄屏边缘"：限流提示实测显示宽度 **125 列**（含 `[提示] ` 前缀与 `1m0s`），任何 **< 126 列**终端都会物理折行——80×24（SSH 最常见默认）、100 列、120 列全部命中，约 150 列宽屏才"正常"，可达面是绝大多数用户。ADR-067 的 `resyncLastLine(up=2)` 硬编码"提示 = 1 个物理行"，提示折行后 `CursorUp(2)` 跳进提示中间；`EL`（`\x1b[K`）只清当前物理行，清不掉折行产生的 H 行碎片，动态算 `up` 也是假修复。优先级仍 **P1**，依据是"数据不丢、闭环未断、可重发/恢复"，不是"全屏可规避"。
+- 决策：
+  1. **删除 `resyncLastLine`**（`line_echo.go`），A 路径 `rebuildComposerFromDraft` 不再输出任何 `CUU`。
+  2. **A 路径改为追加重建**：`writeHint` 按 locale 查表写等待提示（写 hint 的 i18n 化见 ADR-070），`setSecret(false)` 已清 `cols` 后不额外 reset，末尾直接 `p.echo.pasteBlock(e.body.Text())` 整段追加回显；光标自然停在正文末行末字，`cols` 由 `pasteBlock` 逐 rune 重建。
+  3. **明确以正文多回显一遍换光标与退格正确**：不整屏重绘、不回 Browsing 态、不引入 CUP/CUD/ED/DECSET，倒计时保持静态文案（守 ADR-027）。
+  4. **修订 ADR-067 决策 2**：其"不调 `pasteBlock`"被本条取代；原文与 v0.8.3 patch 段作历史记录保留，仅在 ADR-067 内加一行"已修订（ADR-069）"交叉引用，不删改。
+- 理由（逐条回应 P0-2「退格错乱不复发」三条理由）：
+  1. **光标落点由输出流末尾决定，不依赖硬编码 `up`**：`pasteBlock` 是最后一个写动作，光标自然停在正文末行末字；提示折成 1 行还是 4 行都不改变落点，从根本上移除"提示 = 1 物理行"的假设。
+  2. **`cols` 由 `pasteBlock` 逐 rune 重建，退格精度保持**：正文每个 rune 经 `SanitizeText` 后计入末行 `cols`，与屏幕实际显示宽度逐字对应；中文等宽字符仍按 2 列擦除（`\b \b` 两组），v0.8.3 的退格精度不回退。
+  3. **不用 CUP/CUD/ED/DECSET、不扩 ADR-027 白名单**：只用既有 `pasteBlock`、`writeHint` 与白名单内的 `\r\n`/SGR；信任域与零回显边界不变（服务端提示走 `RenderSystem`，用户正文仍走净化链）。
+- 代价 / 边界：
+  1. **正文多回显一遍（刷屏）**：同一段正文出现两遍（提交前一遍 + 重建追加一遍），长正文时刷屏明显——如实登记 D6 代价。
+  2. **提示离光标变远（长正文时倒计时可能被顶出屏幕）**：提示打印在追加正文之前，光标停在正文末字，物理行距离随正文长度与折行数增长；倒计时不自动刷新。
+  3. **不整屏重绘**（守 ADR-027），不回 Browsing，不改键位；"限流提示不折行"假设已破除，代码里不再有任何依赖它的光标回跳。
+  4. 无 schema 迁移、无新依赖、无新环境变量。
+- 验证：组 A 测试基建 W1（`fakePageSession` 可配宽度）/ W2（`cuuParams` 提取 CUU 参数）/ W3（虚拟终端网格 + pending wrap）；W4-W6 B 路径落地与三处断言语义适配，`len(cuuParams(out))==0` 取代 `Contains("\x1b[")` 防 SGR 假通过；虚拟网格 TC-01（24/40/125 列输出无 CUU、无碎片、正文紧随 hint）、TC-02（80×24 提示折 2 行仍无散落）绿；测试函数 1041 → 1056；四门禁 + 两闭环专项 + archtest 绿。
+- 关联：`ADR-026`（回显净化）、`ADR-027`（原地重绘 / ANSI 白名单）、`ADR-034`（多行编辑）、`ADR-066`（同链路焦点回填机制，本条不改）、`ADR-067`（被修订的决策 2 与 v0.8.3 patch 段）、`ADR-068`（同链路后续焦点扩展）。
+
+## ADR-070 v0.9.0 方案 C：物理行模型与 i18n 基建（统一折行口径 + 双语 hint）
+
+- 状态：已采纳（2026-11-24；设计稿 `docs/DESIGN-v090-display-i18n.md` §4.3-§4.4 W8-W14，评审 D4 升级纳入 B7）。
+- 背景：显示层缺物理行模型——`lineEcho` 只有 `out/secret/cols`，`cols` 记录逻辑列宽、不知道终端宽度；`RenderFrame` 虽有 `overWide` 降级，却只覆盖整屏渲染，编辑器回显层裸奔；`frame.go` 的 `overWide`/`visibleWidth` 与回显层形成双口径。B7 缺陷同源：`mergeBackspace` 的 `CursorUp(1)` 与 `backspace` 的 `\b \b`×逻辑宽都假设"一行 = 一个物理行"，超宽行按 Enter 后退格会错位残留。i18n 无骨架，hint/notice 前缀散落字面量，无法承载第二语言。
+- 决策：
+  1. **`safe/wrap.go` 纯函数**：`MeasureLine`/`MeasureWrap`/`OverWide`，基于 `DisplayWidth` 逐 rune 计算逻辑行的显示宽度、物理行数、折行点与 **pending wrap**（占满末列时光标留行末，下个字符到达才折——决定 `EL` 清哪行、`CUU` 落哪行）；宽字符整字折、SGR 计 0 列、零 IO、不输出 ANSI、不改白名单。
+  2. **`RenderFrame` 共用 `safe.OverWide`** 替换原 `overWide`/`visibleWidth` 重复逻辑，消除整屏渲染与编辑器回显层的双口径。
+  3. **`lineEcho` 注入 `width`**（0 = 未知，退化为旧行为）：`mergeBackspace` 按 `MeasureLine` 的物理行数输出 `CursorUp(n)`，修 B7 超宽行合并残留；`\b \b` 仍按逻辑宽逐 rune 擦除，退格精度不回退。
+  4. **i18n 骨架**：`i18n/catalog.go` 10 个 hint key（`hintPrefix` + 4 引导 + 5 草稿状态）× 2 locale（zh 现状原文逐字保留、en 译文含 `%s` 槽位），另有 notice 前缀查表；`pageController.locale` 默认 zh + 测试注入点，`writeHint`/`hintPrefix`/`noticePrefix` 一律查表；`RenderScreenWithLocale` 显式承载 locale，原 `RenderScreen` 委托 zh 保持签名与逐字节行为不变。**locale 绝不进 `viewmodel.Screen`，禁止渲染后字节替换文案**——以守 ADR-019 信任域（服务端固定文案走 `RenderSystem`，用户文本走 `RenderUser`/`SanitizeText`）。
+- 理由 / 代价 / 边界：
+  - 理由：物理行数由单一纯函数口径计算，同时修掉"显示层缺模型"与"硬编码光标跳行"两个根因，并为多语言预留通道；i18n 只在服务端固定文案通道查表，不碰用例、仓储、viewmodel 契约与键位。
+  - 代价 / 边界：
+    1. `width <= 0`（宽度未知）退化为旧行为（不折行、`Rows=1`、`Pending=false`），调用方不得假定已有物理行模型。
+    2. en 文案在极窄终端仍会物理折行——这是终端软折行行为（程序层不折行），与中文同构，不视为代码缺陷。
+    3. **全量 UI 翻译不在本期范围**（D3）：仅 hint 与 notice 前缀双语化，命令输出等后续版本再做。
+    4. B7 超宽行合并后，上方物理行的空格残留于光标下方但**无内容**；终端无删行序列，按发版红线不以填充空格绕行，故只消除"错位散落到正文"、不消除该无内容残留。
+    5. 无 schema 迁移、无新依赖、无新环境变量、无键位改动；`TestHintSingleCRLF` 保持不参数化。
+- 验证：W8 `wrap_test.go` 纯函数单测（中/英/emoji 行数、pending wrap、宽字符整字折）；W9 既有 `RenderFrame` 测试与 archtest 绿；W10 虚拟网格 TC-04（v0.8.3 退格精度不回退）/ TC-05（B7 超宽行合并后网格无上方物理行错位残留）；W11-W14 双语参数化（TC-03 40 vs 200 列正文段字节与文案长度无关、TC-06 前缀 zh `[提示]`/`[错误]` → en `[Info]`/`[Error]`，信任域白名单不变）；`TestHintSingleCRLF` 不参数化；两闭环专项 + archtest + 四门禁全绿；测试函数 1041 → 1067。
+- 关联：`ADR-019`（信任域与零回显）、`ADR-026`（回显净化）、`ADR-027`（原地重绘 / ANSI 白名单）、`ADR-034`（多行编辑）、`ADR-067`（patch 段 cols 重建历史）、`ADR-068`、`ADR-069`（方案 B 止损）。
+
+> 验证结果（2026-11-24）：四门禁 + 两条闭环专项 + archtest + 虚拟网格 TC-01~TC-05 + 双语参数化全部通过；测试函数 1041 → 1067（ADR-069 落地阶段 1041 → 1056，ADR-070 落地后累计 1067）。发版动作（commit / tag / Release / 部署）待用户单独授权，按 `AGENTS.md` §5 执行。
+
+
+## ADR-071 视口有界原地重绘：CUU 按终端高度钳制 + 帧末光标归位（ADR-027 边界澄清）
+
+- 状态：已采纳（2026-11-24；用户实测反馈"从详情返回列表后下方大片空白、列表从第 2 条开始、光标落底"）。
+- 性质：**ADR-027 的边界澄清，不修订其任何结论、不扩 ANSI 白名单**。ADR-027 的六条结论（原地重绘、SGR/EL/CUU 白名单、禁 ED/CUP/CUD/DECSET、RenderFrame 唯一消费点、invalidateScreen 连续性、超宽降级追加）全部保持。
+- 背景：ADR-027 的 `RenderFrame(text, prevLines, width)` 只有宽度维，无终端高度。两个高度维缺陷：
+  1. **D>H（详情逻辑行数 > 可视高度）**：顶部行滚入 scrollback，`CursorUp(prevLines)` 被终端钳制在可视顶、回不到逻辑屏首，随后补空 CRLF 又滚屏一次，可视区落空。
+  2. **D<=H**：`total = max(n, prevLines)` 补空行到旧屏行数，末行又发 `\r\n` 把光标推到 `total` 行而非内容末行——屏幕呈现"列表内容 + 下方空白带 + 光标停最底"。临界 D=H 时末尾 CRLF 还会把列表第 1 行滚出可视区（即用户看到的"从第 2 条开始"）。
+- 决策：
+  1. `RenderFrame` 增 `height int` 参数；`up = min(prevLines, height)`（height<=0 未知时退回旧口径，兼容无 Window 高度的调用点）。CUU 只回到可视顶，不跨 scrollback。
+  2. **帧末不写 `\r\n`**：写入 `total = max(n+1, up)` 行，最后一行留作归位空行且不换行，避免多滚一行把内容顶出可视区。
+  3. **光标归位**：补清多余行后用白名单 `CursorUp(total-1-n)` 把光标抬回第 n 行（内容末行的下一行）；返回值由 `total` 改为**内容行数 n**，使下次 `CUU(n)` 精确回到屏首，形成自洽闭环（连续重绘行数恒定）。
+  4. 高度经 `pageSession.Window()` 的 height 传入 `pageController.render`；登录屏 `loginPresenter` 增 `height` 字段、由 `login_flow` 从连接 pty-req 注入——两处生产调用点都拿到高度。
+- 理由：根因是"上一屏行数"被当作可无限 CUU 回退的量，而终端 CUU 实际受可视高度钳制；把模型改为"视口有界 + 帧末归位"即用既有白名单序列消除错位。以字节级虚拟网格实证四场景（D=H=24、H≈37、D<H、D>H）均修复：列表首行保留、状态栏/位置/help 完整、光标停在 help 下一行（空白带顶端而非终端底行）、无旧屏残留。
+- 代价 / 边界：
+  1. 补清的 `up-n` 行是用 EL 逐行擦掉旧屏内容必须付出的帧字节；这些空白已不造成光标/视觉异常（光标在空白带顶端，等价于 `cat` 短文件后的正常留白）。
+  2. 白名单内（无 ED）无法清除已滚入 scrollback 的旧详情残影，也无法在终端 resize 后立即对齐（`screenLines` 记录的是旧高度下的行数）——属可视区之外/异常态。处理需扩白名单引入 ED/CUP，会破 ADR-027 红线并抹掉用户历史，不采纳。SIGWINCH 时 `invalidateScreen()` 可作为后续改进。
+  3. "状态栏钉底"（展示层按 height 补白）经评估不纳入本次：它是独立的布局 UX 方向；且把内容行数撑到 H 会让光标重新落到终端底行，收益不明确。
+  4. `back()` 的两次 render 是 ADR-066 决策 5 要求，非本次根因，保持不动。
+  5. 无新 ANSI 序列、无 schema 迁移、无新依赖、无新环境变量、无键位改动；archtest 白名单与守卫零改动。
+- 验证：`frame_test.go` 高度维单测（CUU 钳制到 H、帧末不写 CRLF、归位 CUU、height 未知退化、连续重绘行数稳定）+ `page_controller_test.go:TestBackClampsCUUToViewport`（真实详情→back 路径断言所有 CUU <= 可视高度）；四门禁 + 两闭环专项 + archtest 全绿。
+- 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（原地重绘，本条为其边界澄清）、`ADR-034`、`ADR-066`（back 双渲染）、`ADR-068`~`ADR-070`。
+- **已修订（ADR-072，2026-11-24）**：本条的两项核心机制——**CUU 按可视高度钳制**与**帧末光标归位**——在整屏重绘目标态下被 `ADR-072` 取代（整屏重绘不再依赖上一屏行数，也不补清空白带），其钳制分支仅作为 `RenderFrame` 局部覆盖语义的一部分继续服务彩蛋与编辑器回显。另：本条代价 2 中「引入 ED/CUP 会抹掉用户历史」的表述按 `ADR-072` 事实澄清——无参 `2J` 只清当前可视屏、不清 scrollback，真正清历史的是永禁的 `3J`。原文保留供追溯，不删改。
+
+## ADR-072 v0.9.0 全屏干净重绘：无参 H/2J 整屏重绘（修订 ADR-027 白名单边界）
+
+- 状态：已采纳（2026-11-24；用户明确「为了体验可以破红线，每次重绘保持界面干净」，经架构师与交互设计师三方评估）。
+- 性质：**修订 ADR-027 的结论 2/3/4/5/6**（白名单边界、唯一消费点、屏幕连续性状态、超宽降级策略），ADR-027 原文保留供追溯；**结论 1（导航原地重绘语义）不变**。`ADR-071` 的视口钳制 / 帧末归位机制在整屏重绘目标态下被取代（原文保留）。
+- 背景：
+  1. ADR-027 的 CUU+EL 局部重绘必须**补清到上一屏行数**（`total = max(n, prevLines)`）。`ADR-071` 把 CUU 钳制到可视高度、帧末把光标抬回内容末行，缓解但未消除 `up - n` 空白带与「光标落底」。
+  2. 该机制依赖 `screenLines`（上一屏行数）这一每会话内存状态；window-change 层拿不到 `pageController`，resize 后记录即陈旧，下一次渲染仍按旧行数定位（ADR-071 已登记为边界）。
+  3. 用户实测：详情 → 返回列表后下方出现大片空白、光标停在空白区底部，判定为体验缺陷；用户明确授权「为了体验可以破红线」。
+- 决策：
+  1. **白名单边界**：服务端固定序列扩为 SGR / EL / CUU / **无参 CUP home（`\x1b[H`）** / **无参 ED 2（`\x1b[2J`）**；**永禁** CUD（`B`）、DECSET 备用屏（`?1049h` / `?1049l`）、OSC（含 52 剪贴板与窗口标题）、**带参** CUP（`\x1b[r;cH`）、**带参** EL、其余 ED（`1J` / `3J` / 无参 `\x1b[J`）。
+  2. **注入面为零参数**：新增两条序列不带任何参数，故不存在「用户数据拼进 CSI 参数」的注入渠道；用户文本仍只走 `RenderUser` / `SanitizeText`，`SanitizeText` 把 ESC 转为可见图示的行为不变。
+  3. **新增 `terminal.RenderCleanFrame(text string, height int)`**：帧首写 `H + 2J`，随后写 n 行内容；`n >= height` 时**末行不写 `\r\n`**（防止在屏底换行触发滚屏、把首行顶出可视区，重演 ADR-071 修掉的问题）；`height <= 0`（高度未知）保守不写末行 CRLF。
+  4. **`pageController.render()` 恒用 `RenderCleanFrame`**；随之**删除 `screenLines` 与 `invalidateScreen()`**——整屏重绘不依赖上一屏行数，也不存在「追加模式」，该标记失去语义。
+  5. **不用备用屏**：断连 / 崩溃时若未发出退出序列，用户会卡在备用屏、主屏与历史全部不可见（TUI 最常见事故）；且 `?1049h` 是 xterm 私有扩展，非 VT100 标准。
+  6. **`RenderFrame` 保留**其局部覆盖 / 追加语义（`prevLines > 0` 走 CUU+EL 并保留 ADR-071 的高度钳制，`prevLines <= 0` 追加）。**当前无生产调用**：页面走 `RenderCleanFrame`、彩蛋逐行追加、编辑器走 `line_echo` 的行内 CUU/EL；保留该函数与其单测作为"局部覆盖"能力，供未来需要原地更新单行 / 单块的场景，同时不丢失 ADR-071 已验证的钳制逻辑。
+  7. **例外保持追加**（刻意的体验取舍，非遗漏）：命令输出（`/who`、`/whoami`、`/stats` 等查询结果）、登录流程逐行反馈（device code / 轮询）、错误与提示文案（`fail()` / `writeFixed`）、编辑器逐字符回显（走行内 CUU+EL）。理由分别是：日志语义 / 需回看 / 纠错醒目 / 退格精度。
+  8. **彩蛋 `/matrix` 的实现**：进入 `H + 2J` 清屏并写固定提示 `[Esc 返回]`；帧间**逐行追加**雨帘（`height-2` 帧，24 行终端为 22 帧，留 1 行提示 + 1 行余量避免最后一帧把提示顶出可视区）；退出 `H + 2J` 清屏后重绘原页面。退出路径 `Esc` / 自然结束 / 断连取消三条统一 `defer` 收口。清屏后的空屏逐行追加不产生残影，**不需要 ring buffer 做局部覆盖**。按键链路有一处必解缺口：`KeyDecoder` 仅在有人调用 `Poll()` 时、过 25ms 决策窗口后才产出 `KeyEsc`，而动画期主循环阻塞在 `handle` 内无人 Poll，故须把 `dec.Poll` 传入动画循环每帧补判，`Esc` 最迟约 75ms 生效（否则提示写着可返回、实际按不动）。
+- 理由：
+  - **从根消除空白带**：整屏重绘不依赖「上一屏行数」，新屏多短都不残留旧行，也不再需要「补清到 max(n, up)」这一步。
+  - **缩放错位天然规避**：每次从 (1,1) 重画，`screenLines` 陈旧问题不复存在，无需新增 SIGWINCH → `pageController` 通知钩子。
+  - **带宽是收益不是代价**：单帧实测 310–414 字节，`H + 2J` 固定增 7 字节（1.7%–2.3%，< 2.5%）；省掉逐行补清后主力页（版块 / 帖子列表）净降约 8%。
+  - **历史回看能力不损**：`2J` 只清当前可视屏，不清 scrollback；真正清历史的是 `ED 3`（`\x1b[3J`），本条明确永禁。ADR-071 代价 2 中「引入 ED/CUP 会抹掉用户历史」的表述据此澄清——该担心不成立于无参 `2J`。
+  - **视觉一致**：当前屏只显示当前页面；`back()` 的两次渲染由第二次整屏覆盖第一次，天然无残影。
+- 代价 / 边界：
+  1. 已滚入 scrollback 的旧帧残影仍可上翻看到（`2J` 不清历史，有意保留）。
+  2. 缩放后若用户不按键，当前屏由终端自行重排、可能短暂错位；下一次 `render()` 才对齐。
+  3. 编辑器回显态走行内 CUU+EL，不经过整屏重绘，故不受益于本条（缩放时仍可能错位，`loginPresenter` 宽高为 pty-req 时静态值）。
+  4. 长详情无分页是独立 P0 项（要动查询 / 焦点 / 渲染三条链），不在本条范围；本期仅以 footer 文案管理预期。
+  5. 彩蛋 `/matrix` 若改为每帧整屏 `2J` 重画，带宽会升至 30–40 KB/s（绝对值仍远低于 1 Mbps）；既定方案为进入 / 退出各一次清屏 + 帧间逐行追加，不触发该增量。
+  6. 无 schema 迁移、无新依赖、无新环境变量、无键位改动。
+- 验证：
+  1. `internal/archtest/safe_test.go` 正向（`H` / `2J` 进允许集）与负向注入（`3J` / `1J` / 带参 CUP / 带参 EL / CUD / DECSET / OSC 仍拒）全绿；原失效样本已按新白名单修正。
+  2. `internal/presentation/terminal/frame_test.go` `RenderCleanFrame` 单测 5 项（帧首 `H+2J`、`n < height` 逐行 CRLF、`n >= height` 末行不写 CRLF、`height <= 0` 退化、用户文本注入净化）。
+  3. 页面渲染与 `back()` 路径改为断言帧首为 `H+2J`（`TestBackClampsCUUToViewport` 的 CUU 钳制断言按整屏重绘等价改写，不删除）。
+  4. 彩蛋 `/matrix` 6 项单测（进入/退出均为 `H+2J`、`Esc` 经 msgs、`Esc` 经 `Poll`、ctx 取消、自然结束、禁止序列）+ 1 项真实 SSH e2e（退出后重绘原页面）。
+  5. 四门禁（gofmt / build / vet / test）+ 两条 SSH 闭环专项 + archtest 全绿。
+- 落地进度：地基（`safe.CursorHome` / `safe.ClearScreen` / `terminal.RenderCleanFrame` 与守卫放宽）`e68f44d`；页面与登录屏接入 `d5c2ec1`（`screenLines` 与 `invalidateScreen` 全仓清零）；彩蛋全屏动画 `dbce109`；本 ADR 及文档同步随阶段 5 提交。测试函数 1070 → 1085。
+- 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（本条修订其结论 2/3/4/5/6）、`ADR-034`、`ADR-062`、`ADR-066`（back 双渲染）、`ADR-068`、`ADR-069`、`ADR-070`、`ADR-071`（其视口钳制 / 帧末归位机制在目标态被取代）、`docs/DESIGN-clean-redraw.md`。

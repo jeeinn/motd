@@ -65,5 +65,7 @@ func (h *inputHandler) runStats(ctx context.Context) string {
 	if err != nil {
 		return "统计查询失败，请稍后重试"
 	}
-	return statsText(snap)
+	// 版本随统计一并给出：首帧整屏重绘会擦掉连接时的版本行（ADR-072），
+	// /stats 是用户能主动查到当前服务端版本的固定入口。
+	return statsText(snap) + fmt.Sprintf("\n  服务端版本 %s", version)
 }

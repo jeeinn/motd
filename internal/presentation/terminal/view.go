@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/presentation/terminal/i18n"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
 
@@ -30,10 +31,22 @@ const (
 // RenderScreen 渲染一屏。width <= 0 时按 80 列降级（未收到 pty-req 的情况）。
 // 返回错误表示 ViewModel 或服务端固定文本不自洽，调用方应失败关闭而不是原样输出。
 //
-// 确定性边界：输出只由 (Screen, width) 与进程展示时区决定（见 display_location.go）。
-// 后者在启动期由 config.DisplayLocation 注入一次、之后只读；本函数不读时钟、
-// 不读 DB、不持有会话状态。时间字段按该时区格式化，格式串固定为 MM-DD HH:MM。
+// RenderScreen 以默认 locale=zh 渲染一屏。原签名与行为逐字节保持不变，
+// login_screen.go 与所有既有 view_test.go 调用点无需改动。
 func RenderScreen(s viewmodel.Screen, width int) (string, error) {
+	return RenderScreenWithLocale(s, width, i18n.LocaleZH)
+}
+
+// RenderScreenWithLocale 渲染一屏并显式注入 locale。
+// 分层约定：RenderScreen 是纯函数（输出只由 Screen/width/时区决定），locale 属于
+// 会话态 pageController，因此以参数传入——绝不把 locale 塞进 viewmodel.Screen、
+// 不改 RenderScreen 签名、也不在渲染后的字节流上做前缀字符串替换（后者会破坏
+// ADR-019 的信任域分离：服务端常量与用户文本必须各走 sys()/ext()）。
+//
+// 确定性边界：输出只由 (Screen, width, locale) 与进程展示时区决定（见
+// display_location.go）。后者在启动期注入一次、之后只读；本函数不读时钟、
+// 不读 DB、不持有会话状态。时间字段按该时区格式化，格式串固定为 MM-DD HH:MM。
+func RenderScreenWithLocale(s viewmodel.Screen, width int, locale string) (string, error) {
 	if err := s.Validate(); err != nil {
 		return "", fmt.Errorf("ViewModel 非法: %w", err)
 	}
@@ -144,7 +157,7 @@ func RenderScreen(s viewmodel.Screen, width int) (string, error) {
 		b.WriteByte('\n')
 	}
 
-	if err := renderStatusBar(&b, s, width); err != nil {
+	if err := renderStatusBar(&b, s, width, locale); err != nil {
 		return "", err
 	}
 	if err := sys(&b, screenFooter(s.Kind), safe.StyleDim); err != nil {
@@ -217,7 +230,7 @@ func screenFooter(k viewmodel.ScreenKind) string {
 	return "j/k 移动 · Enter 打开 · h/q 返回 · r 回复 · n 下一页 · / 命令 · ? 帮助"
 }
 
-func renderStatusBar(b *strings.Builder, s viewmodel.Screen, width int) error {
+func renderStatusBar(b *strings.Builder, s viewmodel.Screen, width int, locale string) error {
 	sb := s.StatusBar
 	identity := "访客"
 	if !sb.Identity.Guest {
@@ -256,7 +269,7 @@ func renderStatusBar(b *strings.Builder, s viewmodel.Screen, width int) error {
 		b.WriteByte('\n')
 	}
 	if sb.Notice.Kind != viewmodel.NoticeNone && sb.Notice.Message != "" {
-		prefix, style := noticePrefix(sb.Notice.Kind)
+		prefix, style := noticePrefix(sb.Notice.Kind, locale)
 		if err := sys(b, prefix, style); err != nil {
 			return err
 		}
@@ -270,16 +283,17 @@ func renderStatusBar(b *strings.Builder, s viewmodel.Screen, width int) error {
 	return nil
 }
 
-// noticePrefix 按提示语义返回固定前缀文字与样式（P4-T1）。
-// 只处理服务端编译期常量，不接收任何用户文本，因此用户无法借 Kind 染色正文。
-func noticePrefix(kind viewmodel.NoticeKind) (string, safe.Style) {
+// noticePrefix 按提示语义与 locale 返回固定前缀文字与样式（P4-T1 / W13）。
+// 前缀来自 i18n 服务端常量表，不接收任何用户文本，因此用户无法借 Kind 染色正文；
+// notice 正文仍由调用方走 ext()/RenderUser，两条路径不混用。
+func noticePrefix(kind viewmodel.NoticeKind, locale string) (string, safe.Style) {
 	switch kind {
 	case viewmodel.NoticeError:
-		return "[错误] ", safe.StyleError
+		return i18n.NoticePrefix(locale, true), safe.StyleError
 	case viewmodel.NoticeWarning:
-		return "[提示] ", safe.StyleNotice
+		return i18n.NoticePrefix(locale, false), safe.StyleNotice
 	default:
-		return "[提示] ", safe.StyleDim
+		return i18n.NoticePrefix(locale, false), safe.StyleDim
 	}
 }
 

@@ -47,6 +47,7 @@ go test -count=1 ./cmd/server -run TestMVPRestartAndBackupWithRealData
 - **依赖方向单向**：`transport → application → domain`，`presentation → application`，`infrastructure` 实现 `application` 定义的接口，`domain` 不依赖任何上层。请勿反向 import。
 - **端口定义在使用方**：外部能力（SQLite、GitHub、邮件）的接口由 `application` 声明，`infrastructure` 只做实现。
 - **终端输出分层渲染**：所有面向终端的文本走 `internal/presentation/terminal/safe`，不要直接拼接转义序列；新增 SGR 样式先登记到唯一常量表。
+- **改 ANSI 白名单必须逐项同步，缺一不可**：① `internal/presentation/terminal/safe/ansi.go` 定义 → ② `internal/archtest/safe_test.go` 守卫（正向允许集 + 负向注入）→ ③ `internal/presentation/terminal/frame_test.go` 白名单断言 → ④ `docs/DECISIONS.md` 新增或修订 ADR 并同步 `AGENTS.md §3`。只改其中一处会留下"守卫放行但文档未登记"或"文档允许但测试仍拒"的裂缝（ADR-072 教训）。
 - **网络调用在写事务之外**：外部请求不得持有数据库写事务；超时与失败要显式分类。
 - **凭据不落库、不进日志、不进呈现结构**：`access_token` / `device_code` 等不写库、不回显。
 - 新增环境变量请在 README「配置」表登记；不要提交 `.env`、密钥或备份文件（`.gitignore` 已覆盖）。

@@ -248,7 +248,8 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	// 页面状态每会话独立：inputHandler 是进程级单例，绝不能把光标 / 当前节点
 	// 之类的 UI 状态放在 handler 上（原则二：内存状态只是运行时状态）。
 	pc := h.newPageController(sess)
-	_, _ = fmt.Fprintf(sess, "motd %s\r\n", version)
+	// 版本行不再写在这里：首帧的整屏重绘（ESC[H + ESC[2J）会立即把它擦掉，
+	// 且 2J 不进 scrollback，等于整场会话都看不到。版本改由 /stats 提供。
 	_ = sess.SetState(presence.StateBrowsing)
 	_ = pc.showNodes(ctx, sess)
 
@@ -310,8 +311,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	// 其余按键零回显；非登录态走原有的命令表分发。
 	handleOne := func(m input.KeyMsg) bool {
 		if flow != nil && flow.active {
-			// 登录轮询持续输出固定文本行，屏幕连续性一直被打断（ADR-027）。
-			pc.invalidateScreen()
 			if isLoginCancelKey(m) {
 				flow.cancel(ctx, sess)
 				flow = nil
@@ -322,7 +321,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 		}
 		if pc.emailFlow != nil {
 			// 邮箱分步输入优先于编辑态与命令表；密码字段隐藏回显（ADR-026）。
-			pc.invalidateScreen()
 			done, cancelled := pc.emailFlow.step(ctx, pc, m)
 			if cancelled || done {
 				pc.clearEmailFlow() // 复位 secret 掩码（step 内已 finish，这里保证 flow 一定被摘掉）
@@ -331,17 +329,14 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			return false
 		}
 		if pc.editor != nil {
-			// 编辑态有逐字符回显与固定提示，属于非屏幕输出（ADR-027）。
-			pc.invalidateScreen()
 			// 编辑态优先于命令表；输入经 lineEcho 净化后回显（ADR-026）。
 			_ = pc.editorKey(ctx, sess, m)
 			return false
 		}
-		switch h.handle(ctx, sess, pc, m, &cl) {
+		switch h.handle(ctx, sess, pc, m, &cl, msgs, dec.Poll) {
 		case outcomeQuit:
 			return true
 		case outcomeStartLogin:
-			pc.invalidateScreen() // 登录发起屏会插入多行文本
 			f, ok := h.newLoginFlow()
 			if !ok {
 				_, _ = io.WriteString(sess, auth.LoginTextNotReady+"\r\n")
@@ -403,7 +398,6 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 				continue
 			}
 			pollResultC = nil
-			pc.invalidateScreen() // 轮询状态行 / 成功屏打断了屏幕连续性
 			done, delay, _ := flow.applyPoll(ctx, sess, sess, pm.result, pm.err)
 			if done || !flow.active {
 				flow = nil
@@ -424,7 +418,11 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	}
 }
 
-func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageController, m input.KeyMsg, cl *commandLine) handleOutcome {
+// handle 处理一条按键消息。msgs 是 Serve 主循环的按键通道，poll 是解码器的
+// 孤立-ESC 判定入口；两者都只透传给 /matrix 用于动画期中断（Esc / 断连）——
+// 其余分支都不读它，主循环在 handle 返回前阻塞，因此动画期间消费 msgs 不会与
+// 主循环争抢。
+func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageController, m input.KeyMsg, cl *commandLine, msgs <-chan input.KeyMsg, poll escPoller) handleOutcome {
 	// v0.6.0：浏览态监听 Konami 码（↑↑↓↓←→←→BA）。命令输入/编辑态不拦截，
 	// 避免吞掉方向键的原有语义；访客也不解锁（解锁需落用户记录）。
 	if !cl.active && pc.editor == nil && sess.Principal().IsUser() {
@@ -442,15 +440,6 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 	wasEditing, beforeLen := cl.active, len(cl.runes)
 	action, line, pasteLen := applyKey(cl, m)
 	echoCommandKey(pc.echo, m, wasEditing, beforeLen, len(cl.runes), action)
-	// ADR-027：只有纯导航键保持屏幕连续（可原地重绘）；
-	// 其它动作都会产生提示 / 回显 / 结果文本，光标离开屏幕末尾，
-	// 下一次渲染必须退回追加模式，否则 CursorUp 会覆盖错位置。
-	switch action {
-	case actionMoveDown, actionMoveUp, actionOpen, actionBack,
-		actionNextPage, actionPrevPage, actionNone:
-	default:
-		pc.invalidateScreen()
-	}
 	// 固定提示统一从纯函数取；空串即「零输出」（浏览态 Esc 走 actionNone）。
 	if notice := actionNotice(action, pasteLen); notice != "" {
 		_, _ = io.WriteString(sess, notice)
@@ -489,9 +478,11 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 		case "help":
 			_, _ = io.WriteString(sess, h.reg.Help())
 		case "matrix":
-			// v0.6.0：滚动雨帘。限帧率、固定行数，只用 SGR 绿色 + 普通字符，
-			// 不触碰被 ADR-027 禁止的 ED 清屏 / CUP 定位 / 备用屏序列。
-			h.runMatrix(ctx, sess)
+			// v0.9.0 / ADR-072：全屏动画（进入清屏 → 提示 + 逐行雨帘 → 退出清屏）。
+			// 动画期不改 screen/notice/selection，退出后用同一纯函数重绘原页面。
+			_, height, _ := sess.Window()
+			h.runMatrix(ctx, sess, msgs, int(height), poll)
+			_ = pc.render(sess)
 		case "fortune", "cowsay", "xkcd", "blame", "sudo":
 			// v0.5.1 / P3-M6：彩蛋都是固定语料，经安全渲染路径输出。
 			// 参数（如 /blame @user）只做个数校验，绝不回显原文（ADR-026）。
@@ -529,7 +520,6 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 				if h.email == nil {
 					_, _ = io.WriteString(sess, emailTextNotReady+"\r\n")
 				} else {
-					pc.invalidateScreen()
 					pc.clearEmailFlow() // 若已有邮箱流程未结束，先复位其 secret 掩码
 					pc.emailFlow = newEmailFlow(emailFlowLogin, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false, h.onLogin)
 				}
@@ -589,22 +579,67 @@ func writeSystem(sess io.Writer, text string) {
 // v0.7.1 把实现抽为 writeSystem 供 /stats 复用，调用点不必区分「彩蛋」与「系统文案」。
 func writeEgg(sess io.Writer, text string) { writeSystem(sess, text) }
 
-// runMatrix 输出固定行数的滚动雨帘（v0.6.0）。
-// 合规约束：只经 safe.RenderSystem 的 SGR 样式白名单上色，帧内容是 MatrixFrame()
-// 生成的固定字符集，不含 ESC；不用 ED 清屏 / CUP 光标定位 / 备用屏（ADR-027）。
-// 帧率固定 ~50ms/行、总行数固定，ctx 取消（连接断开）立即停。
-func (h *inputHandler) runMatrix(ctx context.Context, sess io.Writer) {
-	const (
-		lines    = 24
-		frameGap = 50 * time.Millisecond
-	)
+// matrixHint 是动画首行的固定提示：用户必须知道怎么退出（纯服务端常量）。
+const matrixHint = "[Esc 返回] · 约 1.2s 自动结束\r\n"
+
+// escPoller 补做「孤立 ESC」的判定。KeyDecoder 只在有人调用 Poll 时才把单独
+// 按下的 Esc 判定出来（见 transport/ssh/decoder.go 的 25ms 决策窗口）；而动画
+// 期间主循环被 handle 阻塞、不再调用 Poll，单独按 Esc 会滞留在解码器里直到动画
+// 结束——「Esc 可返回」就成了空话。因此把 dec.Poll 一并传入动画循环。
+// nil 表示无需补判定（直接用 msgs 注入 Esc 的测试场景）。
+type escPoller func() []input.KeyMsg
+
+// runMatrix 输出全屏滚动雨帘（v0.6.0；v0.9.0 / ADR-072 改整屏动画）。
+//
+// 帧结构：进入 ESC[H + ESC[2J 清出动画区 → 第 1 行固定提示 → 逐行追加雨帘
+// （height-2 行，至少 8 帧，每帧 50ms）→ 退出 ESC[H + ESC[2J。
+// 清屏后的空屏上逐行追加不产生残影，因此不需要 ring buffer 局部覆盖：
+// 每帧只写一行，视觉等价、带宽更低（ADR-072 §5）。
+//
+// 三条退出路径统一由 defer 收口，避免漏路径留脏屏：
+//  1. Esc：动画期监听 msgs（主循环此时阻塞在 handle 内，不会并发读），
+//     并每帧调用一次 poll 补判「孤立 ESC」；
+//  2. 自然结束：写满 frames 行；
+//  3. 断连：ctx 取消或 msgs 关闭（读协程 defer close 发生在连接结束时）。
+//
+// 独占：本函数在 handle 内同步执行，主循环阻塞，期间不会有页面 render 覆盖动画；
+// 调用方在返回后重绘原页面（动画期未改任何页面状态，纯函数自然复现）。
+// 合规：只用 safe.RenderSystem 的 SGR 上色与 H/2J 整屏序列，绝不用备用屏 / OSC /
+// 3J，也不做带参 CUP 定位——参数面为零，无注入面。
+func (h *inputHandler) runMatrix(ctx context.Context, sess io.Writer, msgs <-chan input.KeyMsg, height int, poll escPoller) {
+	const frameGap = 50 * time.Millisecond
+	if height <= 0 {
+		height = 24
+	}
+	frames := height - 2 // 留 1 行提示 + 1 行余量，避免追加时把提示顶出可视区
+	if frames < 8 {
+		frames = 8
+	}
+
+	_, _ = io.WriteString(sess, safe.CursorHome()+safe.ClearScreen())
+	_, _ = io.WriteString(sess, matrixHint)
+	// 退出：无论 Esc / 自然结束 / 断连，统一清屏；调用方随后重绘原页面。
+	defer func() { _, _ = io.WriteString(sess, safe.CursorHome()+safe.ClearScreen()) }()
+
 	ticker := time.NewTicker(frameGap)
 	defer ticker.Stop()
-	for i := 0; i < lines; i++ {
+	for i := 0; i < frames; i++ {
 		select {
 		case <-ctx.Done():
 			return
+		case msg, ok := <-msgs:
+			if !ok || msg.Kind == input.KeyEsc { // channel 关闭 = 断连
+				return
+			}
 		case <-ticker.C:
+		}
+		// 补判孤立 ESC：每帧（50ms）轮询一次解码器，Esc 最迟约 75ms 生效。
+		if poll != nil {
+			for _, m := range poll() {
+				if m.Kind == input.KeyEsc {
+					return
+				}
+			}
 		}
 		rendered, err := safe.RenderSystem(command.MatrixFrame(), safe.StyleCode)
 		if err != nil {

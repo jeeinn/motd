@@ -2,7 +2,7 @@
 
 > 本文件面向在本仓库工作的 AI 智能体与人类贡献者，记录**必须遵守的硬约束**与**易踩坑点**。
 > 与 `CONTRIBUTING.md` 分工：后者面向人类贡献者（提交规范、Issue 流程）；本文件额外强调智能体最容易违反的边界。
-> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~064）、`.github/workflows/ci.yml`、实际 git/代码状态。
+> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~072）、`.github/workflows/ci.yml`、实际 git/代码状态。
 
 ## 1. 项目定位
 
@@ -43,6 +43,7 @@ internal/
 | 软删不硬删 | `threads`/`posts` 用 `status` 过滤；节点归档只改 `node.status`，`threads` 不动（FK） |
 | 会话生存期 | 无按键不断连；唯一约束是 6 小时绝对上限（`sessionMaxLifetime`），关闭前下发固定文案 + exit-status。**已移除 `MOTD_SSH_IDLE_TIMEOUT`（v0.4.2，ADR-055）** |
 | 迁移 | 版本化 SQL 在 `internal/infrastructure/sqlite/migrations/`，当前止于 `0011`；新增迁移不得修改历史迁移 |
+| 光标控制白名单边界 | 服务端固定序列**仅** SGR / EL / CUU / 无参 CUP home `\x1b[H` / 无参 ED 2 `\x1b[2J`，只在 `internal/presentation/terminal/safe/ansi.go` 定义、由 `terminal/frame.go` 消费（`RenderFrame` 局部覆盖 + `RenderCleanFrame` 整屏重绘）；用户文本永远走 `RenderUser` / `SanitizeText`。**禁**带参 CUP（`\x1b[r;cH`）、CUD、DECSET、OSC、带参 EL、`1J`/`3J`（ADR-072） |
 
 ## 4. 开发命令（与 CI 门禁一致）
 
@@ -91,7 +92,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | --- | --- | --- |
 | `README.md` | 用户入口：功能、安装、配置表、快速开始 | 改对外描述 / 配置 |
 | `CONTRIBUTING.md` | 开发约定、提交前门禁、PR 规范 | 任何提交前 |
-| `docs/DECISIONS.md` | ADR-001~064，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
+| `docs/DECISIONS.md` | ADR-001~072，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
 | `docs/OPS.md` | 部署、备份恢复、演练记录、监控告警；§9 实战部署清单、§10 AI 智能体自动部署指南 | 改运维相关 / 部署；智能体执行远程部署前**必读 §10** |
 | `docs/P0-PLAN.md` / `PHASE1-PLAN.md` / `PHASE2-PLAN.md` / `P2-PLAN.md` | 各阶段计划与完成状态（历史快照，不回改） | 追溯需求来源 |
 | `docs/MVP-DELIVERY.md` | MVP 交付复盘（D1~D7 判定） | 理解项目起点 |
@@ -99,7 +100,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | `CHANGELOG.md` / `RELEASE_NOTES.md` | 变更记录 / 当前版本说明 | 发版 |
 | `docs/images/` | README 引用的截图，命名规范见其 README | 新增截图 |
 
-**惯例**：历史结论不删改，只标注"已修订"并追加新 ADR / 新章节。新增 ADR 从当前最大号顺延（现为 ADR-064）。
+**惯例**：历史结论不删改，只标注"已修订"并追加新 ADR / 新章节。新增 ADR 从当前最大号顺延（现为 ADR-072）。
 
 ## 7. 项目特有陷阱速查
 

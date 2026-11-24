@@ -10,13 +10,13 @@ package main
 //     （分层安全渲染，§3.5 / ADR-019），不直接 Write 用户字节。
 //
 // 明确不做（范围守门，见 docs/MVP-DELIVERY.md）：独立登录引导页由 P0-19
-// 最小交互层承接；帮助浮层由 ?/help 注册表文本承接；搜索占位留 P1；
-// 不做全屏重绘 / 光标定位，避免引入清屏类 ANSI 破坏 §3.5 的信任域边界。
+// 最小交互层承接；帮助浮层由 ?/help 注册表文本承接；搜索占位留 P1。
+// v0.9.0 / ADR-072：页面改为整屏干净重绘（ESC[H + ESC[2J），不再记忆上一屏
+// 行数、也不再走「追加 vs 原地覆盖」双模式——每次渲染都从左上角重画。
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -32,6 +32,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/viewmodel"
 	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/presentation/terminal"
+	"github.com/jeeinn/motd/internal/presentation/terminal/i18n"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
 
@@ -85,9 +86,9 @@ type pageController struct {
 	unlockedNodes func(context.Context, int64) ([]node.Node, error)
 	// 行编辑回显器：与页面状态一样每会话一份（ADR-026）。
 	echo *lineEcho
-	// 上一屏占用的行数（ADR-027）。>0 表示屏幕连续、可原地重绘；
-	// 任何非屏幕输出（提示/回显/登录文本）都会把它清零退回追加模式。
-	screenLines int
+	// locale 是会话显示语言（默认 zh），只用于服务端固定文案/前缀查表；
+	// 绝不塞进 viewmodel.Screen——RenderScreen 仍是不locale的纯函数（见 view.go）。
+	locale string
 	// P1-M5 邮箱认证：pending 状态每会话一份，/register|/recover 后供
 	// /verify 使用；重连即失效（验证码 TTL 仅 10 分钟）。emailFlow 非空时优先吃按键。
 	pendingEmail   string
@@ -105,41 +106,17 @@ const (
 	stageBody
 )
 
-// 编辑态提示文案（服务端编译期常量，走 RenderSystem / 固定文本路径）。
+// 编辑态提示文案：引导与 5 条草稿状态已统一迁入 i18n.hintCatalog
+// （internal/presentation/terminal/i18n，10 key × 2 locale），调用点只传 key，
+// 默认 zh 文案与 v0.8.4 逐字节一致；前缀由 writeHint 单点查表拼接。
 //
 // P1-M4 硬约束：正文是**多行**——Enter 换行、单独一行 "." 或 Ctrl-D 提交。
 // 绝不能把「Ctrl 与 Enter 的组合键」写进主提示：通用 SSH 终端字节流层无法
 // 可靠区分该组合与普通 Enter，P1 不做主提交键（二轮拍板，ADR-034）；
 // archtest + 单测双重断言。
-const (
-	// hintPrefix 是告知类引导/草稿提示的统一前缀，与 noticePrefix 的 default
-	// 分支（NoticeSuccess → "[提示] " StyleDim，view.go）逐字节对齐：发布成功与
-	// 引导 hint 同为灰阶，醒目感来自方括号文字锚点而非颜色。单点拼在 writeHint，
-	// 常量字面量本身不带前缀（单一事实来源，防回退到手写 9 处）。
-	hintPrefix = "[提示] "
-
-	composerTitleHint          = "新建主题：输入标题后按 Enter 确认（Esc 取消）"
-	composerBodyHint           = "回复：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
-	composerBodyAfterTitleHint = "标题已接收：输入正文，Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
-	composerEditHint           = "编辑：重新输入完整新正文（覆盖原文），Enter 换行；单独一行输入 . 或按 Ctrl-D 提交（Esc 取消）"
-	composerLimitHint          = "正文已达长度上限，请精简后继续（Esc 取消）"
-)
-
-// 临时草稿（仅本次连接）系列：提交失败保留输入，冷却/准入恢复后一键重发
-// （docs/DESIGN-composer-draft.md §4.4）。一律称"临时草稿（仅本次连接）"管理
-// 断连即失预期（D5）；限流剩余时长为本地数值拼入，不拼用户文本。
-const (
-	// 限流原地保留（A）：%s 为 RateLimitError.RetryAfter 本地算出的时长。
-	composerDraftRetainedRateHint = "内容已保留为临时草稿（仅本次连接）：请约 %s 后按 Ctrl-D（或单独一行 .）重发；Esc 挂起草稿回浏览屏，回到原帖按 r 恢复"
-	// A 挂起回屏确认。
-	composerDraftSuspendedHint = "草稿已保留，回到原帖按 r 即可恢复"
-	// 只读/冻结回屏兜底（B）：不含"Esc 放弃"——B 已回浏览屏，浏览态 Esc 静默。
-	composerDraftRetainedHint = "（输入内容已保留为临时草稿，仅本次连接有效；处理完成后重新 /new 或 /reply 即可恢复）"
-	// 同上下文重进预填成功。
-	composerDraftRestoredHint = "草稿已恢复：内容仍在，直接按 Ctrl-D（或单独一行 .）提交"
-	// 不同上下文新建 composer，旧草稿被覆盖。
-	composerDraftDiscardedHint = "（此前的临时草稿已不适用，重新开始输入）"
-)
+//
+// 超限错误走 writeFixed 普通色、不进 hintCatalog（D3 本期范围外）。
+const composerLimitHint = "正文已达长度上限，请精简后继续（Esc 取消）"
 
 // pageEditor 是发帖 / 回复的编辑态（ADR-026 + P1-M4 多行）：
 //   - title 阶段：单行 runes 缓冲，Enter 确认（标题仍保持单行语义）；
@@ -181,6 +158,15 @@ func (d *composerDraft) matches(creating bool, nodeID, threadID int64) bool {
 }
 
 func (h *inputHandler) newPageController(out io.Writer) *pageController {
+	// 宽度从会话取得（fakePageSession 可配宽度用于窄屏测试）；out 只是普通
+	// 写入器时宽度未知，lineEcho 退化为旧的物理行假设，兼容既有单测。
+	width := 0
+	if w, ok := out.(interface {
+		Window() (uint32, uint32, string)
+	}); ok {
+		cols, _, _ := w.Window()
+		width = int(cols)
+	}
 	return &pageController{
 		service:       h.forum,
 		users:         h.users,
@@ -189,8 +175,24 @@ func (h *inputHandler) newPageController(out io.Writer) *pageController {
 		onUnlock:      h.onUnlock,
 		unlockedNodes: h.unlockedNodes,
 		screen:        emptyScreen(),
-		echo:          newLineEcho(out),
+		echo:          newLineEchoWithWidth(out, width),
+		locale:        i18n.LocaleZH,
 	}
+}
+
+// newPageControllerWithLocale 供双语测试注入 locale；默认 zh 仍走 newPageController。
+func (h *inputHandler) newPageControllerWithLocale(out io.Writer, locale string) *pageController {
+	pc := h.newPageController(out)
+	pc.setLocale(locale)
+	return pc
+}
+
+// setLocale 切换会话显示语言，空值回退默认 zh。
+func (p *pageController) setLocale(locale string) {
+	if locale == "" {
+		locale = i18n.LocaleZH
+	}
+	p.locale = locale
 }
 
 // emptyScreen 给「首次查询失败」等场景一个合法、可渲染的空屏。
@@ -248,28 +250,32 @@ func (p *pageController) active() int {
 	return p.presence.Active()
 }
 
-// render 把当前 Screen 交给终端 Renderer，并在页面层完成 LF→CRLF。
+// render 把当前 Screen 交给终端 Renderer，并在页面层完成 LF→CRLF，
+// 再按整屏干净重绘组装帧（ESC[H 回左上角 + ESC[2J 清当前屏，ADR-072）。
+//
+// 不再记住上一屏行数：每次渲染都从 (1,1) 重画，因此窗口缩放后不会因旧行数
+// 陈旧而错位，也不会残留上一屏更短时下方的空白带。height 只用于决定末行是否
+// 补 CRLF（n>=height 时不补，避免底行换行触发滚屏把首行顶出可视区）。
 func (p *pageController) render(sess pageSession) error {
 	if p.service == nil {
 		return p.writeFixed(sess, "论坛服务尚未就绪")
 	}
-	width, _, _ := sess.Window()
-	text, err := terminal.RenderScreen(p.screen, int(width))
+	width, height, _ := sess.Window()
+	if height == 0 {
+		// 无 pty-req 高度信息（如 ssh -T）时兜底 24 行：否则 RenderCleanFrame
+		// 取保守分支不补末行 CRLF，后续追加会贴在内容末行尾部（ADR-072 边界）。
+		height = 24
+	}
+	text, err := terminal.RenderScreenWithLocale(p.screen, int(width), p.locale)
 	if err != nil {
 		// 失败关闭：渲染器不接受畸形 ViewModel / 含控制字符的系统文本时，
 		// 宁可只给一行固定提示，也不把可疑内容写进 PTY。
 		return p.writeFixed(sess, "页面渲染失败，已停止输出")
 	}
-	// screenLines>0 → 屏幕连续，原地重绘；=0 → 中间插入过其它输出，追加。
-	// RenderFrame 在极窄终端发生自动折行时也会自行降级为追加。
-	frame, lines := terminal.RenderFrame(toCRLF(text), p.screenLines, int(width))
-	p.screenLines = lines
+	frame, _ := terminal.RenderCleanFrame(toCRLF(text), int(height))
 	_, err = io.WriteString(sess, frame)
 	return err
 }
-
-// invalidateScreen 由调用方在输出任何非屏幕文本前调用（ADR-027）。
-func (p *pageController) invalidateScreen() { p.screenLines = 0 }
 
 // maybeShowCommandEntryHint 只在本次会话首次按 / 进入命令输入时打印提示，
 // 之后静默。实测一次会话里 help/top/verify/recover 后各刷一次，滚动严重。
@@ -283,8 +289,9 @@ func (p *pageController) maybeShowCommandEntryHint(out io.Writer) {
 }
 
 // writeFixed 只输出服务端编译期常量，走 RenderSystem 路径（普通色）。
+// 追加一行；其后的下一次页面渲染会整屏清屏回页面（ADR-072），
+// 这行提示留在 scrollback 可上翻。
 func (p *pageController) writeFixed(sess pageSession, text string) error {
-	p.invalidateScreen() // 非屏幕输出打断连续性，下次渲染必须追加
 	rendered, err := safe.RenderSystem(text, safe.StylePlain)
 	if err != nil {
 		return err
@@ -293,15 +300,15 @@ func (p *pageController) writeFixed(sess pageSession, text string) error {
 	return err
 }
 
-// writeHint 输出引导类固定提示（编辑器用法、草稿状态），走 Dim 灰阶——与状态栏
-// 同色（ADR-014/027 已入白名单的 SGR 样式），区别于用户正文的普通色。
-// 前缀 hintPrefix 在此单点拼接，与 noticePrefix 的 Success/default 分支对齐；
-// 常量字面量不带前缀。仍是服务端编译期常量，走 RenderSystem 同一校验；
+// writeHint 按 key 从 i18n.hintCatalog 查表输出引导/草稿提示，走 Dim 灰阶——与
+// 状态栏同色（ADR-014/027 已入白名单的 SGR 样式），区别于用户正文的普通色。
+// hintPrefix 同样按 locale 查表、在此单点拼接，与 noticePrefix 的 default 分支对齐；
+// 表内只存服务端常量（含 %s 槽位），仍整段走 RenderSystem 校验，用户文本不进此路径。
 // 错误/失败提示仍用 writeFixed 保持醒目。样式由 RenderSystem 自带 reset 收尾，
 // 不泄漏到后续用户回显。
-func (p *pageController) writeHint(sess pageSession, text string) error {
-	p.invalidateScreen()
-	rendered, err := safe.RenderSystem(hintPrefix+text, safe.StyleDim)
+func (p *pageController) writeHint(sess pageSession, key string, args ...any) error {
+	text := i18n.Lookup(p.locale, i18n.KeyHintPrefix) + i18n.Lookup(p.locale, key, args...)
+	rendered, err := safe.RenderSystem(text, safe.StyleDim)
 	if err != nil {
 		return err
 	}
@@ -716,7 +723,7 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 			return p.resumeDraft(sess, d)
 		}
 		p.draft = nil
-		if err := p.writeHint(sess, composerDraftDiscardedHint); err != nil {
+		if err := p.writeHint(sess, i18n.KeyDraftDiscarded); err != nil {
 			return err
 		}
 	}
@@ -738,9 +745,9 @@ func (p *pageController) startComposer(sess pageSession, creating bool) error {
 	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
 	if creating {
-		return p.writeHint(sess, composerTitleHint)
+		return p.writeHint(sess, i18n.KeyComposerTitle)
 	}
-	return p.writeHint(sess, composerBodyHint)
+	return p.writeHint(sess, i18n.KeyComposerBody)
 }
 
 // startEditComposer 进入「编辑既有正文」态：复用 startComposer 的正文阶段
@@ -759,7 +766,7 @@ func (p *pageController) startEditComposer(sess pageSession, postID int64) error
 	p.editor = e
 	p.echo.setSecret(false)
 	_ = sess.SetState(presence.StateComposing)
-	return p.writeHint(sess, composerEditHint)
+	return p.writeHint(sess, i18n.KeyComposerEdit)
 }
 
 // editorKey 是编辑态的单入口：取消键两阶段共用，其余按键按阶段分流。
@@ -880,7 +887,7 @@ func (p *pageController) cancelEditor(sess pageSession, clearDraft bool) error {
 		p.draft = nil
 	}
 	if hadDraft && !clearDraft {
-		return p.writeHint(sess, composerDraftSuspendedHint)
+		return p.writeHint(sess, i18n.KeyDraftSuspended)
 	}
 	return p.writeFixed(sess, "（已取消编辑）")
 }
@@ -911,10 +918,12 @@ func (p *pageController) saveDraft(e *pageEditor, body string) *composerDraft {
 	}
 }
 
-// rebuildComposerFromDraft 是路径 A：限流失败后原地重建编辑缓冲。
-// 不调 pasteBlock——屏幕旧回显与 Load 后缓冲内容已一致，重复回显会打印第二遍
-// 正文并向 echo.cols 叠加列宽导致退格错乱（P0-2）；只打印固定等待提示，
-// 不整屏重绘、不回 StateBrowsing。
+// rebuildComposerFromDraft 是路径 A：限流失败后原地重建编辑缓冲（方案 B 追加重建）。
+// setSecret(false) 已清空 cols；为重建列宽栈（保持退格精度），在提示之后用
+// pasteBlock 把正文整段追加回显一遍，光标自然停在末行末字。正文逐 rune 经
+// SanitizeText、换行走服务端 CRLF；不整屏重绘、不回 StateBrowsing、无 CUU。
+// D6 代价（如实登记 RELEASE_NOTES）：正文多回显一遍会刷屏；提示离光标变远，
+// 长正文时倒计时可能被顶出屏幕。
 func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.RateLimitError) error {
 	d := p.draft
 	e := &pageEditor{
@@ -933,17 +942,12 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 	}
 	p.editor = e
 	p.echo.setSecret(false)
-	if err := p.writeHint(sess, fmt.Sprintf(composerDraftRetainedRateHint, rl.RetryAfter.Round(time.Second))); err != nil {
+	if err := p.writeHint(sess, i18n.KeyDraftRetainedRate, rl.RetryAfter.Round(time.Second)); err != nil {
 		return err
 	}
-	// A 路径屏幕已有正文回显，Load 重建缓冲后 echo.cols 被 newline()+setSecret()
-	// 双清为空，光标停在提示下一行——退格会删缓冲却零擦屏（与 B 修复前同源）。
-	// 回到正文末行重写一次以重建 cols：不重复整段正文（仅末行），白名单 CUU/EL。
-	// up=2 = 提交时 bodyKey 的 echo.newline() 1 行 + writeHint 尾部 CRLF 1 行。
-	lines := e.body.Lines()
-	if len(lines) > 0 {
-		p.echo.resyncLastLine(lines[len(lines)-1], 2)
-	}
+	// 方案 B：正文整段追加回显一遍以重建 cols。pasteBlock 逐 rune 经 SanitizeText，
+	// 换行按服务端 CRLF，cols 对应末行——光标停在末行末字，退格精度保持。
+	p.echo.pasteBlock(e.body.Text())
 	return nil
 }
 
@@ -951,7 +955,7 @@ func (p *pageController) rebuildComposerFromDraft(sess pageSession, rl *forum.Ra
 // fail() 原样返回业务 err（非渲染失败），不能据此跳过提示；先完成提示再回传 err。
 func (p *pageController) failWithDraftHint(sess pageSession, err error) error {
 	_ = p.fail(sess, err)
-	if werr := p.writeHint(sess, composerDraftRetainedHint); werr != nil {
+	if werr := p.writeHint(sess, i18n.KeyDraftRetained); werr != nil {
 		return werr
 	}
 	return err
@@ -984,7 +988,7 @@ func (p *pageController) resumeDraft(sess pageSession, d *composerDraft) error {
 	// pasteBlock 之后，光标被甩到提示下一行而 echo.cols 仍描述正文末行，
 	// 退格会在错误位置擦除（屏幕正文不消失）；且提示会紧贴正文末字。
 	// 前置后最后输出的是正文——光标停在正文末字、cols 与之一一对应，退格正确。
-	if err := p.writeHint(sess, composerDraftRestoredHint); err != nil {
+	if err := p.writeHint(sess, i18n.KeyDraftRestored); err != nil {
 		return err
 	}
 	p.echo.pasteBlock(d.body)
@@ -1017,7 +1021,7 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 			e.body = input.NewComposer(input.WithMaxBytes(forum.MaxBodyBytes))
 		}
 		e.body.Start()
-		return p.writeHint(sess, composerBodyAfterTitleHint)
+		return p.writeHint(sess, i18n.KeyComposerBodyAfterTitle)
 	}
 
 	editing := e.editPostID > 0

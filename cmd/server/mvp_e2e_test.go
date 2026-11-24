@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
+	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
 	sshd "github.com/jeeinn/motd/internal/transport/ssh"
@@ -394,9 +395,9 @@ func TestMVPLoginCommandHintOnRealSSH(t *testing.T) {
 	c.out.waitSince(t, mark, "未知命令")
 }
 
-// ADR-027：真实 SSH 客户端连按 j/k 时应原地重绘（CUU + EL），
-// 不再每次追加一整屏；且清屏 / OSC / 备用屏等禁止序列绝不出现。
-func TestMVPNavigationRedrawsInPlace(t *testing.T) {
+// ADR-072：真实 SSH 客户端连按 j/k 时应整屏干净重绘（H + 2J），
+// 不再追加整屏、也不再用 CUU+EL 局部覆盖；清历史 / OSC / 备用屏等仍绝不出现。
+func TestMVPNavigationRedrawsCleanFrame(t *testing.T) {
 	_, h, rt, pools, _ := setupMVPRuntime(t)
 	srv, err := sshd.New(sshd.Config{
 		Addr:     "127.0.0.1:0",
@@ -429,15 +430,91 @@ func TestMVPNavigationRedrawsInPlace(t *testing.T) {
 	c.send(t, "jjj") // 焦点 1 → 4
 	c.out.waitSince(t, mark, ">  4")
 	segment := c.out.text()[mark:]
-	if !regexp.MustCompile(`\x1b\[\d+A`).MatchString(segment) {
-		t.Fatalf("连续导航应原地重绘（CUU 上移），实际 %q", segment)
+	// jjj 触发三次导航渲染 → 三帧，每帧以 H + 2J 打头。
+	if n := strings.Count(segment, "\x1b[2J"); n != 3 {
+		t.Fatalf("三次导航应产生三帧整屏重绘（3 个 2J），实际 %d: %q", n, segment)
 	}
-	if !strings.Contains(segment, "\x1b[K") {
-		t.Fatalf("重绘应逐行 EL 清行，实际 %q", segment)
+	if n := strings.Count(segment, "\x1b[H"); n != 3 {
+		t.Fatalf("三次导航应产生三次 ESC[H，实际 %d: %q", n, segment)
 	}
-	for _, bad := range []string{"\x1b[2J", "\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[H"} {
+	if !strings.HasPrefix(segment, "\x1b[H\x1b[2J") {
+		t.Fatalf("导航帧应以 H + 2J 打头，实际 %q", segment[:min(24, len(segment))])
+	}
+	if strings.Contains(segment, "\x1b[K") {
+		t.Fatalf("整屏重绘不再逐行 EL 补清: %q", segment)
+	}
+	if regexp.MustCompile(`\x1b\[\d+A`).MatchString(segment) {
+		t.Fatalf("整屏重绘不需要 CUU 上移: %q", segment)
+	}
+	for _, bad := range []string{"\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[?1049l", "\x1b[3J", "\x1b[1J", "\x1b[2;3H"} {
 		if strings.Contains(segment, bad) {
 			t.Fatalf("重绘泄露禁止序列 %q: %q", bad, segment)
+		}
+	}
+}
+
+// ADR-072 §5：/matrix 全屏动画在真实 SSH 上进入清屏 → 提示 + 雨帘 → 退出清屏，
+// 随后 handle 的 matrix 分支重绘原页面（动画期未改任何页面状态）。
+func TestMatrixRedrawsPageAfterExit(t *testing.T) {
+	_, h, rt, pools, _ := setupMVPRuntime(t)
+	// /matrix 属彩蛋组，只在真实装配（main.go 的 withCommands）里注册；
+	// 测试 handler 默认只有 defaultRegistry，这里显式合并同一份彩蛋定义。
+	eggReg, err := command.WithCommands(command.EggCommands())
+	if err != nil {
+		t.Fatalf("合并彩蛋命令: %v", err)
+	}
+	h = h.withCommands(eggReg)
+	srv, err := sshd.New(sshd.Config{
+		Addr:     "127.0.0.1:0",
+		DataDir:  t.TempDir(),
+		MaxConns: 10,
+		Resolver: auth.NewResolver(sqlite.NewSSHKeyLookup(pools)),
+		Presence: rt.Presence,
+		Handler:  h,
+	})
+	if err != nil {
+		t.Fatalf("启动 SSH 服务: %v", err)
+	}
+	serveCtx, cancel := context.WithCancel(context.Background())
+	go func() { _ = srv.Serve(serveCtx) }()
+	addr := srv.Addr()
+	t.Cleanup(func() {
+		cancel()
+		srv.Close()
+	})
+	if addr == "" {
+		t.Fatal("SSH 监听未就绪")
+	}
+
+	c := dialMVP(t, addr, newMVPKey(t))
+	defer c.close()
+	mark := c.out.mark()
+	c.out.waitSince(t, mark, "/dev/ai")
+
+	matrixMark := c.out.mark()
+	c.send(t, "/matrix\r")
+	c.out.waitSince(t, matrixMark, "[Esc 返回]")
+
+	// 动画自然结束（约 1.1s）后应重绘原页面：等页面专属中文标题出现。
+	pageMark := c.out.mark()
+	c.out.waitSince(t, pageMark, "版块列表")
+	segment := c.out.text()[pageMark:]
+	if !strings.Contains(segment, "/dev/ai") {
+		t.Fatalf("动画结束后未重绘原页面内容: %q", segment)
+	}
+	// 最后一帧必须是页面整屏重绘（H + 2J 打头且含页面标题）。
+	last := segment[strings.LastIndex(segment, "\x1b[H\x1b[2J"):]
+	if !strings.HasPrefix(last, "\x1b[H\x1b[2J") || !strings.Contains(last, "版块列表") {
+		t.Fatalf("退出后的最后一帧应是原页面: %q", last)
+	}
+	// 退出清屏紧跟重绘：两次连续 H+2J（前者由 defer 收口，后者由 render 发出）。
+	if !strings.Contains(c.out.text()[matrixMark:], "\x1b[H\x1b[2J\x1b[H\x1b[2J") {
+		t.Fatalf("退出清屏后应紧跟页面重绘: %q", c.out.text()[matrixMark:])
+	}
+	cmdOnlyWhitelistedANSI(t, segment)
+	for _, bad := range []string{"\x1b]52", "\x1b]0;", "\x1b[?1049h", "\x1b[?1049l", "\x1b[3J", "\x1b[1J"} {
+		if strings.Contains(segment, bad) {
+			t.Fatalf("动画/重绘泄露禁止序列 %q", bad)
 		}
 	}
 }

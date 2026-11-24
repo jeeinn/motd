@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-24
+
+次要版本：显示层物理行模型 + i18n 基建 + 窄屏折行散落修复 + 视口有界重绘 + **全屏干净重绘（破 ADR-027 白名单红线）**。无 schema 迁移、无新依赖、无新环境变量、无键位改动；测试函数 1041 → 1085。
+
+### Added
+
+- **全屏干净重绘（ADR-072）**：`safe/ansi.go` 白名单扩为 SGR / EL / CUU + **无参** CUP home `\x1b[H` + **无参** ED 2 `\x1b[2J`（两条均零参数，不存在 CSI 参数注入面）；新增 `terminal.RenderCleanFrame(text, height)` 从左上角整屏重画，`n >= height` 时末行不写 CRLF 以免在屏底换行触发滚屏。永禁 CUD、DECSET 备用屏、OSC、带参 CUP、带参 EL、`1J`/`3J`。`2J` 只清当前可视屏、不清 scrollback，历史回看能力不损。
+- **彩蛋 `/matrix` 全屏动画（ADR-072）**：进入清屏 + 固定提示 `[Esc 返回]`，逐行追加雨帘（帧数自适应终端高度），退出清屏后重绘原页面；`Esc` / 自然结束 / 断连三条退出路径经 `defer` 统一收口。补上"孤立 ESC"链路缺口——`KeyDecoder` 仅在调用 `Poll()` 时才产出 `KeyEsc`，故把 `dec.Poll` 传入动画循环每帧补判，`Esc` 最迟约 75ms 生效。
+- **视口有界重绘（ADR-071）**：`RenderFrame` 增 `height` 参数，CUU 上移量钳制到可视高度、帧末不写 CRLF、补清后用白名单 CUU 归位光标；返回值改为内容行数，连续重绘行数恒定。修复详情（逻辑行数超可视高度）返回列表时的跨屏错位。
+- **物理行模型工具（W8-W9）**：新增 `internal/presentation/terminal/safe/wrap.go` 纯函数 `MeasureLine` / `MeasureWrap` / `OverWide`，按 `DisplayWidth` 逐 rune 计算逻辑行的物理行数、折行点与 pending wrap（占满末列时延后到下个字符才折，宽字符整字折、SGR 计 0 列）。（ADR-070）
+- **i18n 骨架（W11-W13）**：新增 `internal/presentation/terminal/i18n/catalog.go`，10 个 hint key × zh/en 两 locale 文案表（zh 原文逐字保留、en 含 `%s` 槽位）与 notice 前缀查表；`pageController` 加会话 locale（默认 zh，测试可注入），`writeHint` / `hintPrefix` / `noticePrefix` 一律查表，不再散落字面量。（ADR-070）
+- **双语 hint 与 `RenderScreenWithLocale`（W14）**：中英双语 hint 参数化测试；`RenderScreenWithLocale` 显式承载 locale，原 `RenderScreen` 委托 zh 保持签名与逐字节行为；locale 不进 viewmodel、不做渲染后字节替换，守 ADR-019 信任域。notice 前缀 zh `[提示]` / `[错误]` → en `[Info]` / `[Error]`。（ADR-070）
+
+### Changed
+
+- **页面与登录屏改用整屏重绘（ADR-072）**：`pageController.render()` 与登录屏 `showStart` 改用 `RenderCleanFrame`；随之**删除 `screenLines` 与 `invalidateScreen()`**——整屏重绘不再依赖上一屏行数，也不存在"追加模式"。命令输出（`/who` 等）、登录逐行反馈、错误/提示文案、编辑器逐字符回显**保持追加**（日志语义 / 需回看 / 纠错醒目 / 退格精度）。
+- **连接时版本行改由 `/stats` 提供**：首帧整屏重绘会立即擦掉 `Serve` 写的版本行，且 `2J` 不进 scrollback，故移除该写入，改为 `/stats` 输出末尾附"服务端版本"。
+- **折行口径统一（W9）**：`RenderFrame` 的 `overWide` / `visibleWidth` 重复逻辑改为共用 `safe.OverWide`，消除整屏渲染与编辑器回显层的双口径；宽度未知（`width<=0`）退化为旧行为。（ADR-070）
+- **限流原地重建改为方案 B 追加重建（W4-W7）**：删除 `resyncLastLine`，A 路径改 `writeHint` 写等待提示 + `pasteBlock` 把正文整段追加回显，光标落在正文末字、`cols` 逐 rune 重建，不再依赖"限流提示不折行"假设；不整屏重绘、倒计时仍静态。（ADR-069，修订 ADR-067 决策 2）
+
+### Fixed
+
+- **详情返回列表后大片空白、列表首行被滚出、光标落底**：根因是 `RenderFrame` 只收 width 不收 height，`total = max(n, prevLines)` 补空行 + 帧末 CRLF 把光标推到补齐行而非内容末行；超可视高度时 CUU 被终端钳在可视顶回不到逻辑屏首。ADR-071 用视口钳制 + 帧末归位缓解，ADR-072 改整屏重绘后**根治**（每帧从左上角重画，无空白带、无跨屏错位）。
+- **窗口缩放后重绘错位**：旧机制依赖 `screenLines` 记录上一屏行数，而 window-change 层拿不到控制器、resize 后记录陈旧；整屏重绘不依赖行数，天然规避。
+- **窄屏限流提示折行导致正文字符散落**：125 列提示在 <126 列终端物理折行时，`resyncLastLine(up=2)` 跳进提示中间、`EL` 只清单行清不掉碎片；方案 B 根治，虚拟网格 TC-01（24/40/125 列）与 TC-02（80×24，提示折 2 行）验证无 CUU、无碎片。（ADR-069）
+- **B7 超宽行退格残留（W10）**：`mergeBackspace` / `backspace` 按 W8 物理行数 `CursorUp(n)`，`\b \b` 仍按逻辑宽逐 rune 擦除；超宽行→Enter→Backspace 无错位残留，v0.8.3 退格精度不回退（TC-04 / TC-05）。（ADR-070）
+
 ## [0.8.4] - 2026-11-24
 
 补丁版本：编辑器引导提示优化——hint 统一灰阶并加 `[提示]` 前缀，回复成功后焦点锚定到自己的回复。无 schema 迁移、无新依赖、无新环境变量、无键位/渲染改动；测试函数 1032 → 1041。
