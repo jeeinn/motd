@@ -21,7 +21,7 @@
 
 | 编号 | 事项 | 优先级 | 估工 | 状态 | 来源 |
 | --- | --- | --- | --- | --- | --- |
-| **R-06** | 详情屏内容分页 | **P0** | L | 方案已拍板，待实施 | `docs/DESIGN-detail-pagination.md` |
+| **R-06** | 详情屏内容分页 | **P0** | L | 已实施，待实测验收 | `docs/DESIGN-detail-pagination.md` |
 | R-07 | 草稿持久化落库 | P2 | M | 未开工 | ADR-067、`archived/DESIGN-composer-draft.md` §9 |
 | R-08 | 全量 UI 文案 i18n | P2 | M | 未开工 | ADR-070 |
 | R-09 | resize 即时对齐（SIGWINCH 钩子） | P2 | S | 未开工 | ADR-071 代价 2、ADR-072 边界 2 |
