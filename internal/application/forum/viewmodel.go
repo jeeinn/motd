@@ -276,6 +276,44 @@ func (s *Service) ScreenThreadDetailPage(ctx context.Context, threadID, afterID 
 	return sc, nil
 }
 
+// ScreenThreadDetailTail 输出详情屏的**末页**：只含最后 limit 条回复，正文留空。
+//
+// 回复成功后用它定位——新回复必然在末尾，因此不需要知道它是第几页。
+// 序号仍要接续：用 CountReplies 算出本页首条的全局序号，避免末页又从 1 数起。
+func (s *Service) ScreenThreadDetailTail(ctx context.Context, threadID int64, limit int, v ViewContext) (viewmodel.Screen, error) {
+	head, err := s.ThreadHead(ctx, threadID)
+	if err != nil {
+		return viewmodel.Screen{}, err
+	}
+	page, err := s.ListRepliesTail(ctx, threadID, limit)
+	if err != nil {
+		return viewmodel.Screen{}, err
+	}
+	total, err := s.CountReplies(ctx, threadID)
+	if err != nil {
+		return viewmodel.Screen{}, err
+	}
+	offset := total - len(page.Replies)
+	if offset < 0 {
+		offset = 0
+	}
+	detail := viewmodel.Detail{
+		ID:        head.Thread.ID,
+		Title:     head.Thread.Title,
+		Body:      head.Post.BodyMD,
+		AuthorID:  head.Post.UserID,
+		CreatedAt: head.Post.CreatedAt.Unix(),
+		EditedAt:  head.Post.EditedAt,
+	}
+	rows := detailRows(page.Replies, offset)
+	if err := s.fillRowAuthors(ctx, rows, &detail); err != nil {
+		return viewmodel.Screen{}, err
+	}
+	sc := screenOf(viewmodel.ScreenThreadDetail, rows, v)
+	sc.Detail = detail
+	return sc, nil
+}
+
 // ScreenSearchResults 输出检索结果屏。Row.ID 取 threadID，Enter 可直接打开主题；// postID 放在 Meta.Extra 里作为语义元信息，不参与渲染，避免把用户文本带进固定文案。
 func (s *Service) ScreenSearchResults(ctx context.Context, in SearchInput, v ViewContext) (viewmodel.Screen, error) {
 	res, err := s.Search(ctx, in)

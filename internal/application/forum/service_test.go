@@ -260,6 +260,17 @@ func (r *fakeRepos) ListPostsTail(ctx context.Context, threadID, afterID int64, 
 	return out, nil
 }
 
+// CountPosts 与真实仓储同口径：统计 id > afterID 的 normal 内容条数。
+func (r *fakeRepos) CountPosts(ctx context.Context, threadID, afterID int64) (int, error) {
+	n := 0
+	for _, p := range r.state.posts {
+		if p.ThreadID == threadID && p.Status == post.StatusNormal && p.ID > afterID {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // PostAuthor 与真实仓储一致：只认 normal 内容，其余返回 ErrNotFound。
 func (r *fakeRepos) PostAuthor(ctx context.Context, postID int64) (int64, error) {
 	p, ok := r.state.posts[postID]

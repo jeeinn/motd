@@ -183,11 +183,11 @@ func RenderScreenWithLocale(s viewmodel.Screen, width int, locale string) (strin
 // 这正是 R-06 要拆掉的"界面骗人"源头：不出现做不到的操作。
 func detailFooter(p viewmodel.Pagination) string {
 	switch {
-	case p.HasMore && p.Page > 1:
+	case p.HasMore && p.HasPrev:
 		return "j/k 移动 · h/q 返回 · r 回复 · n 下一页 · p 回第 1 页 · / 命令 · ? 帮助"
 	case p.HasMore:
 		return "j/k 移动 · h/q 返回 · r 回复 · n 下一页 · / 命令 · ? 帮助"
-	case p.Page > 1:
+	case p.HasPrev:
 		return "j/k 移动 · h/q 返回 · r 回复 · p 回第 1 页 · / 命令 · ? 帮助"
 	default:
 		return "j/k 移动 · h/q 返回 · r 回复 · / 命令 · ? 帮助"

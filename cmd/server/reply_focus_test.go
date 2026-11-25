@@ -153,12 +153,13 @@ func TestReplyFocusMissFallsBackFirst(t *testing.T) {
 	}
 }
 
-// O2-T4：超 MaxPostsPerThread 预置后回复，新回复不在返回集合，焦点保持首行、不 panic。
-func TestReplyFocusOverLimitKeepsFirst(t *testing.T) {
+// R-06：回复数超过旧的 200 上限时，新回复必须被锚定。
+// （修复前这里必然失配、回退首行——旧版本把该缺口当作"不劣化现状"接受了。）
+func TestReplyBeyondLegacyLimitAnchorsNewReply(t *testing.T) {
 	ctx, h, _, _, writer := setupMVPRuntime(t)
 	threadID := seedThreadFirstPost(t, ctx, writer, 1)
 
-	// 预置 200 条他人回复（最小 ID 前 200 条占满返回窗口）。
+	// 预置 200 条他人回复，把旧版的一次性返回窗口占满。
 	if err := writer.Submit(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		for i := 0; i < 200; i++ {
 			if _, err := tx.ExecContext(ctx,
@@ -187,9 +188,12 @@ func TestReplyFocusOverLimitKeepsFirst(t *testing.T) {
 	if pc.screen.Kind != viewmodel.ScreenThreadDetail {
 		t.Fatalf("应留在详情屏，实际 %v", pc.screen.Kind)
 	}
-	first := pc.screen.Rows[0].Index
-	if pc.screen.Selection.FocusedIndex != first {
-		t.Fatalf("超上限未命中应保持首行 Index=%d，实际 %d", first, pc.screen.Selection.FocusedIndex)
+	focused, ok := pc.focusedRow()
+	if !ok {
+		t.Fatal("末页应有可聚焦的回复行")
+	}
+	if focused.Body != "超上限后的回复" {
+		t.Fatalf("焦点应落在刚发出的回复上，实际落在 %q（Index=%d）", focused.Body, focused.Index)
 	}
 	if code := pc.screen.StatusBar.Notice.Code; code != "saved" {
 		t.Fatalf("notice 应为 saved，实际 %q", code)

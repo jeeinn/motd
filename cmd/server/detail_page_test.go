@@ -210,3 +210,42 @@ func TestDetailFooterShowsNextWhenMore(t *testing.T) {
 		t.Fatalf("第 1 页不该提示 p：%q", out)
 	}
 }
+
+// 回复后的末页视图：p 能回第 1 页，n 不再有意义（没有下一页）。
+func TestDetailTailAfterReplyCanReturnFirstPage(t *testing.T) {
+	ctx, h, rt, _, writer := setupMVPRuntime(t)
+	sess := newFakePageSessionWithSize(80, 24, 1)
+	pc := h.newPageController(sess)
+	threadID := seedFirstPost(t, ctx, pc, sess, rt)
+	seedReplies(t, ctx, writer, threadID, 25)
+
+	if err := pc.showDetailAtReply(ctx, sess, threadID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if pc.screen.Pagination.HasMore {
+		t.Fatal("末页不应再有下一页")
+	}
+	if !pc.screen.Pagination.HasPrev {
+		t.Fatal("末页之前还有回复时 HasPrev 应为 true")
+	}
+	if pc.screen.Pagination.Page != 0 {
+		t.Fatalf("末页不写页码（不知道第几页），实际 %d", pc.screen.Pagination.Page)
+	}
+	// n 在末页应是空操作，不能跳回第 1 页。
+	if err := pc.detailNextPage(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	if pc.screen.Pagination.Page != 0 {
+		t.Fatalf("末页按 n 应无变化，实际页码 %d", pc.screen.Pagination.Page)
+	}
+	// p 回第 1 页。
+	if err := pc.detailFirstPage(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	if pc.screen.Pagination.Page != 1 {
+		t.Fatalf("p 应回到第 1 页，实际 %d", pc.screen.Pagination.Page)
+	}
+	if pc.screen.Detail.BodyFrom != 0 {
+		t.Fatalf("第 1 页正文应从第 0 行起，实际 %d", pc.screen.Detail.BodyFrom)
+	}
+}

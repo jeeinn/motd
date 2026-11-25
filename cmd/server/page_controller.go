@@ -1108,14 +1108,10 @@ func (p *pageController) submitEditor(ctx context.Context, sess pageSession) err
 	if creating {
 		return p.showThreads(ctx, sess, nodeID, nodeSlug, "", 0)
 	}
-	// 回复成功：showDetail 把焦点重置为首条回复，按新 postID 回填到自己刚发的回复
-	//（ADR-068，复用 ADR-066 restoreFocus，按 Row.ID 定位）。未命中（软删 / 超
-	// MaxPostsPerThread 不在返回集合）由 restoreFocus 自然回退首行，不劣化现状。
-	if err := p.showDetail(ctx, sess, threadID); err != nil {
-		return err
-	}
-	p.restoreFocus(newPostID)
-	return p.render(sess)
+	// 回复成功：跳到包含新回复的末页并按 postID 回填焦点（ADR-068）。
+	// R-06 前这里只能重绘第 1 页——超过 200 条回复时新回复根本不在返回集合里，
+	// restoreFocus 必然失配、回退首行；现在走末页 Tail 查询，锚定始终成立。
+	return p.showDetailAtReply(ctx, sess, threadID, newPostID)
 }
 
 func (p *pageController) cancelEditorWithNotice(sess pageSession, err error) error {

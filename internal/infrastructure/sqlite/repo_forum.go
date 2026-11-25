@@ -336,6 +336,19 @@ func (r *ForumRepos) ListPostsTail(ctx context.Context, threadID, afterID int64,
 	return out, nil
 }
 
+// CountPosts 统计 id > afterID 的可见内容条数（同样过滤软删除）。
+// 末页视图用它算出序号偏移：末页第一条的全局序号 = 总数 - 本页条数 + 1。
+func (r *ForumRepos) CountPosts(ctx context.Context, threadID, afterID int64) (int, error) {
+	var n int
+	err := r.pools.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM posts WHERE thread_id = ? AND status = 'normal' AND id > ?`,
+		threadID, afterID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计主题内容条数: %w", err)
+	}
+	return n, nil
+}
+
 // PostAuthor 供编辑入口进入 composer 前只读判权；只认 normal 内容，
 // 不存在 / 软删 / 隐藏一律 ErrNotFound，与 PostOwner 的口径一致。
 func (r *ForumRepos) PostAuthor(ctx context.Context, postID int64) (int64, error) {

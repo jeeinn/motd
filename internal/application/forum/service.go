@@ -288,6 +288,21 @@ func (s *Service) ListReplies(ctx context.Context, threadID, afterID int64, limi
 	return page, nil
 }
 
+// CountReplies 返回主题下可见回复条数（不含正文），供末页视图计算序号偏移。
+func (s *Service) CountReplies(ctx context.Context, threadID int64) (int, error) {
+	if threadID <= 0 {
+		return 0, fmt.Errorf("%w: 主题 ID 非法", ErrNotFound)
+	}
+	head, err := s.ThreadHead(ctx, threadID)
+	if err != nil {
+		return 0, err
+	}
+	if head.Post.ID == 0 {
+		return 0, nil
+	}
+	return s.repos.CountPosts(ctx, threadID, head.Post.ID)
+}
+
 // ListRepliesTail 取主题的**最后一页**回复（升序）。
 //
 // 回复成功后用它定位：新回复必然在末尾，于是不需要算页码、也不需要 count 全表。

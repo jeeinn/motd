@@ -141,6 +141,8 @@ type PostReader interface {
 	// 用于「跳到末页」：回复成功后要定位到刚发的那条，而它总在末尾（R-06）。
 	// 实现同样必须过滤软删除；调用方传首帖 id 作为 afterID 以排除正文。
 	ListPostsTail(ctx context.Context, threadID, afterID int64, limit int) ([]post.Post, error)
+	// CountPosts 返回 id > afterID 的可见内容条数，供末页视图计算序号偏移。
+	CountPosts(ctx context.Context, threadID, afterID int64) (int, error)
 	// PostAuthor 返回单条可见内容的作者 ID，不存在或 status<>'normal' 返回 ErrNotFound。
 	// 供编辑入口在进入 composer **之前**做只读判权（CanEditPost），复用 canModify 单一谓词；
 	// 真正的判权仍在 EditPost 的写事务内复核，防 TOCTOU。

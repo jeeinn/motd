@@ -76,19 +76,26 @@ func (p *pageController) detailHeights(width int) []int {
 	return padded
 }
 
-// planDetailPage 保证数据足够并算出从 pos 开始的一页。
-func (p *pageController) planDetailPage(ctx context.Context, sess pageSession, pos detailPagePos) (detailPage, error) {
-	width, height, _ := sess.Window()
-	if width == 0 {
-		width = 80
+// detailViewport 返回详情屏的可用列数与每页可容纳的物理行数。
+// 无 pty-req（如 ssh -T）时与 render() 的 24 行兜底保持一致。
+func (p *pageController) detailViewport(sess pageSession) (width, capacity int) {
+	w, h, _ := sess.Window()
+	if w == 0 {
+		w = 80
 	}
-	if height == 0 {
-		height = 24 // 无 pty-req（如 ssh -T）时与 render() 的兜底一致
+	if h == 0 {
+		h = 24
 	}
-	capacity := int(height) - detailFixedLines
+	capacity = int(h) - detailFixedLines
 	if capacity < 1 {
 		capacity = 1
 	}
+	return int(w), capacity
+}
+
+// planDetailPage 保证数据足够并算出从 pos 开始的一页。
+func (p *pageController) planDetailPage(ctx context.Context, sess pageSession, pos detailPagePos) (detailPage, error) {
+	width, capacity := p.detailViewport(sess)
 
 	// 首次进入（还没取过数）或本页需要的回复已超出已加载范围时，先补一批。
 	// 只向前加载，不回退：p 走的是"回第 1 页"，会重置状态重新取。
@@ -114,10 +121,14 @@ func (p *pageController) renderDetailPage(ctx context.Context, sess pageSession,
 	if p.detail.page < 1 {
 		p.detail.page = 1
 	}
+	width, _ := p.detailViewport(sess)
 	page, err := p.planDetailPage(ctx, sess, pos)
 	if err != nil {
 		return p.fail(sess, err)
 	}
+	// 必须在 planDetailPage 之后算：它可能刚加载了第一批数据，
+	// 此前的 p.detail.screen 还是空的（bodyRows 会算出 0，进而把 HasMore 判错）。
+	bodyRows := terminal.BodyLines(p.detail.screen.Detail.Body, width)
 	p.detail.pos = pos
 
 	sc := p.detail.screen
@@ -137,7 +148,8 @@ func (p *pageController) renderDetailPage(ctx context.Context, sess pageSession,
 	}
 	sc.Rows = p.detail.batch[lo:hi]
 
-	moreAfter := page.ReplyTo < p.detail.batchFrom+len(p.detail.batch) || p.detail.hasMore
+	moreAfter := page.BodyTo < bodyRows ||
+		page.ReplyTo < p.detail.batchFrom+len(p.detail.batch) || p.detail.hasMore
 	// 单页详情不显示页码：既无翻页可做，页码只是噪音（也与"不出现做不到的操作"一致）。
 	pageNo := p.detail.page
 	if !moreAfter && pageNo <= 1 {
@@ -145,6 +157,7 @@ func (p *pageController) renderDetailPage(ctx context.Context, sess pageSession,
 	}
 	sc.Pagination.Page = pageNo
 	sc.Pagination.HasMore = moreAfter
+	sc.Pagination.HasPrev = pos != detailPagePos{}
 	sc.Pagination.FirstIndex = page.ReplyFrom + 1
 	sc.Pagination.Loaded = len(sc.Rows)
 	sc.StatusBar.Notice = p.notice
@@ -162,6 +175,11 @@ func (p *pageController) renderDetailPage(ctx context.Context, sess pageSession,
 
 // detailNextPage 往下读一页；已到末尾时不做任何事（footer 也不再提示 n）。
 func (p *pageController) detailNextPage(ctx context.Context, sess pageSession) error {
+	// 末尾页（含回复后定位的末页视图）没有下一页：直接返回，
+	// 不能让 planDetailPage 从 pos 零点重新算，否则会莫名跳回第 1 页。
+	if !p.screen.Pagination.HasMore || !p.detail.loaded {
+		return nil
+	}
 	page, err := p.planDetailPage(ctx, sess, p.detail.pos)
 	if err != nil {
 		return p.fail(sess, err)
@@ -175,9 +193,83 @@ func (p *pageController) detailNextPage(ctx context.Context, sess pageSession) e
 
 // detailFirstPage 回到第 1 页（与列表页 p 的语义一致）。
 func (p *pageController) detailFirstPage(ctx context.Context, sess pageSession) error {
-	if p.detail.page <= 1 && p.detail.pos == (detailPagePos{}) {
+	// 已经停在第 1 页且数据在位时才是空操作；末页视图（page=0、未加载批次）
+	// 必须真正重建第 1 页，否则 p 会毫无反应。
+	if p.detail.page == 1 && p.detail.loaded {
 		return nil
 	}
 	p.detail = detailState{page: 1}
 	return p.renderDetailPage(ctx, sess, detailPagePos{})
+}
+
+// showDetailAtReply 渲染「包含刚发出那条回复的末页」，用于回复成功后的焦点锚定
+// （ADR-068）。新回复必然在末尾，故取末页批次即可，无需计算它是第几页：
+//   - 页码留空（Page=0）——不知道是第几页时不要写一个错的数字；
+//   - HasPrev 按"是否还有更早的回复"给出，允许 p 回第 1 页；
+//   - HasMore=false——已经在末尾，n 不再有下一页。
+//
+// 版面有两种：
+//  1. 正文与末页回复能同屏（短主题，占绝大多数）→ 正文照常显示；
+//  2. 放不下（长正文或回复多）→ 只显示回复，并**从末尾往前装**，
+//     保证刚发的这条一定在页内（否则锚定又落空）。
+func (p *pageController) showDetailAtReply(ctx context.Context, sess pageSession, threadID, anchor int64) error {
+	if p.service == nil {
+		return p.writeFixed(sess, "论坛服务尚未就绪")
+	}
+	p.threadID = threadID
+	p.detail = detailState{} // 末页视图不参与前后翻页，清空分页游标
+
+	width, capacity := p.detailViewport(sess)
+	sc, err := p.service.ScreenThreadDetailTail(ctx, threadID, detailReplyPageSize, p.viewContext(sess))
+	if err != nil {
+		return p.fail(sess, err)
+	}
+	total, err := p.service.CountReplies(ctx, threadID)
+	if err != nil {
+		return p.fail(sess, err)
+	}
+
+	heights := terminal.RowsLines(sc.Rows, viewmodel.ScreenThreadDetail, width)
+	bodyRows := terminal.BodyLines(sc.Detail.Body, width)
+	need := bodyRows
+	for _, h := range heights {
+		if h < 1 {
+			h = 1
+		}
+		need += h
+	}
+	if need > capacity {
+		// 装不下：放弃正文，从末尾往前装回复。
+		sc.Detail.Body = ""
+		used, start := 0, len(sc.Rows)
+		for start > 0 {
+			h := heights[start-1]
+			if h < 1 {
+				h = 1
+			}
+			if used+h > capacity && used > 0 {
+				break
+			}
+			used += h
+			start--
+		}
+		sc.Rows = sc.Rows[start:]
+	}
+
+	sc.Pagination.Page = 0
+	sc.Pagination.HasPrev = total > len(sc.Rows)
+	sc.Pagination.HasMore = false
+	sc.Pagination.Loaded = len(sc.Rows)
+	sc.StatusBar.Notice = p.notice
+	if len(sc.Rows) > 0 {
+		sc.Selection = viewmodel.Selection{
+			FocusedIndex: sc.Rows[0].Index,
+			TopRowIndex:  sc.Rows[0].Index,
+		}
+	}
+
+	p.screen = sc
+	p.notice = viewmodel.Notice{}
+	p.restoreFocus(anchor)
+	return p.render(sess)
 }

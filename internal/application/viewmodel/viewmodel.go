@@ -172,9 +172,12 @@ type Pagination struct {
 	Loaded     int
 	HasMore    bool
 	NextCursor string
-	// Page 是 1-based 页码，0 表示不展示页码（列表/检索等仍走既有提示文案）。
-	// 详情屏分页（R-06）用它渲染「第 N 页」，并决定 footer 是否出现 p。
+	// Page 是 1-based 页码，0 表示不展示页码（列表/检索等仍走既有提示文案，
+	// 详情屏末页因不计算总页数也不写数字）。
 	Page int
+	// HasPrev 表示"前面还有内容"，用于 footer 决定是否提示 p。
+	// 与 Page 分开是因为末页视图知道"有前置页"但不知道是第几页。
+	HasPrev bool
 }
 
 // Detail 是详情屏的主体内容（主题本身）。回复列表仍放在 Rows。
