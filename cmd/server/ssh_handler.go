@@ -244,6 +244,16 @@ func actionNotice(action cmdAction, pasteLen int) string {
 	}
 }
 
+// resizeRedrawable 判断窗口变化时能否整屏重绘当前页面（R-09）。
+//
+// 整屏重绘（H + 2J）会覆盖当前可视区，而命令输入 / 编辑器 / 登录 / 邮箱
+// 流程都靠「页面帧之后逐字节追加回显」呈现：重绘会抹掉用户已经输入但尚未
+// 提交的内容，且这些流程各有自己的呈现器，pc.screen 未必是它们当前显示的屏。
+// 因此只在纯浏览态重绘；其余状态保持现状，下一次自然 render 会对齐。
+func resizeRedrawable(cl *commandLine, pc *pageController, inLogin bool) bool {
+	return !cl.active && pc.editor == nil && pc.emailFlow == nil && !inLogin
+}
+
 func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 	// 页面状态每会话独立：inputHandler 是进程级单例，绝不能把光标 / 当前节点
 	// 之类的 UI 状态放在 handler 上（原则二：内存状态只是运行时状态）。
@@ -372,6 +382,14 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 				if handleOne(m) {
 					return nil
 				}
+			}
+		case <-sess.ResizeNotify():
+			// R-09：窗口变化后立刻按新尺寸重绘当前屏，不必等下一次按键。
+			// 只重绘、不重新取数、不改分页状态：refresh() 会把详情页踢回
+			// 第 1 页；命令输入 / 编辑器 / 登录 / 邮箱流程依赖逐字节追加
+			// 回显，整屏 H+2J 会抹掉用户已输入但未提交的内容，故一并跳过。
+			if resizeRedrawable(&cl, pc, flow != nil && flow.active) {
+				_ = pc.render(sess)
 			}
 		case <-pollC:
 			if flow == nil || !flow.active {
