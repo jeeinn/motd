@@ -13,7 +13,8 @@ func TestDefaultRegistryHasP0Commands(t *testing.T) {
 	// B 方案（帮助归组）把 7 条管理员命令集中到表尾：顺序固定，帮助文本由注册表生成。
 	// 2026-11-22（v0.7.1 / P4.5）：/search 之后追加 /latest（跨版块最新）与 /stats（统计看板）。
 	// ADR-065：/stats 之后追加 /whoami（别名 /me）与 /who [页]；/karma 彩蛋入口删除。
-	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "latest", "stats", "whoami", "who", "help", "quit", "hide", "unhide", "unthread", "node", "node", "node", "node"}
+	// R-15：/pin /unpin 两条置顶命令加在 /unthread 之后。
+	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "latest", "stats", "whoami", "who", "help", "quit", "hide", "unhide", "unthread", "pin", "unpin", "node", "node", "node", "node"}
 	all := Default().All()
 	if len(all) != len(want) {
 		t.Fatalf("命令应为 %d 条，实际 %d", len(want), len(all))
@@ -49,8 +50,9 @@ func TestHelpGroupsAdminCommandsWithoutHiding(t *testing.T) {
 		t.Fatalf("无彩蛋命令时不应出现彩蛋分组说明，实际 %d 次", n)
 	}
 
-	// 7 条管理员命令全在说明行之后、键位表之前；一条都不少（不隐藏）。
-	adminUsages := []string{"/node list", "/node create", "/node rename", "/node archive", "/hide [id]", "/unhide [id]", "/unthread <thread-id>"}
+	// 9 条管理员命令全在说明行之后、键位表之前；一条都不少（不隐藏）。
+	// R-15 新增 /pin、/unpin 两条置顶命令。
+	adminUsages := []string{"/node list", "/node create", "/node rename", "/node archive", "/hide [id]", "/unhide [id]", "/unthread <thread-id>", "/pin", "/unpin"}
 	for _, usage := range adminUsages {
 		at := strings.Index(help, usage)
 		if at <= headerAt || at >= keysAt {
@@ -69,7 +71,7 @@ func TestHelpGroupsAdminCommandsWithoutHiding(t *testing.T) {
 		if (c.Name == "delete" || c.Name == "edit") && c.Group == GroupAdmin {
 			t.Errorf("作者权命令 %q 不得归入管理员组", c.Name)
 		}
-		if c.Group == GroupAdmin && c.Name != "node" && c.Name != "hide" && c.Name != "unhide" && c.Name != "unthread" {
+		if c.Group == GroupAdmin && c.Name != "node" && c.Name != "hide" && c.Name != "unhide" && c.Name != "unthread" && c.Name != "pin" && c.Name != "unpin" {
 			t.Errorf("意外的管理员分组命令 %q", c.Name)
 		}
 	}

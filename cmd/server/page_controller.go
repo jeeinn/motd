@@ -581,7 +581,7 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 	case "reply":
 		return p.startComposer(sess, false)
 	case "vote":
-		return p.vote(ctx, sess, inv.Args[0])
+		return p.vote(ctx, sess, inv.Args)
 	case "delete":
 		return p.delete(ctx, sess, inv.Args)
 	case "edit":
@@ -592,6 +592,10 @@ func (p *pageController) command(ctx context.Context, sess pageSession, inv comm
 		return p.unhide(ctx, sess, inv.Args)
 	case "unthread":
 		return p.unthread(ctx, sess, inv.Args)
+	case "pin":
+		return p.pin(ctx, sess, true)
+	case "unpin":
+		return p.pin(ctx, sess, false)
 	case "search":
 		return p.showSearch(ctx, sess, strings.Join(inv.Args, " "), 1)
 	case "latest":

@@ -178,7 +178,7 @@ chmod 600 .env
 
 ### 论坛互动（P1-M3）
 
-- **投票** `/vote <up|down|rm>`：只对**当前打开的 thread**，访客拒绝。投票走 `AdjustScore` 只改 `threads.score`、**不推进 `last_reply_at`**，因此不影响 `SortLatest` 排序（ADR-032）；同一用户对同一目标重复投票不加分（幂等），改票按差值计（`-1 → +1` = +2）。
+- **投票** `/vote <up|down|rm> [回复id]`：默认对**当前打开的 thread**；带 `回复id`（详情页 `id=<n>`）则对该回复投票（R-15）。访客拒绝。投票走 `AdjustScore` 只改 `threads.score`、**不推进 `last_reply_at`**，因此不影响 `SortLatest` 排序（ADR-032）；同一用户对同一目标重复投票不加分（幂等），改票按差值计（`-1 → +1` = +2）。回复票的分数与 karma 均记到父主题/回复作者，事件 `PostID` 回填（ADR-057）。
 - **搜索** `/search <关键词>`：≥3 码点走 FTS5 trigram，<3 码点回退 LIKE；结果页 `n/p` 翻页、Enter 打开主题，页长锁 20、摘要 ≤240 字节。用户输入的 `*`/`"`/`%`/`_` 均按字面量处理（防 FTS 语法注入）。
 - **恢复后索引重建**：见上方 `motdctl fts-rebuild`——恢复备份后 FTS 索引不会自动回来，必须手动重建，否则搜索返回空。这是刻意设计（重建时机由运维掌控，避免启动时整库扫描）。
 - 审计事件 `EventVoteCast` 随投票写同事务入 outbox；幂等键固定，插件只感知**首次投票**（改票/撤销事件被去重）。
@@ -225,7 +225,8 @@ chmod 600 .env
 **管理员配置 `MOTD_ADMIN_FINGERPRINTS`**（在 `.env` 里配置，见 `.env.sample`）：逗号分隔的 `SHA256:` 公钥指纹，留空 = 无人可管。获取方式 `ssh-keygen -lf ~/.ssh/id_rsa.pub`，把 `SHA256:...` 整串填入；多个管理员用逗号分隔。405 端口/HTTP 无管理端点——治理只走 SSH 命令。
 
 - **指纹来源**：比对的是 SSH **认证阶段服务端算出的会话指纹**，不是命令文本。公开注册用户无法自我提权；换钥等于自动失权。
-- **变更需重启**：白名单在启动时读入 `Config.AdminFingerprints`（`internal/config/admin.go`），运行中改 `.env` 不生效，必须重启服务。SIGHUP 热重载推 P3，当前不做。非法指纹（非 `SHA256:` 格式）启动即失败，不静默放行。
+- **热重载（R-15 / ADR-079）**：改 `.env` 的 `MOTD_ADMIN_FINGERPRINTS` 后执行 `kill -HUP <pid>`（systemd: `systemctl reload motd` 或 `kill -HUP $(systemctl show -p MainPID motd --value)`），服务端从文件强制重读并以原子快照换入 `forum.Service`，无需重启、不中断在线会话。非法指纹（非 `SHA256:` 格式）**拒绝重载并保留旧名单**，日志告警，不 half-apply、不静默放行；`.env` 无该键时回退进程环境（`Environment=` 注入的部署方式仍需在 systemd 改后重启）。启动时非法指纹依旧失败关闭。
+- **主题置顶（R-15）**：管理员在详情页执行 `/pin` / `/unpin`，每版块最多 1 条置顶，新置顶自动清同版块旧置顶（同事务原子）。置顶主题在版块内与 `/latest` 列表前置并带琥珀 `[置顶]` 前缀；置顶作为独立前缀层，不改变 `SortLatest`/`SortScore`，翻页靠 v2 游标（兼容旧 v1）。
 - **权限单点**：所有治理命令经 `requireAdmin` 收口，与作者权 `canModify` 严格分离；访客与普通用户调用统一返回拒绝文案，不泄露命令细节。
 
 **节点（版块）管理**：

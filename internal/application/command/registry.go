@@ -111,7 +111,8 @@ var defaultCommands = []Command{
 	// P1-M2：主动注销撤销该账号全部在线会话，无参数（不给「只注销某台」的假承诺）。
 	{Name: "logout", Usage: "/logout", Summary: "注销当前账号并撤销其全部在线会话", MaxArgs: 0},
 	// P1-M3：投票只作用于当前打开的主题（value 为 up/down/rm）。
-	{Name: "vote", Usage: "/vote <up|down|rm>", Summary: "给当前主题投赞成/反对票或撤销", MinArgs: 1, MaxArgs: 1},
+	// v0.11.0 / R-15：带第二个参数时为回复投票（id 取详情页 id=<n>），无参目标仍是当前主题。
+	{Name: "vote", Usage: "/vote <up|down|rm> [id]", Summary: "投票/撤销：默认当前主题，带 id 投指定回复", MinArgs: 1, MaxArgs: 2},
 	// 关键词可含空格：MaxArgs=-1 后在页面层用空格拼回，仍只把整串作为查询词。
 	{Name: "search", Usage: "/search <关键词>", Summary: "检索正文", MinArgs: 1, MaxArgs: -1},
 	// v0.7.1 / P4.5-M2：跨版块最新主题。与 /top 同层（页面命令），导航全部复用
@@ -134,6 +135,9 @@ var defaultCommands = []Command{
 	{Name: "unhide", Usage: "/unhide [id]", Summary: "恢复当前主题 / 指定回复（仅管理员）", MinArgs: 0, MaxArgs: 1, Group: GroupAdmin},
 	// ADR-053 补丁：隐藏主题打不开详情，因此单独给一条从任意屏按 ID 恢复主题的命令。
 	{Name: "unthread", Usage: "/unthread <thread-id>", Summary: "恢复被隐藏的主题（可从任意页面）", MinArgs: 1, MaxArgs: 1, Group: GroupAdmin},
+	// R-15 / ADR-079 主题置顶：无参作用于当前打开的主题，每版块最多 1 条。
+	{Name: "pin", Usage: "/pin", Summary: "置顶当前主题（仅管理员，每版块 1 条）", MaxArgs: 0, Group: GroupAdmin},
+	{Name: "unpin", Usage: "/unpin", Summary: "取消当前主题置顶（仅管理员）", MaxArgs: 0, Group: GroupAdmin},
 	// P2-M1：节点治理四条子命令。参数区间各自独立，缺子命令/多参数都在注册表层挡掉。
 	{Name: "node", Sub: "list", Usage: "/node list", Summary: "列出全部版块（含归档，仅管理员）", MaxArgs: 0, Group: GroupAdmin},
 	{Name: "node", Sub: "create", Usage: "/node create <slug> <name>", Summary: "创建版块（仅管理员）", MinArgs: 2, MaxArgs: 2, Group: GroupAdmin},

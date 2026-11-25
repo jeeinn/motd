@@ -433,6 +433,7 @@ func threadRow(t thread.Thread, index int) viewmodel.Row {
 			AuthorID:    t.UserID,
 			CreatedAt:   t.CreatedAt.Unix(),
 			LastReplyAt: t.LastReplyAt.Unix(),
+			Pinned:      t.Mark > 0, // R-15：置顶是语义标记，前缀交给渲染层
 		},
 	}
 }

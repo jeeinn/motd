@@ -53,6 +53,51 @@ func LoadDotEnv() (string, error) {
 	return applyDotEnv(dotEnvLookup{cwdDir: cwd, exePath: exe})
 }
 
+// ReloadAdminFingerprints 从 .env 文件**强制重读**管理员指纹白名单（R-15 / ADR-079）。
+//
+// 与 LoadDotEnv 的"填空"语义不同（进程已设值优先，重载时 env 已有旧值），
+// 这里直接解析文件并取目标键，不写回进程环境——SIGHUP 改 .env 后立即生效。
+// 找不到 .env 时回退到进程环境（systemd Environment= 注入的部署方式）。
+// 解析失败返回 error，调用方须保留旧白名单（fail-closed，不 half-apply）。
+// 错误文案只含键名与 IO 原因，绝不回显指纹值。
+func ReloadAdminFingerprints() (map[string]struct{}, error) {
+	l := dotEnvLookup{}
+	if cwd, err := os.Getwd(); err == nil {
+		l.cwdDir = cwd
+	}
+	if exe, err := os.Executable(); err == nil {
+		if resolved, e := filepath.EvalSymlinks(exe); e == nil {
+			exe = resolved
+		}
+		l.exePath = exe
+	}
+	return reloadAdminFingerprintsFrom(l)
+}
+
+// reloadAdminFingerprintsFrom 是 ReloadAdminFingerprints 的可测核心：
+// 查找路径可注入，测试用临时目录，绝不读项目根 .env。
+func reloadAdminFingerprintsFrom(l dotEnvLookup) (map[string]struct{}, error) {
+	path := l.find()
+	if path == "" {
+		return ParseAdminFingerprints(os.Getenv("MOTD_ADMIN_FINGERPRINTS"))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("重读 .env 失败: %w", err)
+	}
+	defer f.Close()
+	values, err := parseDotEnv(f)
+	if err != nil {
+		return nil, fmt.Errorf("重读 .env 失败: %w", err)
+	}
+	raw, ok := values["MOTD_ADMIN_FINGERPRINTS"]
+	if !ok {
+		// 文件里没有该键：回退到进程环境（可能被 Environment= 注入）。
+		return ParseAdminFingerprints(os.Getenv("MOTD_ADMIN_FINGERPRINTS"))
+	}
+	return ParseAdminFingerprints(raw)
+}
+
 // applyDotEnv 是查找 → 解析 → 填空的纯编排；所有测试入口都走这里。
 func applyDotEnv(l dotEnvLookup) (string, error) {
 	if dotEnvDisabled() {

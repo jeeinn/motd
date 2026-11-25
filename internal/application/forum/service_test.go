@@ -642,6 +642,27 @@ func (x *fakeTx) UnhideThread(_ context.Context, threadID int64) error {
 	return nil
 }
 
+// R-15 置顶写端口的 fake：直接改 fakeState.threads 里的 Mark 字段。
+func (x *fakeTx) SetThreadMark(_ context.Context, threadID int64, mark int8) error {
+	t, ok := x.state.threads[threadID]
+	if !ok || x.state.threadStatus[threadID] == "deleted" || x.state.threadStatus[threadID] == "hidden" {
+		return ErrNotFound
+	}
+	t.Mark = mark
+	x.state.threads[threadID] = t
+	return nil
+}
+
+func (x *fakeTx) ClearPinnedInNode(_ context.Context, nodeID, exceptThreadID int64) error {
+	for id, t := range x.state.threads {
+		if id != exceptThreadID && t.NodeID == nodeID && t.Mark == 1 {
+			t.Mark = 0
+			x.state.threads[id] = t
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // 测试辅助
 // ---------------------------------------------------------------------------

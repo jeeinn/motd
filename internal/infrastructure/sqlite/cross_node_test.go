@@ -214,7 +214,7 @@ func TestLatestCursorFormsAgree(t *testing.T) {
 	var legacyIDs []int64
 	for lrows.Next() {
 		var th threadRowScan
-		if err := lrows.Scan(&th.id, &th.nodeID, &th.userID, &th.title, &th.score, &th.lastReply, &th.created); err != nil {
+		if err := lrows.Scan(&th.id, &th.nodeID, &th.userID, &th.title, &th.score, &th.lastReply, &th.created, &th.mark); err != nil {
 			t.Fatalf("扫描 OR 形态结果: %v", err)
 		}
 		legacyIDs = append(legacyIDs, th.id)
@@ -237,6 +237,7 @@ func TestLatestCursorFormsAgree(t *testing.T) {
 type threadRowScan struct {
 	id, nodeID, userID, score, lastReply, created int64
 	title                                         string
+	mark                                          int8 // R-15：selectThreadsScoped 自 0012 起多一列
 }
 
 // 执行计划：必须命中强制索引，且不出现 TEMP B-TREE 排序（DoD §3.2 #6）。
@@ -248,8 +249,9 @@ func TestLatestThreadsQueryPlanUsesForcedIndex(t *testing.T) {
 		e.insertThreadIn(t, nodeB, fmt.Sprintf("B%d", i), int64(200+i))
 	}
 
+	// R-15：mark 占位符（0=普通层）位于行值游标之后、LIMIT 之前。
 	plan := explainPlan(t, e.pools, latestThreadsQuery(2, true),
-		e.nodeID, nodeB, int64(1000), int64(1000), 10)
+		e.nodeID, nodeB, int64(1000), int64(1000), 0, 10)
 	t.Logf("跨版块执行计划: %s", plan)
 
 	if !strings.Contains(plan, "idx_threads_last_reply") {

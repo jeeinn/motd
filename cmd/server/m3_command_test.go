@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -90,6 +91,61 @@ func TestVoteCommandWiresToService(t *testing.T) {
 	run("/vote bogus")
 	if !strings.Contains(sess.output(), "用法：/vote") {
 		t.Fatalf("非法投票参数应给固定提示: %q", sess.output())
+	}
+}
+
+// R-15：/vote 带 id 参数走回复投票，分数记到父主题；非法 id 给固定提示不回显原文。
+func TestVoteCommandOnPostWiresToService(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	tid, pid := setupM3Thread(t, ctx, writer, "正文")
+	sess := newFakePageSession(2) // 投票者非作者，避免 self-vote 干扰
+	pc := h.newPageController(sess)
+	if err := pc.showDetail(ctx, sess, tid); err != nil {
+		t.Fatalf("打开主题: %v", err)
+	}
+
+	run := func(line string) {
+		t.Helper()
+		inv, err := h.reg.Parse(line)
+		if err != nil {
+			t.Fatalf("解析 %q: %v", line, err)
+		}
+		sess.reset()
+		if err := pc.command(ctx, sess, inv); err != nil {
+			t.Fatalf("执行 %q: %v", line, err)
+		}
+	}
+	score := func() int64 {
+		t.Helper()
+		var n int64
+		if err := pools.QueryRowContext(ctx, `SELECT score FROM threads WHERE id = ?`, tid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	// 带 post id → TargetPost，分数加到父主题（不是回复自身，回复无 score 列）。
+	run("/vote up " + strconv.FormatInt(pid, 10))
+	if score() != 1 {
+		t.Fatalf("回复投票后父主题分数应为 1，实际 %d", score())
+	}
+	// 父主题投票与回复投票是两条独立记录，可对同一主题各投一票。
+	run("/vote up")
+	if score() != 2 {
+		t.Fatalf("主题与回复各投一票后分数应为 2，实际 %d", score())
+	}
+	// 撤销回复票只回退它自己那一票。
+	run("/vote rm " + strconv.FormatInt(pid, 10))
+	if score() != 1 {
+		t.Fatalf("撤销回复票后分数应为 1，实际 %d", score())
+	}
+	// 非正整数 id 给固定提示，不回显原文。
+	run("/vote up abc")
+	if !strings.Contains(sess.output(), "回复 ID 必须是正整数") {
+		t.Fatalf("非法 id 应给固定提示: %q", sess.output())
+	}
+	if strings.Contains(sess.output(), "abc") {
+		t.Fatalf("不得回显用户原文: %q", sess.output())
 	}
 }
 

@@ -13,4 +13,7 @@ type Thread struct {
 	Score       int64
 	LastReplyAt time.Time
 	CreatedAt   time.Time
+	// Mark 是列表排序的独立前缀层（R-15 / ADR-079）：0=普通，1=置顶。
+	// 不进 Score、不进 karma，只影响列表前置与 [置顶] 前缀。
+	Mark int8
 }

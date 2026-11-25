@@ -19,7 +19,9 @@ import (
 // M0 的「禁止 DELETE FROM nodes」守卫由 node_invariants_test.go 覆盖，
 // 本文件在主守卫里调用它复核，不重复实现。
 
-var nodeAdminUseCases = []string{"ListAdminNodes", "CreateNode", "RenameNode", "ArchiveNode"}
+// R-15：PinThread/UnpinThread 也是管理员治理用例，必须过 requireAdmin 单点。
+// 它们不在 nodeAdminWriteCases 里——写入委托给 setThreadMark 辅助函数。
+var nodeAdminUseCases = []string{"ListAdminNodes", "CreateNode", "RenameNode", "ArchiveNode", "PinThread", "UnpinThread"}
 var nodeAdminWriteCases = []string{"CreateNode", "RenameNode", "ArchiveNode"}
 
 func textOfFunc(fn *ast.FuncDecl) string {
