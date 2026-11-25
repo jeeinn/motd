@@ -39,6 +39,9 @@ type ThreadCursor struct {
 	LastReplyAt int64
 	Score       int64
 	ID          int64
+	// Mark 是置顶层锚点（R-15 / ADR-079）：1=仍在置顶层，0=已进入普通层。
+	// 进入普通层后永不回置顶层，避免跨页重复。v1 游标解码时恒为 0。
+	Mark int8
 }
 
 // IsZero 表示「第一页」，即不带游标。
@@ -250,6 +253,13 @@ type WriteTx interface {
 	// 根本不存在的目标返回 ErrNotFound。与判权一起落在同一事务快照内。
 	UnhideThread(ctx context.Context, threadID int64) error
 	UnhidePost(ctx context.Context, postID int64) error
+	// SetThreadMark / ClearPinnedInNode 是主题置顶的写端口（R-15 / ADR-079）：
+	// SetThreadMark 只改 threads.mark（0/1），不碰 status/last_reply_at/score；
+	// ClearPinnedInNode 把同版块其它 mark=1 的主题清为 0，实现"每版块 1 条置顶"
+	// （两个操作在同一写事务内完成，原子替换）。
+	// 目标不存在返回 ErrNotFound；重复置顶/解顶是合法 no-op。
+	SetThreadMark(ctx context.Context, threadID int64, mark int8) error
+	ClearPinnedInNode(ctx context.Context, nodeID, exceptThreadID int64) error
 	// AdjustKarma 调整用户 karma（v0.5.0 / ADR-057）。与业务写在同一事务内提交，
 	// delta 为带符号增量。等级只由 karma 派生用于显示，绝不作为权限谓词（ADR-014）。
 	// 计分规则见 P3-PLAN §3.2：主题+2 / 回复+1 / 被赞+1 / 被踩不扣 / 改票按差 / 删内容不回退。

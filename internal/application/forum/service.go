@@ -54,8 +54,9 @@ type Service struct {
 	outbox          *Outbox
 	onPublishErr    PublishObserver
 	publishFailures atomic.Int64
-	// adminWhitelist 由启动配置注入；未注入时所有 /node 治理用例一律拒绝。
-	adminWhitelist map[string]struct{}
+	// adminWhitelist 由启动配置注入（R-15 起为原子快照，支持 SIGHUP 热重载）；
+	// 未注入时所有 /node 治理用例一律拒绝。写方只经 SetAdminWhitelist 原子换入。
+	adminWhitelist atomic.Pointer[adminWhitelistSnapshot]
 }
 
 // ServiceOption 用于注入时钟与事件出口；限流判定必须可测，不能靠真实等待 60 秒。
@@ -186,6 +187,7 @@ func (s *Service) ListThreads(ctx context.Context, q ListThreadsQuery) (*ThreadP
 		last := rows[len(rows)-1]
 		page.NextCursor = encodeThreadCursor(ThreadCursor{
 			Sort:        q.Sort,
+			Mark:        last.Mark, // R-15：tier 锚点，进入普通层后不再回置顶层
 			LastReplyAt: last.LastReplyAt.Unix(),
 			Score:       last.Score,
 			ID:          last.ID,

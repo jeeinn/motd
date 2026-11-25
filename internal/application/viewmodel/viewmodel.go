@@ -144,6 +144,10 @@ type RowMeta struct {
 	LastReplyAt int64
 	Unread      bool
 	Extra       string
+	// Pinned 表示主题被管理员置顶（R-15 / ADR-079）。
+	// 只是渲染用的语义标记：前缀 [置顶] 由终端/浏览器各自渲染，
+	// 不把中文前缀或颜色塞进 Title（Title 是用户文本，走 RenderUser）。
+	Pinned bool
 }
 
 // Row 是列表中的一行。Index 是 1-based 语义序号（键盘选择用），

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/jeeinn/motd/internal/application/forum"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
@@ -35,28 +36,44 @@ func (p *pageController) showSearch(ctx context.Context, sess pageSession, query
 	return p.render(sess)
 }
 
-// vote 只作用于当前打开的主题。参数来自用户文本，先白名单匹配成领域值，
-// 绝不把原文写进提示或日志；post 目标暂不通过命令行暴露（见交付说明）。
-func (p *pageController) vote(ctx context.Context, sess pageSession, arg string) error {
+// vote 给当前主题或指定回复投票（R-15）：无 id 参数作用于当前主题（既有口径），
+// 带 id 参数作用于该回复（id 取详情页显示的 id=<n>）。参数来自用户文本，
+// 方向先白名单匹配成领域值、id 按十进制正整数解析，绝不把原文写进提示或日志。
+// 投票的业务规则（权限、目标存在性、越权、self-vote、karma、幂等）全在 Service 层，
+// 这里只做参数解析与用例调用，不重写任何规则。
+func (p *pageController) vote(ctx context.Context, sess pageSession, args []string) error {
 	if p.screen.Kind != viewmodel.ScreenThreadDetail || p.threadID <= 0 {
 		return p.writeFixed(sess, "请先打开一个主题再投票")
+	}
+	if len(args) == 0 || len(args) > 2 {
+		return p.writeFixed(sess, "用法：/vote <up|down|rm> [回复id]")
 	}
 	actor, err := p.actor(ctx, sess)
 	if err != nil {
 		return p.fail(sess, err)
 	}
-	target := vote.TargetThread
-	switch arg {
+
+	// 目标：无 id = 当前主题；带 id = 指定回复。id 必须是正整数，不回显原文。
+	target, targetID := vote.TargetThread, p.threadID
+	if len(args) == 2 {
+		id, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil || id <= 0 {
+			return p.writeFixed(sess, "回复 ID 必须是正整数")
+		}
+		target, targetID = vote.TargetPost, id
+	}
+
+	switch args[0] {
 	case "up", "down":
 		v := vote.Up
-		if arg == "down" {
+		if args[0] == "down" {
 			v = vote.Down
 		}
-		_, err = p.service.CastVote(ctx, actor, target, p.threadID, v)
+		_, err = p.service.CastVote(ctx, actor, target, targetID, v)
 	case "rm":
-		_, err = p.service.Unvote(ctx, actor, target, p.threadID)
+		_, err = p.service.Unvote(ctx, actor, target, targetID)
 	default:
-		return p.writeFixed(sess, "用法：/vote <up|down|rm>")
+		return p.writeFixed(sess, "用法：/vote <up|down|rm> [回复id]")
 	}
 	if err != nil {
 		return p.fail(sess, err)

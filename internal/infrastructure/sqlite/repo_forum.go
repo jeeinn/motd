@@ -58,7 +58,7 @@ func inPlaceholders(n int) string {
 
 // latestThreadsQuery 是跨版块最新列表的完整 SQL，**由仓储与 EXPLAIN 测试共用**——
 // 执行计划验的必须是生产实际跑的那条串，不能测试里另抄一份（抄一份就会漂移）。
-// 参数顺序固定：IN 值 × nodeCount → 游标行值 (last_reply_at, id) → LIMIT。
+// 参数顺序固定：IN 值 × nodeCount → 游标行值 (last_reply_at, id) → mark → LIMIT。
 //
 // 两处刻意的写法（ADR-063 / QA 实测）：
 //  1. **INDEXED BY 强制索引**：不加提示时优化器在同一句 SQL、两份不同数据上会给出
@@ -68,12 +68,18 @@ func inPlaceholders(n int) string {
 //  2. **行值游标 `(a, b) < (?, ?)`** 而不是 `a < ? OR (a = ? AND b < ?)`：
 //     OR 形态即使有索引也只能 SCAN（从头扫到游标），翻 k 页总代价 O(k×N)；
 //     行值形态能 seek（SEARCH），总量 O(N)。首屏无差别，深翻页差三个数量级。
+//
+// R-15 / ADR-079 方案 C（分层 keyset）：mark 只作 `AND t.mark = ?` 残留过滤，
+// **不进 ORDER BY**——索引列序与 mark-first 排序拓扑不匹配，加进 ORDER BY 会
+// 触发 TEMP B-TREE 并打破 cross_node_test 的 EXPLAIN 硬断言。置顶/普通两层
+// 用同一个 SQL、不同 mark 参数分两次查，Go 层按 tier 顺序拼接（见 ListThreads）。
 func latestThreadsQuery(nodeCount int, withCursor bool) string {
 	q := selectThreadsScoped + ` INDEXED BY idx_threads_last_reply` +
 		` WHERE t.status = 'active' AND t.node_id IN (` + inPlaceholders(nodeCount) + `)`
 	if withCursor {
 		q += ` AND (t.last_reply_at, t.id) < (?, ?)`
 	}
+	q += ` AND t.mark = ?`
 	return q + ` ORDER BY t.last_reply_at DESC, t.id DESC LIMIT ?`
 }
 
@@ -128,17 +134,17 @@ func (r *ForumRepos) GetNodeBySlug(ctx context.Context, slug string) (node.Node,
 // ThreadReader
 // ---------------------------------------------------------------------------
 
-const selectThreads = `SELECT id, node_id, user_id, title, score, last_reply_at, created_at FROM threads`
+const selectThreads = `SELECT id, node_id, user_id, title, score, last_reply_at, created_at, mark FROM threads`
 
 // selectThreadsScoped 是**跨版块**查询的列投影：JOIN nodes 后所有列必须带别名，
-// 且必须逐列书写、不能写 t.*——threads 自 0004 起有 8 列（多了 status），
-// 而 scanThread 只扫 7 列，t.* 会让 Scan 在运行期报「期望 7 个目标」。
-const selectThreadsScoped = `SELECT t.id, t.node_id, t.user_id, t.title, t.score, t.last_reply_at, t.created_at FROM threads t`
+// 且必须逐列书写、不能写 t.*——threads 自 0004 起有 status 列、0012 起有 mark 列，
+// 而 scanThread 只扫 8 列，t.* 会让 Scan 在运行期报「期望 N 个目标」。
+const selectThreadsScoped = `SELECT t.id, t.node_id, t.user_id, t.title, t.score, t.last_reply_at, t.created_at, t.mark FROM threads t`
 
 func scanThread(s interface{ Scan(...any) error }) (thread.Thread, error) {
 	var t thread.Thread
 	var lastReply, created int64
-	err := s.Scan(&t.ID, &t.NodeID, &t.UserID, &t.Title, &t.Score, &lastReply, &created)
+	err := s.Scan(&t.ID, &t.NodeID, &t.UserID, &t.Title, &t.Score, &lastReply, &created, &t.Mark)
 	if err != nil {
 		return thread.Thread{}, err
 	}
@@ -168,7 +174,15 @@ func (r *ForumRepos) GetThread(ctx context.Context, id int64) (thread.Thread, er
 // 仓储只做 `node_id IN (...)`。这里刻意**不**写 `JOIN nodes ... status='active'`——
 // 那会把已解锁的 /dev/null（status='archived'）一并挡掉，让「解锁了却看不到新帖」。
 // AllowedNodeIDs 为空时 fail-closed 返回空列表，绝不退化成「查全表」。
-// 版块内分支（NodeID > 0）的 SQL 与改前逐字一致，既有行为零变化。
+//
+// R-15 / ADR-079 方案 C（分层 keyset）：置顶（mark=1）是独立前缀层，
+// 用**同一条 SQL、不同 mark 参数**分两次查，ORDER BY 与 INDEXED BY 逐字不动
+// （否则 mark-first 排序会触发 TEMP B-TREE 打破 EXPLAIN 硬断言）。
+// 全序是 (mark DESC, 排序列 DESC, id DESC)，但由 Go 层按 tier 拼接实现：
+//   - 游标 mark=1：仍在置顶层，带锚点查置顶；不足 limit 时再查普通层（无锚点）；
+//   - 游标 mark=0 / 空游标：只查普通层（空游标无锚点）；
+//
+// 进入普通层后永不回置顶层，避免跨页重复。
 func (r *ForumRepos) ListThreads(ctx context.Context, q forum.ThreadQuery) ([]thread.Thread, bool, error) {
 	if !q.Sort.Valid() {
 		return nil, false, forum.ErrInvalidSort
@@ -177,69 +191,91 @@ func (r *ForumRepos) ListThreads(ctx context.Context, q forum.ThreadQuery) ([]th
 		return nil, false, fmt.Errorf("%w: 游标排序与查询排序不一致", forum.ErrInvalidCursor)
 	}
 	if q.NodeID < 0 {
-		// 负值既不是合法版块 ID，也不是跨版块哨兵；显式拒绝，避免与 0 的语义混淆。
 		return nil, false, fmt.Errorf("%w: 版块 ID 不能为负", forum.ErrInvalidNodeID)
 	}
+	if q.NodeID == 0 && q.Sort != forum.SortLatest {
+		// 跨版块热度榜不在范围（P4.5-PLAN §5）。显式拒绝，不伪装成空列表。
+		return nil, false, fmt.Errorf("%w: 跨版块列表仅支持 SortLatest", forum.ErrInvalidSort)
+	}
+	if q.NodeID == 0 && len(q.AllowedNodeIDs) == 0 {
+		return nil, false, nil
+	}
 	limit := normalizeLimit(q.Limit)
+	after := q.After // mark=0 表示普通层；空游标的 IsZero 亦为 true
 
-	var query string
-	var args []any
-	switch q.Sort {
-	case forum.SortLatest:
+	// queryTier 查一个 tier 的一页。anchor=false 表示不带游标（从最新起）。
+	// 返回的行数可能 > limit（多取一条判断 hasMore）。
+	queryTier := func(mark int8, anchor bool) ([]thread.Thread, error) {
+		var query string
+		var args []any
 		if q.NodeID == 0 {
-			if len(q.AllowedNodeIDs) == 0 {
-				return nil, false, nil
-			}
-			query = latestThreadsQuery(len(q.AllowedNodeIDs), !q.After.IsZero())
+			query = latestThreadsQuery(len(q.AllowedNodeIDs), anchor)
 			for _, id := range q.AllowedNodeIDs {
 				args = append(args, id)
 			}
-			if !q.After.IsZero() {
-				// 行值游标 (last_reply_at, id) < (?, ?)：与 latestThreadsQuery 的参数顺序一致。
-				args = append(args, q.After.LastReplyAt, q.After.ID)
+			if anchor {
+				// 行值游标 (last_reply_at, id) < (?, ?)：与 latestThreadsQuery 参数顺序一致。
+				args = append(args, after.LastReplyAt, after.ID)
 			}
+			args = append(args, mark)
 		} else {
-			query = selectThreads + ` WHERE node_id = ? AND status = 'active'`
-			args = append(args, q.NodeID)
-			if !q.After.IsZero() {
-				query += ` AND (last_reply_at < ? OR (last_reply_at = ? AND id < ?))`
-				args = append(args, q.After.LastReplyAt, q.After.LastReplyAt, q.After.ID)
+			query = selectThreads + ` WHERE node_id = ? AND status = 'active' AND mark = ?`
+			args = append(args, q.NodeID, mark)
+			if anchor {
+				if q.Sort == forum.SortScore {
+					query += ` AND (score < ? OR (score = ? AND id < ?))`
+					args = append(args, after.Score, after.Score, after.ID)
+				} else {
+					query += ` AND (last_reply_at < ? OR (last_reply_at = ? AND id < ?))`
+					args = append(args, after.LastReplyAt, after.LastReplyAt, after.ID)
+				}
 			}
-			query += ` ORDER BY last_reply_at DESC, id DESC LIMIT ?`
+			if q.Sort == forum.SortScore {
+				query += ` ORDER BY score DESC, id DESC`
+			} else {
+				query += ` ORDER BY last_reply_at DESC, id DESC`
+			}
+			query += ` LIMIT ?` // 跨版块的 latestThreadsQuery 已自带 LIMIT，此处仅版块内分支需要
 		}
-	case forum.SortScore:
-		// 跨版块热度榜不在 v0.7.1 范围（P4.5-PLAN §5 明确不做）。显式拒绝，
-		// 绝不能落到 `node_id = 0` 上静默返回空列表——那会让「排序不支持」
-		// 伪装成「没有主题」。
-		if q.NodeID == 0 {
-			return nil, false, fmt.Errorf("%w: 跨版块列表仅支持 SortLatest", forum.ErrInvalidSort)
-		}
-		query = selectThreads + ` WHERE node_id = ? AND status = 'active'`
-		args = append(args, q.NodeID)
-		if !q.After.IsZero() {
-			query += ` AND (score < ? OR (score = ? AND id < ?))`
-			args = append(args, q.After.Score, q.After.Score, q.After.ID)
-		}
-		query += ` ORDER BY score DESC, id DESC LIMIT ?`
-	}
-	args = append(args, limit+1)
+		args = append(args, limit+1)
 
-	rows, err := r.pools.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, false, fmt.Errorf("列出主题: %w", err)
+		rows, err := r.pools.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("列出主题: %w", err)
+		}
+		defer rows.Close()
+		var out []thread.Thread
+		for rows.Next() {
+			t, err := scanThread(rows)
+			if err != nil {
+				return nil, fmt.Errorf("扫描主题: %w", err)
+			}
+			out = append(out, t)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("遍历主题: %w", err)
+		}
+		return out, nil
 	}
-	defer rows.Close()
 
 	var out []thread.Thread
-	for rows.Next() {
-		t, err := scanThread(rows)
+	// 置顶层：空游标（首屏）或 mark=1 游标才查；mark=0 游标已离开置顶层。
+	if after.IsZero() || after.Mark == 1 {
+		pinned, err := queryTier(1, !after.IsZero() && after.Mark == 1)
 		if err != nil {
-			return nil, false, fmt.Errorf("扫描主题: %w", err)
+			return nil, false, err
 		}
-		out = append(out, t)
+		out = append(out, pinned...)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("遍历主题: %w", err)
+	// 普通层：置顶层不足一页时补查；mark=0 游标/空游标都查普通层。
+	if len(out) < limit+1 {
+		// mark=0 游标带锚点；空游标或刚离开置顶层（mark=1）时无锚点，从最新起。
+		anchor := !after.IsZero() && after.Mark == 0
+		normal, err := queryTier(0, anchor)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, normal...)
 	}
 
 	hasMore := len(out) > limit

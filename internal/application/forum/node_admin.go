@@ -21,13 +21,15 @@ func isSeedNodeSlug(slug string) bool {
 }
 
 // WithAdminWhitelist 注入管理员公钥指纹白名单。
-// 复制一份进 Service，避免装配后外部 map 被改动导致权限漂移。
+// 复制成不可变快照存进原子容器，避免装配后外部 map 被改动导致权限漂移，
+// 也让运行期 SIGHUP 重载能原子换入新快照（ADR-079）。
 func WithAdminWhitelist(whitelist map[string]struct{}) ServiceOption {
 	return func(s *Service) {
-		s.adminWhitelist = make(map[string]struct{}, len(whitelist))
+		snap := make(map[string]struct{}, len(whitelist))
 		for fp := range whitelist {
-			s.adminWhitelist[fp] = struct{}{}
+			snap[fp] = struct{}{}
 		}
+		s.adminWhitelist.Store(&adminWhitelistSnapshot{fingerprints: snap})
 	}
 }
 
@@ -38,7 +40,9 @@ func WithAdminWhitelist(whitelist map[string]struct{}) ServiceOption {
 //
 // 这里刻意不调 checkWrite：它会把访客（UserID=0）挡在门外，正是要修的鸡生蛋。
 func (s *Service) requireAdmin(actor Actor) error {
-	if !admin.CanAdmin(actor.Fingerprint, s.adminWhitelist) {
+	// 从原子快照取当前白名单：热重载换入的新快照立即生效，
+	// 且读到的 map 永不修改，无数据竞争。CanAdmin 单点不变（archtest 守卫）。
+	if !admin.CanAdmin(actor.Fingerprint, s.currentAdminWhitelist()) {
 		return ErrAdminDenied
 	}
 	return nil

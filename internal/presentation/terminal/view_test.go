@@ -257,6 +257,45 @@ func TestRenderScreenThreadsShowsThreadID(t *testing.T) {
 	}
 }
 
+// R-15 / ADR-079：置顶前缀 [置顶] 走 RenderSystem/琥珀色，标题仍走 RenderUser；
+// 两者信任域隔离——标题里的控制字符必须被净化，不能借前缀路径注入。
+func TestRenderScreenThreadsShowsPinnedPrefix(t *testing.T) {
+	s := baseScreen(viewmodel.ScreenThreads)
+	s.Rows = []viewmodel.Row{
+		{Index: 1, ID: 101, Title: "置顶标题", Meta: viewmodel.RowMeta{AuthorID: 7, Pinned: true}},
+		{Index: 2, ID: 202, Title: "普通标题", Meta: viewmodel.RowMeta{AuthorID: 7}},
+	}
+	s.Selection.FocusedIndex = 1
+
+	out, err := RenderScreen(s, 80)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	assertOnlySGR(t, out)
+	pinnedLine := lineContaining(out, "置顶标题")
+	normalLine := lineContaining(out, "普通标题")
+	if !strings.Contains(pinnedLine, "[置顶]") {
+		t.Fatalf("置顶行缺少 [置顶] 前缀: %q", stripSGR(pinnedLine))
+	}
+	if strings.Contains(normalLine, "[置顶]") {
+		t.Fatalf("普通行不应有置顶前缀: %q", stripSGR(normalLine))
+	}
+	// 琥珀 StyleNotice = ESC[33m，只落在前缀上（lineContaining 已剥 SGR，故查原始 out）。
+	if !strings.Contains(out, "\x1b[33m[置顶]") {
+		t.Fatalf("置顶前缀应使用 StyleNotice 琥珀色: %q", out)
+	}
+	// 信任域隔离：标题里的 ESC 被 RenderUser 净化为可见图示，不得成为控制序列。
+	hostile := baseScreen(viewmodel.ScreenThreads)
+	hostile.Rows = []viewmodel.Row{{Index: 1, ID: 1, Title: "恶意\x1b[31m标题", Meta: viewmodel.RowMeta{AuthorID: 7, Pinned: true}}}
+	hostileOut, err := RenderScreen(hostile, 80)
+	if err != nil {
+		t.Fatalf("恶意标题渲染失败: %v", err)
+	}
+	if strings.Contains(hostileOut, "恶意\x1b[31m标题") {
+		t.Fatal("标题里的 ESC 未被净化，形成渲染旁路")
+	}
+}
+
 // 详情页每条回复显示回复 ID，可直接当 /delete <id> 的参数；作者与回复同为 42 时仍可区分。
 func TestRenderScreenDetailShowsReplyID(t *testing.T) {
 	s := baseScreen(viewmodel.ScreenThreadDetail)

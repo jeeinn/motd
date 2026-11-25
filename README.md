@@ -7,7 +7,7 @@
 
 SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览、发帖、回复；所有交互都在终端内完成，无需浏览器。
 
-- 版本：`v0.9.3`（2026-11-25）
+- 版本：`v0.10.0`（2026-11-25）
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
@@ -39,8 +39,8 @@ ssh -p 2222 guest@jeeinn.com
 - 论坛核心：5 个版块、keyset 分页、软删除过滤、访客只读、发帖与回复
 - 最新动态：`/latest` 一条命令看全论坛最新主题（跨版块、按活跃度排序），新回复自动置顶
 - 社区看板：`/stats` 一屏查看今日/昨日登录、在线峰值、历史峰值、注册用户与累计登录人次
-- 互动：投票（`/vote up|down|rm`，幂等）、全文搜索（`/search`，FTS5 + 中文短词回退）、作者软删自己的主题/回复（`/delete`）、作者编辑（`/edit`，详情页显示「已编辑」）、主题列表回复数（`rN`）
-- 社区治理（管理员）：版块管理（`/node list|create|rename|archive`）、隐藏 / 恢复他人内容（`/hide` / `/unhide` / `/unthread`）；权限来自公钥指纹白名单，治理动作写入审计日志
+- 互动：投票（`/vote up|down|rm`，幂等；带 `回复id` 则投该回复，如 `/vote up 12`）、全文搜索（`/search`，FTS5 + 中文短词回退）、作者软删自己的主题/回复（`/delete`）、作者编辑（`/edit`，详情页显示「已编辑」）、主题列表回复数（`rN`）
+- 社区治理（管理员）：版块管理（`/node list|create|rename|archive`）、隐藏 / 恢复他人内容（`/hide` / `/unhide` / `/unthread`）、主题置顶 / 取消置顶（`/pin` / `/unpin`，每版块 1 条）；权限来自公钥指纹白名单（改 `.env` 后 `kill -HUP` 即生效，无需重启），治理动作写入审计日志
 - 登录：GitHub Device Flow / 邮箱密码两条路径；公钥绑定与软吊销，断线重连凭公钥恢复登录态
 - 邮箱自助：`/register` / `/verify` / `/resend` / `/recover` 自助注册与密码找回（SMTP 配置见 `.env.sample`）
 - 认证安全：认证限流与审计事件、`/logout` 撤销该账号全部会话、`/keys <指纹>` 公钥详情
@@ -88,7 +88,7 @@ ssh -p 2222 localhost
 | `MOTD_SSH_MAX_CONNS` | `100` | SSH 最大并发连接数 |
 | `MOTD_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App 的 `client_id`；未设置时 `/login` 返回明确提示，不 panic、日志不回显值 |
 | `MOTD_AUTH_LIMIT_*` / `MOTD_AUDIT_*` | 见示例 | 认证限流与审计参数（P1 新增），共 6 项 |
-| `MOTD_ADMIN_FINGERPRINTS` | 空 | 管理员公钥指纹白名单（P2 新增），逗号分隔；留空 = 无人可管。比对已认证会话指纹，变更需重启生效 |
+| `MOTD_ADMIN_FINGERPRINTS` | 空 | 管理员公钥指纹白名单（P2 新增），逗号分隔；留空 = 无人可管。比对已认证会话指纹；改 `.env` 后发 `SIGHUP`（`kill -HUP <pid>`）即热重载生效，非法指纹拒绝并保留旧名单 |
 | `MOTD_MATRIX_DURATION` | `60s` | `/matrix` 数字雨单次播放时长上限；填 `0` = 不限时（单会话约 30 KB/s，服务端另有并发上限 2） |
 
 全部环境变量（25 个 `MOTD_*` + 脚本用的 `MOTDCTL_BIN`，共 26 项）及其默认值见 [`.env.sample`](.env.sample)。复制为 `.env` 后按需修改：`cp .env.sample .env && chmod 600 .env`——**程序启动时会自动加载**（先当前目录、再可执行文件目录；进程已有环境变量优先、文件只填空缺），无需手动 source；可用 `MOTD_DOTENV_DISABLED=true` 关闭。凭证不要提交到仓库（`.gitignore` 已覆盖）。

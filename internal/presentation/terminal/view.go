@@ -124,6 +124,13 @@ func RenderScreenWithLocale(s viewmodel.Screen, width int, locale string) (strin
 		if err := sys(&b, fmt.Sprintf("%s%2d. ", mark, r.Index), safe.StylePlain); err != nil {
 			return "", err
 		}
+		// R-15 / ADR-079：置顶前缀是服务端固定文案，走 RenderSystem/StyleNotice（琥珀）；
+		// 标题本身仍是用户文本，继续走下方 ext()。二者分属不同信任域，绝不拼在同一段。
+		if r.Meta.Pinned {
+			if err := sys(&b, "[置顶] ", safe.StyleNotice); err != nil {
+				return "", err
+			}
+		}
 		if s.Kind == viewmodel.ScreenThreads {
 			if err := sys(&b, fmt.Sprintf("[%d] ", r.Score), safe.StyleDim); err != nil {
 				return "", err
