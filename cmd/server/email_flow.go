@@ -19,6 +19,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/input"
+	"github.com/jeeinn/motd/internal/application/viewmodel"
 )
 
 type emailFlowKind uint8
@@ -90,6 +91,20 @@ type emailFlow struct {
 	// onLogin 是登录成功（UpgradeToUser 之后）的副作用钩子（签到 + login_success 审计），nil 时跳过。
 	// 邮箱密码登录是**主动登录动作**，与 GitHub Device Flow 并列计一次 login_success（ADR-064）。
 	onLogin loginHook
+	// notice 指向 pageController.notice（ADR-077）。终态文案写出时同步登记到屏幕
+	// 状态，使随后的 pc.refresh() 整屏重绘把文案带进新帧（2J 擦不掉）。
+	// 单测构造时为 nil：只写字节、不设 notice，既有断言全部不变。
+	notice *viewmodel.Notice
+}
+
+// setNotice 在终态文案写出时登记一条屏幕提示。kind 决定前缀样式：
+// 成功用 Success、失败用 Error、其余用 Warning。文案正文统一走 RenderUser
+// 净化（view.go 的 ext 路径），即使拼接了外部数据也不会形成渲染旁路。
+func (f *emailFlow) setNotice(text string, kind viewmodel.NoticeKind) {
+	if f.notice == nil || text == "" {
+		return
+	}
+	*f.notice = viewmodel.Notice{Kind: kind, Message: text}
 }
 
 // newEmailFlow 创建一条流程并输出第一步提示。svc 为空由调用方拦截，
@@ -155,6 +170,7 @@ func (f *emailFlow) step(ctx context.Context, _ *pageController, m input.KeyMsg)
 	case input.KeyEsc, input.KeyCtrlC:
 		f.echo.newline()
 		_, _ = io.WriteString(f.sess, emailTextCancelled+"\r\n")
+		f.setNotice(emailTextCancelled, viewmodel.NoticeInfo)
 		return true, true
 	case input.KeyBackspace:
 		if len(f.buf) > 0 {
@@ -206,8 +222,10 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 		}
 		if f.kind == emailFlowRegister {
 			_, _ = io.WriteString(f.sess, emailTextRegisterSent+"\r\n")
+			f.setNotice(emailTextRegisterSent, viewmodel.NoticeSuccess)
 		} else {
 			_, _ = io.WriteString(f.sess, emailTextRecoverSent+"\r\n")
+			f.setNotice(emailTextRecoverSent, viewmodel.NoticeSuccess)
 		}
 		return true
 
@@ -235,8 +253,10 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 		}
 		if res.Purpose == auth.EmailPurposeRecover {
 			_, _ = io.WriteString(f.sess, emailTextRecovered+"\r\n")
+			f.setNotice(emailTextRecovered, viewmodel.NoticeSuccess)
 		} else {
 			_, _ = io.WriteString(f.sess, emailTextRegistered+"\r\n")
+			f.setNotice(emailTextRegistered, viewmodel.NoticeSuccess)
 		}
 		return true
 
@@ -254,6 +274,7 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 		}
 		if err := f.sess.UpgradeToUser(res.UserID); err != nil {
 			_, _ = io.WriteString(f.sess, emailTextFailed+"\r\n")
+			f.setNotice(emailTextFailed, viewmodel.NoticeError)
 			return true
 		}
 		// 邮箱密码登录成功 = 一次主动登录动作，provider 固定为 auth.ProviderEmail
@@ -262,6 +283,7 @@ func (f *emailFlow) submit(ctx context.Context, value string) (done bool) {
 			f.onLogin(ctx, res.UserID, auth.ProviderEmail)
 		}
 		_, _ = io.WriteString(f.sess, emailTextLoggedin+"\r\n")
+		f.setNotice(emailTextLoggedin, viewmodel.NoticeSuccess)
 		return true
 	}
 	return true
@@ -292,6 +314,7 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 		}
 		pc.clearEmailFlow() // 若旧流程尚未结束就被新命令取代，先复位其 secret 掩码
 		pc.emailFlow = newEmailFlow(kind, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false, h.onLogin)
+		pc.emailFlow.notice = &pc.notice
 	case "verify":
 		if pc.pendingEmail == "" {
 			_, _ = io.WriteString(sess, emailTextNoPending+"\r\n")
@@ -307,6 +330,7 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 		}
 		recover := pc.pendingPurpose == auth.EmailPurposeRecover
 		pc.emailFlow = newEmailFlow(emailFlowVerify, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, inv.Args[0], recover, h.onLogin)
+		pc.emailFlow.notice = &pc.notice
 	case "resend":
 		if pc.pendingEmail == "" {
 			_, _ = io.WriteString(sess, emailTextNoPending+"\r\n")
@@ -321,30 +345,42 @@ func (h *inputHandler) handleEmailCommand(ctx context.Context, sess emailSession
 }
 
 // writeError 委托给统一映射点：绝不输出 err.Error()。
-func (f *emailFlow) writeError(err error) { writeEmailError(f.sess, err) }
+// 同时把同一条文案登记到屏幕 notice（ADR-077），保证终态文案在随后的
+// 整屏重绘中仍然可见——字节流文案与屏幕文案必须同源，不能各写一份。
+func (f *emailFlow) writeError(err error) {
+	text, kind := emailErrorNotice(err)
+	f.setNotice(text, kind)
+	writeEmailError(f.sess, err)
+}
 
-// writeEmailError 是错误到固定文案的唯一映射点：绝不输出 err.Error()
-// （底层错误可能含外部数据，一旦写回终端就是渲染旁路，P0-23）。
-func writeEmailError(out io.Writer, err error) {
+// emailErrorNotice 是错误到「固定文案 + 语义分类」的唯一映射点：
+// 绝不输出 err.Error()（底层错误可能含外部数据，一旦写回终端就是渲染旁路，P0-23）。
+// 提取成纯函数供 writeEmailError 与 emailFlow.writeError 共用，确保两处文案一致。
+func emailErrorNotice(err error) (string, viewmodel.NoticeKind) {
 	var rl *auth.RateLimitError
-	text := emailTextFailed
 	switch {
 	case errors.As(err, &rl):
-		text = "邮箱操作过于频繁，请 " + strconv.FormatInt(rl.RetryAfterSeconds(), 10) + " 秒后重试。"
+		return "邮箱操作过于频繁，请 " + strconv.FormatInt(rl.RetryAfterSeconds(), 10) + " 秒后重试。", viewmodel.NoticeWarning
 	case errors.Is(err, auth.ErrInvalidEmail):
-		text = emailTextBadEmail
+		return emailTextBadEmail, viewmodel.NoticeWarning
 	case errors.Is(err, auth.ErrEmailOccupied):
-		text = auth.EmailOccupiedHint
+		return auth.EmailOccupiedHint, viewmodel.NoticeWarning
 	case errors.Is(err, auth.ErrEmailDelivery):
-		text = emailTextSendFailed
+		return emailTextSendFailed, viewmodel.NoticeError
 	case errors.Is(err, auth.ErrInvalidCode):
-		text = emailTextBadCode
+		return emailTextBadCode, viewmodel.NoticeWarning
 	case errors.Is(err, auth.ErrWeakPassword):
-		text = emailTextBadPassword
+		return emailTextBadPassword, viewmodel.NoticeWarning
 	case errors.Is(err, auth.ErrInvalidCredentials):
-		text = emailTextBadLogin
+		return emailTextBadLogin, viewmodel.NoticeError
 	case errors.Is(err, auth.ErrNoPendingToken):
-		text = emailTextNoPending
+		return emailTextNoPending, viewmodel.NoticeWarning
+	default:
+		return emailTextFailed, viewmodel.NoticeError
 	}
+}
+
+func writeEmailError(out io.Writer, err error) {
+	text, _ := emailErrorNotice(err)
 	_, _ = io.WriteString(out, text+"\r\n")
 }

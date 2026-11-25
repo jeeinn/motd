@@ -385,6 +385,7 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 				_, _ = io.WriteString(sess, auth.LoginTextNotReady+"\r\n")
 				return false
 			}
+			f.notice = &pc.notice
 			delay, active, err := f.begin(ctx, sess, sess)
 			if err != nil || !active {
 				return false
@@ -592,6 +593,7 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 				} else {
 					pc.clearEmailFlow() // 若已有邮箱流程未结束，先复位其 secret 掩码
 					pc.emailFlow = newEmailFlow(emailFlowLogin, h.email, sess, pc.echo, &pc.pendingEmail, &pc.pendingPurpose, "", false, h.onLogin)
+					pc.emailFlow.notice = &pc.notice
 				}
 				return outcomeContinue
 			}

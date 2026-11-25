@@ -9,7 +9,7 @@
 SSH 优先的命令行论坛：用户 `ssh` 连入，用键盘与斜杠命令浏览版块、发帖、回复，**无需浏览器**。
 
 - Go module：`github.com/jeeinn/motd`，Go `1.26.3`
-- 当前版本：`v0.9.2`（2026-11-25），处于 `0.x`，对外契约未稳定
+- 当前版本：`v0.9.3`（2026-11-25），处于 `0.x`，对外契约未稳定
 - 单进程二进制：`cmd/server`（服务）+ `cmd/motdctl`（离线备份恢复）
 - 依赖极少：`golang.org/x/crypto`（SSH）、`modernc.org/sqlite`（纯 Go SQLite）。**非必要不引入新依赖**
 
@@ -104,7 +104,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 
 **归档约定**：设计稿对应功能发版、结论固化进 ADR 后移入 `docs/archived/`，并把未完成项迁到 `docs/ROADMAP.md`。历史 ADR 中以 `docs/xxx.md` 行内代码引用的旧路径**不回改**（`DECISIONS.md` 是历史原文），查同名文件到 `docs/archived/`。
 
-**惯例**：历史结论不删改，只标注"已修订"并追加新 ADR / 新章节。新增 ADR 从当前最大号顺延（现为 ADR-073）。
+**惯例**：历史结论不删改，只标注"已修订"并追加新 ADR / 新章节。新增 ADR 从当前最大号顺延（现为 ADR-077）。
 
 ## 7. 项目特有陷阱速查
 

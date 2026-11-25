@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-25
+
+补丁版本：修复「邮箱/登录终态文案在回车后被整屏重绘擦掉、用户看不到任何反馈」的生产缺陷（P0）。终态提示纳入屏幕状态（`StatusBar.Notice`），随整屏帧一起输出，2J 擦不掉。无 schema 迁移、无新依赖、无新环境变量、无新键位、ANSI 白名单不变。
+
+### Fixed
+
+- **登录/注册终态文案不可见（ADR-077）**：`/login email` 输入邮箱+密码回车后、「邮箱或密码错误。」/「邮箱登录成功。」先 append 到终端，随后主循环的 `pc.refresh()` 用 `ESC[H+ESC[2J` 整屏重绘把文案擦掉，用户看到"无任何反应"。根因是 ADR-072（v0.9.0）把 `render()` 恒改为整屏重绘、删除了 `invalidateScreen()` 的追加语义，而 email / GitHub 登录流程结束时仍无条件 refresh。此前测试只断言 `fakeEmailConn.String()`（文案"写出了"），从未验证"屏幕上仍可见"，故全绿漏检。
+- **同源终态文案**：`/register`、`/recover`、`/verify` 的完成/失败文案、Esc 取消文案、GitHub Device Flow 的成功屏/拒绝/过期/网络放弃/绑定失败/升级失败文案，均纳入同一机制，不再被随后的整屏重绘擦除。
+
+### Changed
+
+- **终态文案双出口**：保留 flow 层既有 append（scrollback 可上翻回看），同时把终态文案登记到 `pageController.notice`，随下一次整屏帧输出。同一条文案在 scrollback 可能出现两次（一次 append、一次在新帧），属可接受代价（ADR-077 已记录）。
+- **GitHub 成功屏 notice 单行化**：成功屏多行（welcome / username / write-ready）仍 append 呈现；notice 只承载一条服务端固定文案（"登录成功。" / "账号已创建并登录。"），不把 username 拼进 notice，避免外部数据进 notice 正文。
+
+### Added
+
+- **终态文案可见性回归测试**：`cmd/server/email_visibility_e2e_test.go` 新增两条真实 SSH E2E（错误密码 / 注册成功），判据为"文案出现在最后一次 `ESC[2J` 之后的字节段"，而非 `strings.Contains`。已做反向验证：移除 notice 注入后测试精确失败（复现 bug），恢复后通过。
+
 ## [0.9.2] - 2026-11-25
 
 补丁版本：显示层与彩蛋三项修正——窗口缩放即时对齐、删掉三条彩蛋命令、`/matrix` 改电影化屏内动画。无 schema 迁移、无新依赖、**新增 1 个环境变量**、无新键位；测试函数 1119 → 1133。

@@ -23,6 +23,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/input"
+	"github.com/jeeinn/motd/internal/application/viewmodel"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
 )
 
@@ -63,6 +64,22 @@ type loginFlow struct {
 	expiresAt  time.Time
 	retries    int
 	now        func() time.Time
+	// notice 指向 pageController.notice（ADR-077）。终态文案写出时同步登记，
+	// 使随后的 pc.refresh() 整屏重绘把文案带进新帧（2J 擦不掉）。
+	// 只在 done 的终态分支登记；Continue/Retry/Authorizing 等中间态不登记，
+	// 否则 notice 会滞留并在下一次导航时被误消费。
+	// 单测构造时为 nil，行为不变。
+	notice *viewmodel.Notice
+}
+
+// setTerminalNotice 在终态文案写出时登记一条屏幕提示。GitHub 成功屏是多行
+// （welcome / username / write-ready），压缩成一条固定文案作为 notice；
+// username 属外部数据，进 notice.Message 后仍由 ext()/RenderUser 净化。
+func (f *loginFlow) setTerminalNotice(text string, kind viewmodel.NoticeKind) {
+	if f.notice == nil || text == "" {
+		return
+	}
+	*f.notice = viewmodel.Notice{Kind: kind, Message: text}
 }
 
 // begin 发起登录并输出发起屏，返回首次轮询延迟与是否进入登录态。
@@ -132,6 +149,7 @@ func (f *loginFlow) applyPoll(ctx context.Context, conn loginConn, out io.Writer
 		if f.retries > auth.LoginMaxNetworkRetries {
 			f.active = false
 			_ = f.view.line(out, auth.LoginTextNetworkGiveUp, safe.StylePlain)
+			f.setTerminalNotice(auth.LoginTextNetworkGiveUp, viewmodel.NoticeError)
 			return true, 0, nil
 		}
 		_ = f.view.line(out, auth.LoginTextRetry, safe.StyleDim)
@@ -145,6 +163,7 @@ func (f *loginFlow) applyPoll(ctx context.Context, conn loginConn, out io.Writer
 			_ = f.device.Cancel(ctx, f.deviceCode)
 			f.active = false
 			_ = f.view.line(out, auth.LoginTextExpired, safe.StylePlain)
+			f.setTerminalNotice(auth.LoginTextExpired, viewmodel.NoticeWarning)
 			return true, 0, nil
 		}
 		_ = f.view.line(out, auth.LoginTextWaiting, safe.StyleDim)
@@ -155,7 +174,9 @@ func (f *loginFlow) applyPoll(ctx context.Context, conn loginConn, out io.Writer
 		// 终止态（拒绝 / 过期）是一次安全相关事件：先留审计再渲染固定文案。
 		// 审计环满时返回错误，但终止态已经确定，仍要给用户明确提示。
 		_ = f.gate.NoteLoginFailure(f.ipHash, "")
-		_ = f.view.line(out, auth.TerminalLoginText(r.State.Status), safe.StylePlain)
+		terminalText := auth.TerminalLoginText(r.State.Status)
+		_ = f.view.line(out, terminalText, safe.StylePlain)
+		f.setTerminalNotice(terminalText, viewmodel.NoticeError)
 		return true, 0, nil
 
 	case auth.DirectiveAuthorized:
@@ -165,6 +186,7 @@ func (f *loginFlow) applyPoll(ctx context.Context, conn loginConn, out io.Writer
 		// 未知指令失败关闭，不静默降级成「继续轮询」。
 		f.active = false
 		_ = f.view.line(out, auth.LoginTextDenied, safe.StylePlain)
+		f.setTerminalNotice(auth.LoginTextDenied, viewmodel.NoticeError)
 		return true, 0, nil
 	}
 }
@@ -187,6 +209,7 @@ func (f *loginFlow) finish(ctx context.Context, conn loginConn, out io.Writer, t
 			err = gateErr
 		}
 		_ = f.view.line(out, auth.LoginTextLoginFailed, safe.StylePlain)
+		f.setTerminalNotice(auth.LoginTextLoginFailed, viewmodel.NoticeError)
 		return true, 0, err
 	}
 
@@ -200,12 +223,14 @@ func (f *loginFlow) finish(ctx context.Context, conn loginConn, out io.Writer, t
 	})
 	if err != nil {
 		_ = f.view.line(out, auth.LoginTextBindFailed, safe.StylePlain)
+		f.setTerminalNotice(auth.LoginTextBindFailed, viewmodel.NoticeError)
 		return true, 0, err
 	}
 
 	// 绑定成功后才升级会话；失败一律保持访客态。
 	if err := conn.UpgradeToUser(res.UserID); err != nil {
 		_ = f.view.line(out, auth.LoginTextUpgradeFailed, safe.StylePlain)
+		f.setTerminalNotice(auth.LoginTextUpgradeFailed, viewmodel.NoticeError)
 		return true, 0, err
 	}
 	// 签到与 login_success 审计都是登录成功的副作用（v0.6.0 / v0.7.1）：
@@ -221,6 +246,13 @@ func (f *loginFlow) finish(ctx context.Context, conn loginConn, out io.Writer, t
 	if err := f.view.showSuccess(out, res.Username, notice, res.Created); err != nil {
 		return true, 0, err
 	}
+	// 成功屏是多行（welcome / username / write-ready），notice 只承载一条
+	// 服务端固定文案：不把 username 拼进来，从源头避免外部数据进 notice。
+	successNotice := auth.LoginTextSuccessLogin
+	if res.Created {
+		successNotice = auth.LoginTextSuccessCreate
+	}
+	f.setTerminalNotice(successNotice, viewmodel.NoticeSuccess)
 	return true, 0, nil
 }
 
@@ -232,6 +264,7 @@ func (f *loginFlow) cancel(ctx context.Context, out io.Writer) {
 	_ = f.device.Cancel(ctx, f.deviceCode)
 	f.active = false
 	_ = f.view.line(out, auth.LoginTextCancelled, safe.StylePlain)
+	f.setTerminalNotice(auth.LoginTextCancelled, viewmodel.NoticeInfo)
 }
 
 // isGitHubLogin 是 /login 的参数白名单：P0 只支持 github，其余 provider

@@ -1388,3 +1388,36 @@
   4. **真实 SSH 实测**（临时实例 + ed25519 访客连接）：6 秒内 73 帧（≈12fps）、单帧 2.4 KB、**稳态 29.7 KB/s（占整站 24.4%）**；两档绿 SGR 均出现；无任何禁止序列；Esc 退出后末帧以 `H+2J` 开头且含「版块列表」与「/dev/ai」，页面干净复原；三个并发会话中前两个进入动画、第三个收到「已有其他会话在播放数字雨」且未进入动画。
   5. 四门禁 + 两条 SSH 闭环专项全绿；测试函数 1119 → 1133。
 - 关联：`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-027`（ANSI 白名单）、`ADR-071`（帧末不写 CRLF）、`ADR-072`（整屏干净重绘）、`ADR-074`（resize 通知）、`docs/ROADMAP.md` R-02、`docs/eggs.md`。
+
+## ADR-077 v0.9.3 终态文案纳入屏幕状态：StatusBar.Notice 承载登录/注册结果（澄清 ADR-072 决策 7）
+
+- 状态：**已采纳并实施（2026-11-25）**；用户拍板从三种方案中选 **C1a**（终态文案纳入屏幕 notice），明确否决"局部状态栏重绘"方案 B（会重新引入 ADR-072 删除的 `screenLines` 偏移状态，重演 ADR-071 的 CUU 越视口/折行错位坑）。**随 v0.9.3 发布**。
+- 性质：**澄清** ADR-072 决策 7（"错误与提示文案保持追加"）的适用边界，不推翻 ADR-072 的 ANSI 白名单与"render 恒整屏重绘"决策 4/6。零新增 ANSI、零新依赖、零 schema 迁移。
+- 背景（生产实测 P0）：
+  1. `/login email` 输入邮箱+密码回车后无任何反馈——"邮箱或密码错误。" / "邮箱登录成功。" 确实写出了，但用户看不到。
+  2. 根因时序：`emailFlow.submit()` 用 `io.WriteString` 追加终态文案并 `return true`(done) → 主循环 `handleOne`（`ssh_handler.go:365-371`）调 `pc.refresh()` → `render()` → `RenderCleanFrame` 帧首 `ESC[H`+`ESC[2J` 整屏清屏 → 刚追加的文案被擦。
+  3. 中间步骤（stage=0 输入邮箱后 `return false`）不触发 refresh，故"请输入密码"能看到；只有最后一轮 done 擦屏，形成"输完密码回车没反应"的精确现象。
+  4. 回归引入点：ADR-072（commit `d5c2ec1`，v0.9.0）把 `render()` 从 `RenderFrame`（局部覆盖/追加）恒改为 `RenderCleanFrame`，并删除 `invalidateScreen()`；此前 email 输出前后有 `invalidateScreen()` 走追加模式，文案能留。线上 v0.9.0 起即存在。
+  5. 同源受影响：`/register`、`/recover`、`/verify` 终态文案、Esc 取消文案、GitHub Device Flow 成功屏（`login_flow.go` 的 `showSuccess` + `ssh_handler.go:452-457` 的 refresh）、GitHub 拒绝/过期/网络放弃/绑定失败/升级失败。
+  6. 测试盲区：所有 email 单测在 `emailFlow` 层用 `fakeEmailConn`（bytes.Buffer）断言 `conn.String()`，从未经 `Serve` 主循环 refresh；`TestMVPSSHClosedLoop` 只覆盖公钥登录。更关键的是 `ESC[2J` 在 buffer 里只是普通字节、不会被"执行"，所以"文案写出了"的断言恒真，无法反映"屏幕上是否可见"。
+- 决策：
+  1. **终态文案纳入屏幕状态**：flow 层在终态文案写出时，同步把同一条文案登记到 `pageController.notice`（`viewmodel.Notice`）。refresh 时 `viewContext` 把 notice 注入 `ViewContext.Notice` → `statusBar()` → `StatusBar.Notice` → `renderStatusBar` 随整屏帧输出。2J 擦不掉，因为文案是新帧的一部分。
+  2. **notice 注入方式**：`emailFlow` / `loginFlow` 各持一个 `*viewmodel.Notice` 指针（构造时由 cmd 装配层指向 `&pc.notice`）；终态出口调 `setNotice` / `setTerminalNotice`。单测构造时指针为 nil，只写字节、不设 notice，既有断言零改动。
+  3. **只在 done 的终态出口登记**：`DirectiveContinue` / `DirectiveRetry` / `Authorizing` 等中间态不登记——它们不触发 refresh，且 notice 是单次消费，滞留会在下一次导航被误渲染。
+  4. **文案单一映射点**：错误文案抽出纯函数 `emailErrorNotice(err) (text, kind)`，`writeEmailError` 与 `emailFlow.writeError` 共用，保证"字节流文案"与"notice 文案"同源、不各写一份。
+  5. **信任域**：notice 前缀由 `noticePrefix` 走 `RenderSystem`，正文由 `renderStatusBar` 的 `ext()` 走 `RenderUser`（`view.go:323`）；沿用 ADR-019/026。GitHub 成功屏 notice 只放服务端固定文案，不拼 username，从源头避免外部数据进 notice。
+  6. **覆盖三处 refresh 点**：`ssh_handler.go` 的 GitHub 取消、email flow done/cancelled、GitHub poll done 三处都因 notice 机制自动覆盖（notice 在 refresh 前已由 flow 登记）；`/resend`、PreCheckCode 失败、NotReady 等无 refresh 的路径不受影响、不改。
+- 理由：
+  - **选 C1a 而非方案 B（局部状态栏重绘）**：B 要给光标定位到状态栏，必须知道"状态栏在光标上方第几行"——这个信息正是 ADR-072 决策 4 删除的 `screenLines`。重新引入等于把 ADR-071 已修掉的 CUU 越视口、自动折行行数不可靠两类缺陷请回来，与"从根解决"初衷相悖。C1a 不新增偏移状态、不改帧类型、不触碰 ANSI 白名单。
+  - **选 C1a 而非 C2（先 refresh 后写文案）**：C2 需把 flow 的输出时机整体后移到 refresh 之后，改动 flow 接口与大量单测，且 GitHub 多行成功屏仍要处理；C1a 复用既有 notice 单次消费语义（`viewContext` 注入、`setScreen` 清空），改动面最小。
+  - **保留 append + notice 双份**：而非把 flow 输出全量改写为 notice（C1b）。C1b 要改三份 email 单测的 `conn.String()` 断言，收益不抵改动面；双份文案在 scrollback 可回看是可接受代价。
+- 代价 / 边界：
+  1. 同一条终态文案在 scrollback 可能出现两次（一次 append、一次随新帧输出）。
+  2. GitHub Device Flow 成功屏的 notice 是单行固定文案（"登录成功。" / "账号已创建并登录。"），不含 username；完整多行欢迎仍在 append 的屏里，可上翻。
+  3. notice 是单次消费（下一次成功渲染后清空），终态文案只在当前屏可见、上翻靠 scrollback 的 append 副本。
+  4. 零 schema 迁移（migrations 仍止于 0011）、零新依赖、零新环境变量、ANSI 白名单不变、键位不变。
+- 验证：
+  1. 新增 `cmd/server/email_visibility_e2e_test.go`：两条真实 SSH E2E（错误密码 / 注册成功），判据为"文案出现在最后一次 `ESC[2J` 之后的字节段"，而非 `strings.Contains`。已做**反向验证**：移除 notice 注入后测试精确失败（输出含 `文案\r\n\x1b[H\x1b[2J`），恢复后通过——证明测试不是假绿。
+  2. 既有 flow 单测零改动全绿（notice 指针为 nil 时行为不变）；四门禁 + 两条 SSH 闭环专项全绿；archtest 全绿（未改 ANSI 白名单）。
+  3. 专家团评审：全栈研发师给出"可行但不推荐 B、推荐 C1a"的 P0 结论，质量测试官给出可见性判据与测试方案；两个阻塞项（白名单扩展口径、可见性可测口径）经用户拍板关闭。
+- 关联：`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-072`（整屏干净重绘，本条澄清其决策 7）、`ADR-027`（ANSI 白名单）、`cmd/server/email_visibility_e2e_test.go`。
