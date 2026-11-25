@@ -1245,6 +1245,7 @@
   5. 四门禁（gofmt / build / vet / test）+ 两条 SSH 闭环专项 + archtest 全绿。
 - 落地进度：地基（`safe.CursorHome` / `safe.ClearScreen` / `terminal.RenderCleanFrame` 与守卫放宽）`e68f44d`；页面与登录屏接入 `d5c2ec1`（`screenLines` 与 `invalidateScreen` 全仓清零）；彩蛋全屏动画 `dbce109`；本 ADR 及文档同步随阶段 5 提交。测试函数 1070 → 1085。
 - 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（本条修订其结论 2/3/4/5/6）、`ADR-034`、`ADR-062`、`ADR-066`（back 双渲染）、`ADR-068`、`ADR-069`、`ADR-070`、`ADR-071`（其视口钳制 / 帧末归位机制在目标态被取代）、`docs/DESIGN-clean-redraw.md`。
+- **已修订（ADR-074，2026-11-25）**：代价 / 边界 2「缩放后若用户不按键…下一次 `render()` 才对齐」已由 transport 通知 + handler 主循环重绘收口，整屏重绘机制本身不变。理由段「无需新增 SIGWINCH → `pageController` 通知钩子」仅针对**行数陈旧型错位**成立，不覆盖「不按键就不重绘」这一独立的即时性问题——后者仍需一条通知钩子，但钩子只投递信号、不直接写终端。
 
 ## ADR-073 v0.9.1 详情屏内容分页：正文与回复装进同一页序列（R-06）
 
@@ -1279,3 +1280,35 @@
 - 验证：新增 14 项测试（装箱 7 项、行高测量 4 项、真实 SQL 3 项、`Tail`/`Replies` 分页 7 项）+ 2 项真机回归（回复页不得重复渲染正文、有后续时不得显示"暂无回复"）。真实 SSH 80×24 实测（60 行正文 + 250 条回复 + 长标题）：每页 ≤ 24 行、正文按 1/17/33 行连续、20 页覆盖 250 条无重复、末页 `p` 真回第 1 页、长标题不溢出、回复后焦点落在刚发那条（序号 236..251 连续）。四门禁 + 两 SSH 闭环全绿，测试函数 1085 → 1114。
 - 落地进度：`a9460f4` 行高测量 + 装箱分页器 → `876521e` 查询链 → `90cf464` 页面接入 → `dc79c1f` 回复锚定 → `e4ffdc6` 真机实测修正。
 - 关联：`ADR-066` / `ADR-068`（焦点回填）、`ADR-070`（物理行模型）、`ADR-072`（整屏干净重绘）、`docs/DESIGN-detail-pagination.md`、`docs/ROADMAP.md` R-06。
+
+## ADR-074 resize 即时对齐：transport 只投信号、handler 主循环重绘（R-09）
+
+- 状态：**已采纳并实施（2026-11-25）**；R-09 为 S 级独立搭车项，v0.9.1 发版后补做，**代码已本地提交、尚未 push / 未发版**。
+- 性质：收口 `ADR-071` 代价 2 / `ADR-072` 边界 2 登记的已知边界；**不修订** ADR-072 的整屏重绘机制（澄清见该条末尾「已修订」标注）。
+- 背景：
+  1. ADR-072 让 `render()` 与上一屏行数解耦，但 `render()` 只由按键 / 解码器 ticker / 登录轮询触发；`window-change`（`internal/transport/ssh/server.go`）此前只 `setSize`。用户拖动窗口后不按键时，当前屏仍是旧宽度排版的字节、由终端自行重排，可能短暂错位，下一次交互才按新尺寸重画。
+  2. `window-change` 在 SSH 请求处理 goroutine 里执行，而页面状态（`pageController.screen` / `editor` / `emailFlow` / R-06 详情分页）归 `inputHandler.Serve` 主循环 goroutine 所有。由 transport 直接 `Write` 重绘会与正在进行的按键回显字节交错，且并发读写页面状态构成竞态。
+  3. R-09 在 `docs/ROADMAP.md` 标 S 级、独立、风险低；用户 2026-11-25 明确要求搭车做掉。
+- 决策：
+  1. `Session` 增容量 1 的 `resizeC chan struct{}`，导出只读 `ResizeNotify() <-chan struct{}`，内部 `notifyResize()` 用 `select` + `default` **非阻塞投递**。通道**永不关闭**：会话收口后请求 goroutine 可能仍在处理迟到的 `window-change`，关闭会让投递 panic；handler 退出靠 `Done()`。
+  2. `window-change` 分支：`setSize` 改为返回 `bool`（尺寸是否真的变化），仅变化时 `notifyResize()`；`pty-req` 仍只 `setWindow`、不投递（首帧由 handler 自己输出）。容量 1 天然合并窗口拖动期间的连续事件，handler 消费时读到的 `Window()` 已是最终尺寸。
+  3. **transport 绝不直接写终端**：只投递信号。`inputHandler.Serve` 主循环 `select` 增 `case <-sess.ResizeNotify():`，在自己的 goroutine 里调 `pc.render(sess)`，保持「只有一个 goroutine 写终端」——这是 ADR-026 回显净化与整屏帧字节顺序的前提，比给 `Session.Write` 加写锁更根本（写锁只能保字节不交错，保不住页面状态一致性）。
+  4. **只重绘、不重新取数、不改分页状态**：刻意不调 `pc.refresh()`——它对详情页会走 `showDetail()` 重置到第 1 页并重查库，也会覆盖登录 / 编辑器态。`pc.render` 读 `sess.Window()` 的新宽高、重画当前 `p.screen`，零 IO、零状态变更。
+  5. **交互态跳过**：新增纯函数 `resizeRedrawable(cl, pc, inLogin)`——命令输入 / 编辑器 / 登录 / 邮箱流程依赖「页面帧之后逐字节追加回显」，整屏 `H + 2J` 会抹掉用户已输入但尚未提交的内容；这些态跳过，下一次自然 `render` 对齐。
+  6. **不改 `pageSession` 接口**：主循环持有 `*sshd.Session`，fake `pageSession` 零改动；transport 不 import `presentation` / `cmd`，依赖方向与 archtest 守卫零改动。
+- 理由：
+  - 非阻塞 + 容量 1 合并：既不拖住 SSH 请求 goroutine，也不会在拖动窗口时产生重绘风暴。
+  - 信号与动作分离：通知钩子是 transport 的协议适配职责，重绘策略留在 handler，避免把 `presentation` 概念漏进传输层。
+  - 只重绘不取数：把 R-09 严格限制在「即时对齐」，不触碰 R-06 的分页状态机（那三条链的回归面已被 ADR-073 判定需独立验证）。
+- 代价 / 边界：
+  1. 详情页 resize 只按新宽度重绘**当前已装箱的一页**，不重算 `capacity` 分页装箱；用户按 `n` / `p` 或任意导航键后即按新容量重新组装。避免为对齐引入取数与页状态变更。
+  2. 命令输入 / 编辑器 / 登录 / 邮箱交互态不即时对齐，仍等下一次自然 `render`；这些态本身是追加式输出且多为短时状态。
+  3. `/matrix` 动画期间主循环阻塞在 `handle` 内，resize 通知会滞留通道；动画结束后主循环立即消费并重绘一次，与 `runMatrix` 返回后的重绘叠加成两次幂等整屏重绘（无害，不新增序列）。
+  4. 无新 ANSI 序列、无 schema 迁移、无新依赖、无新环境变量、无键位改动；白名单与 archtest 守卫零改动。
+  5. 线上 VPS 仍为 v0.9.0；本次改动已本地提交、未 push / 未发版，升级需另行授权并留回退点。
+- 验证：
+  1. `internal/transport/ssh/resize_test.go`：通知合并 / 非阻塞 / 通道不关闭、`setSize` 尺寸变化语义、真实 SSH `window-change` 端到端投递（含 `pty-req` 不通知、重复尺寸不通知）。
+  2. `cmd/server/resize_test.go`：`resizeRedrawable` 6 项表驱动；真实 SSH + 真实 SQLite 端到端——resize 后不按键即收到新的 `H+2J` 整屏帧且仍是版块列表、命令输入态不重绘、取消命令态后恢复重绘。
+  3. 四门禁（gofmt / build / vet / test）+ 两条 SSH 闭环专项全绿；测试函数 1114 → 1119。
+- 落地进度：代码与测试 `5a31ea4`（`internal/transport/ssh/session.go`、`server.go`、`cmd/server/ssh_handler.go` + 两个新测试文件）；本 ADR / ROADMAP / AGENTS.md 随文档提交同步落地。**未 push / 未发版**，回退点 `backup/pre-v0.9.2-20261125`。
+- 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（原地重绘语义）、`ADR-071` 代价 2、`ADR-072` 边界 2、`ADR-073`（详情分页状态机）、`docs/ROADMAP.md` R-09。
