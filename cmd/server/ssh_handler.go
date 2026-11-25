@@ -501,9 +501,9 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 			_, height, _ := sess.Window()
 			h.runMatrix(ctx, sess, msgs, int(height), poll)
 			_ = pc.render(sess)
-		case "fortune", "cowsay", "xkcd", "blame", "sudo":
+		case "cowsay", "sudo":
 			// v0.5.1 / P3-M6：彩蛋都是固定语料，经安全渲染路径输出。
-			// 参数（如 /blame @user）只做个数校验，绝不回显原文（ADR-026）。
+			// ADR-075：/fortune、/xkcd、/blame 已删除，本组只剩无参命令。
 			writeEgg(sess, h.eggText(inv.Name)+"\r\n")
 		case "whoami":
 			// ADR-065：本人资料（账号 / 注册时间 / 声望等级），分段渲染。
@@ -670,16 +670,13 @@ func (h *inputHandler) runMatrix(ctx context.Context, sess io.Writer, msgs <-cha
 }
 
 // eggText 返回彩蛋固定文案（v0.5.1 / P3-M6）。纯常量语料，不含用户数据。
+//
+// ADR-075：/fortune、/xkcd、/blame 已删除，本函数只覆盖 /cowsay 与 /sudo；
+// /matrix 不走这里（它是整屏动画，由 runMatrix 单独实现）。
 func (h *inputHandler) eggText(name string) string {
 	switch name {
-	case "fortune":
-		return command.Fortune()
 	case "cowsay":
 		return command.Cowsay()
-	case "xkcd":
-		return command.XKCD()
-	case "blame":
-		return command.Blame()
 	case "sudo":
 		return command.Sudo()
 	default:

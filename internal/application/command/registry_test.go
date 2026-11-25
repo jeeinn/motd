@@ -85,7 +85,7 @@ func TestHelpGroupsAdminCommandsWithoutHiding(t *testing.T) {
 	r2, err := New([]Command{
 		{Name: "top", Usage: "/top", Summary: "回到版块列表", MaxArgs: 0},
 		{Name: "hide", Usage: "/hide [id]", Summary: "隐藏（仅管理员）", MinArgs: 0, MaxArgs: 1, Group: GroupAdmin},
-		{Name: "fortune", Group: GroupEgg, Usage: "/fortune", Summary: "随机箴言", MaxArgs: 0},
+		{Name: "cowsay", Group: GroupEgg, Usage: "/cowsay", Summary: "ASCII 牛", MaxArgs: 0},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -93,15 +93,15 @@ func TestHelpGroupsAdminCommandsWithoutHiding(t *testing.T) {
 	eggHelp := r2.Help()
 	adminAt := strings.Index(eggHelp, adminGroupHelpHeader)
 	eggAt := strings.Index(eggHelp, eggGroupHelpHeader)
-	fortuneAt := strings.Index(eggHelp, "/fortune")
+	cowsayAt := strings.Index(eggHelp, "/cowsay")
 	if adminAt < 0 || eggAt < 0 {
 		t.Fatalf("两个分组说明都应出现: admin=%d egg=%d", adminAt, eggAt)
 	}
 	if eggAt <= adminAt {
 		t.Fatalf("彩蛋分组说明应在管理员分组之后（append 顺序）: admin=%d egg=%d", adminAt, eggAt)
 	}
-	if fortuneAt <= eggAt {
-		t.Fatalf("彩蛋命令必须落在彩蛋说明之后: eggAt=%d fortuneAt=%d", eggAt, fortuneAt)
+	if cowsayAt <= eggAt {
+		t.Fatalf("彩蛋命令必须落在彩蛋说明之后: eggAt=%d cowsayAt=%d", eggAt, cowsayAt)
 	}
 	if n := strings.Count(eggHelp, eggGroupHelpHeader); n != 1 {
 		t.Fatalf("彩蛋分组说明必须恰好出现一次，实际 %d 次", n)

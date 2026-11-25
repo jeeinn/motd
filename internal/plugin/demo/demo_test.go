@@ -89,8 +89,10 @@ func TestDemoRegistrationIsVisible(t *testing.T) {
 			continue
 		}
 		found = true
-		if len(p.Commands) != 1 || p.Commands[0].Name != "/fortune" {
-			t.Errorf("命令登记错误: %+v", p.Commands)
+		// ADR-075：/fortune 彩蛋删除后，本插件不再登记任何命令，
+		// 只保留「首次发帖」成就职责。
+		if len(p.Commands) != 0 {
+			t.Errorf("demo 插件不应再登记命令: %+v", p.Commands)
 		}
 		if len(p.DomainSubscriptions) != 1 || p.DomainSubscriptions[0] != event.EventPostCreated {
 			t.Errorf("订阅登记错误: %+v", p.DomainSubscriptions)

@@ -13,28 +13,33 @@ import (
 
 func TestEggTextIsFixedCorpus(t *testing.T) {
 	h := newInputHandler()
-	for _, name := range []string{"fortune", "cowsay", "xkcd", "blame", "sudo"} {
+	for _, name := range []string{"cowsay", "sudo"} {
 		text := h.eggText(name)
 		if strings.TrimSpace(text) == "" {
 			t.Errorf("/%s 文案为空", name)
 		}
 	}
-	// /blame 文案不含 @ 参数回显痕迹（固定模板）。
-	if strings.Contains(h.eggText("blame"), "@") {
-		t.Error("/blame 不应回显用户名")
+	// ADR-075：已删除的命令不再产出任何文案。
+	for _, name := range []string{"fortune", "xkcd", "blame"} {
+		if h.eggText(name) != "" {
+			t.Errorf("/%s 已删除，不应再有文案", name)
+		}
 	}
 }
 
 func TestWriteEggUsesSafeRender(t *testing.T) {
 	var buf bytes.Buffer
-	writeEgg(&buf, command.Fortune()+"\r\n")
+	writeEgg(&buf, command.Cowsay()+"\r\n")
 	out := buf.String()
 	if out == "" {
 		t.Fatal("writeEgg 未输出")
 	}
 	// safe.RenderSystem(StylePlain) 不引入额外转义序列，文案保持可读。
-	if strings.Contains(out, "箴言：") == false {
+	if !strings.Contains(out, ">") {
 		t.Errorf("输出不含彩蛋文案: %q", out)
+	}
+	if strings.ContainsRune(out, 0x1b) {
+		t.Errorf("固定语料输出不应含 ESC: %q", out)
 	}
 }
 
@@ -44,13 +49,15 @@ func TestEggRegistryInjectsCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newInputHandler().withCommands(reg)
-	for _, name := range []string{"fortune", "cowsay", "xkcd", "blame", "sudo", "matrix"} {
-		line := "/" + name
-		if name == "blame" {
-			line += " @someone"
+	for _, name := range []string{"cowsay", "sudo", "matrix"} {
+		if _, err := h.reg.Parse("/" + name); err != nil {
+			t.Errorf("注入后 /%s 应可解析: %v", name, err)
 		}
-		if _, err := h.reg.Parse(line); err != nil {
-			t.Errorf("注入后 %s 应可解析: %v", line, err)
+	}
+	// ADR-075：已删除的三个彩蛋命令不得再被注入注册表。
+	for _, name := range []string{"fortune", "xkcd", "blame"} {
+		if _, err := h.reg.Parse("/" + name); err == nil {
+			t.Errorf("/%s 已删除，不应再可解析", name)
 		}
 	}
 }
@@ -89,7 +96,7 @@ func TestEggHelpGroupIsSeparateFromAdmin(t *testing.T) {
 		if c.Group == command.GroupAdmin && at > eggAt {
 			t.Errorf("管理员命令 %q 不得落到彩蛋分组之后（位置 %d）", c.Usage, at)
 		}
-		if c.Group == command.GroupAdmin && c.Name == "fortune" {
+		if c.Group == command.GroupAdmin && c.Name == "cowsay" {
 			t.Errorf("彩蛋命令不得归入管理员组")
 		}
 	}

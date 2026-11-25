@@ -12,23 +12,21 @@ func TestWithCommandsMergesEggs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("合并彩蛋命令: %v", err)
 	}
-	for _, name := range []string{"fortune", "cowsay", "xkcd", "blame", "sudo", "matrix"} {
-		line := "/" + name
-		if name == "blame" {
-			line += " @someone" // /blame 要求一个参数
-		}
-		inv, err := r.Parse(line)
+	for _, name := range []string{"cowsay", "sudo", "matrix"} {
+		inv, err := r.Parse("/" + name)
 		if err != nil {
-			t.Errorf("彩蛋命令 %s 应可解析: %v", line, err)
+			t.Errorf("彩蛋命令 %s 应可解析: %v", name, err)
 			continue
 		}
 		if inv.Name != name {
-			t.Errorf("解析 %s 得到 Name=%q", line, inv.Name)
+			t.Errorf("解析 /%s 得到 Name=%q", name, inv.Name)
 		}
 	}
-	// /blame 要求 1 个参数，无参应被注册表挡掉。
-	if _, err := r.Parse("/blame"); err == nil {
-		t.Error("/blame 无参应报参数个数不符")
+	// ADR-075：已删除的三个彩蛋命令不得再被解析。
+	for _, name := range []string{"fortune", "xkcd", "blame"} {
+		if _, err := r.Parse("/" + name); err == nil {
+			t.Errorf("/%s 已删除，不应再可解析", name)
+		}
 	}
 	// 内置命令仍在。
 	if _, err := r.Parse("/help"); err != nil {
@@ -36,7 +34,7 @@ func TestWithCommandsMergesEggs(t *testing.T) {
 	}
 	// Help 含彩蛋说明，且管理员分组仍在。
 	help := r.Help()
-	for _, name := range []string{"/fortune", "/matrix"} {
+	for _, name := range []string{"/cowsay", "/matrix"} {
 		if !strings.Contains(help, name) {
 			t.Errorf("Help 应含 %s", name)
 		}
@@ -53,11 +51,8 @@ func TestWithCommandsRejectsDuplicate(t *testing.T) {
 
 func TestEggCorpusIsNonEmptyAndSafe(t *testing.T) {
 	for name, texts := range map[string][]string{
-		"fortune": {Fortune()},
-		"cowsay":  {Cowsay()},
-		"xkcd":    {XKCD()},
-		"blame":   {Blame()},
-		"sudo":    {Sudo()},
+		"cowsay": {Cowsay()},
+		"sudo":   {Sudo()},
 	} {
 		for _, text := range texts {
 			if strings.TrimSpace(text) == "" {
