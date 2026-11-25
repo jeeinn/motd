@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-25
+
+次要版本：社区运营优化（R-15 / ADR-079）——**主题置顶/取消置顶、回复投票、管理员白名单热重载**三项新能力。新增 1 个 schema 迁移（`0012_threads_mark`）、游标升 v2（兼容 v1）、2 条管理员命令；**无新环境变量、无新依赖、无键位改动**，ANSI 白名单不变。另含一项真机冒烟发现并修复的 P0（热重载 SIGHUP 反注册导致整体失效）。测试函数 1135 → 1151。
+
+### Added
+
+- **主题置顶 / 取消置顶（R-15 / ADR-079）**：新增管理员命令 `/pin`、`/unpin`（无参作用于当前主题）。置顶主题在版块内列表与跨版块 `/latest` 前置显示，带琥珀 `[置顶]` 前缀（`StyleNotice`，只染前缀、标题保持默认色，信任域隔离）。每版块原子保留 1 条置顶（新置顶清掉同版块旧置顶）。鉴权走 `requireAdmin` → `CanAdmin` 单点（ADR-049），治理动作写 `EventAdminAction` 审计。前缀只用基础 16 色 SGR，不扩 ANSI 白名单。
+- **回复投票（R-15 / ADR-079）**：`/vote <up|down|rm> [id]` 扩展为可带回复 ID——无 ID 作用于当前主题（向后兼容），带 ID 作用于指定回复（ID 取详情页 `id=<n>`）。底层 `domain/vote` 的 `TargetPost` 与 `applyVote` 此前已就绪，本期只接通命令面（Service/仓储零改动）；与主题共用同一票型、幂等与自投票禁令（ADR-057），分数记到父主题。
+- **管理员白名单热重载（R-15 / ADR-079）**：`kill -HUP <pid>` 即生效，无需重启。Service 用不可变快照原子换入（`atomic.Pointer`），判定谓词 `CanAdmin` 与 `requireAdmin` 单点不变（ADR-049 不推翻）。改 `.env` 的 `MOTD_ADMIN_FINGERPRINTS` 后发信号即可；找不到 `.env` 时回退进程环境（兼容 systemd `Environment=` 注入）。此方向此前在 `P2-PLAN` 推 P3、`OPS.md` 标"不做"，本期明确推翻。
+
+### Changed
+
+- **keyset 游标升 v2（置顶所需）**：格式由 `v1|sort|last_reply_at|score|id` 升为 `v2|sort|mark|last_reply_at|score|id`。v1 五段游标仍可解码（`Mark=0`），存量用户翻页不失效。置顶作为"独立前缀层"用分层 keyset 实现：`mark` 进游标但不进 `ORDER BY`，仓储按 tier 分两次查、Go 层拼接；不触发 TEMP B-TREE，`cross_node_test.go` 的 `INDEXED BY idx_threads_last_reply` + 无临时排序硬断言保持不变。
+
+### Fixed
+
+- **热重载 SIGHUP 反注册（P0，真机冒烟发现）**：`startAdminWhitelistReload` 原把 `defer signal.Stop(ch)` 误放在外层函数——该函数启动 goroutine 后立即返回，导致 channel 被立刻反注册、goroutine 永远收不到 SIGHUP，**热重载整体失效**。原单测注入 `reloadFn` 绕过了 `signal.Notify` 路径故漏检。修复：`signal.Stop` 移入 goroutine 内部随其生命周期。新增 `admin_reload_linux_test.go`（仅 Linux 编译、CI `ubuntu-latest` 覆盖）发真实进程信号验证接线；反向验证：恢复 bug 版测试以 `EXIT=129`/`Hangup` 失败，修复版 PASS。
+
 ## [0.9.3] - 2026-11-25
 
 补丁版本：修复「邮箱/登录终态文案在回车后被整屏重绘擦掉、用户看不到任何反馈」的生产缺陷（P0）。终态提示纳入屏幕状态（`StatusBar.Notice`），随整屏帧一起输出，2J 擦不掉。无 schema 迁移、无新依赖、无新环境变量、无新键位、ANSI 白名单不变。
