@@ -15,7 +15,10 @@ const (
 
 	DefaultPageSize   = 20
 	MaxPageSize       = 100
-	MaxPostsPerThread = 200 // GetThread 单次取内容上限，P1 再做内容分页
+	// MaxPostsPerThread 是 GetThread / ScreenThreadDetail 的**单次批量**上限。
+	// R-06 起详情屏走分页（每批 detailReplyPageSize 条），本常量只服务于
+	// 仍一次性取满的旧调用方与测试，不再代表"可见内容上限"。
+	MaxPostsPerThread = 200
 
 	RateLimitInterval  = 60 * time.Second
 	RateLimitWindow    = time.Hour

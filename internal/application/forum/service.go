@@ -242,7 +242,10 @@ func (s *Service) ThreadHead(ctx context.Context, threadID int64) (*ThreadHead, 
 		return nil, err
 	}
 	if len(posts) == 0 {
-		return nil, fmt.Errorf("%w: 主题正文不存在", ErrNotFound)
+		// 主题行存在但没有任何内容：正常写入流程不可能产生（CreateThread 在同一事务
+		// 里写首帖），但历史数据/异常删除可能有。这里不报错——详情屏仍应显示标题，
+		// 让调用方按 Post.ID == 0 判断"没有正文"，避免整屏变成错误页。
+		return &ThreadHead{Thread: t}, nil
 	}
 	return &ThreadHead{Thread: t, Post: posts[0], HasMore: hasMore}, nil
 }
@@ -267,8 +270,8 @@ func (s *Service) ListReplies(ctx context.Context, threadID, afterID int64, limi
 		if err != nil {
 			return nil, err
 		}
-		if !head.HasMore {
-			return &ReplyPage{}, nil // 只有正文，没有回复
+		if head.Post.ID == 0 || !head.HasMore {
+			return &ReplyPage{}, nil // 没有正文或没有回复
 		}
 		afterID = head.Post.ID
 	}
@@ -297,7 +300,7 @@ func (s *Service) ListRepliesTail(ctx context.Context, threadID int64, limit int
 	if err != nil {
 		return nil, err
 	}
-	if !head.HasMore {
+	if head.Post.ID == 0 || !head.HasMore {
 		return &ReplyPage{}, nil
 	}
 	rows, err := s.repos.ListPostsTail(ctx, threadID, head.Post.ID, normalizePageSize(limit))

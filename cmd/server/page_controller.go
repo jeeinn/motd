@@ -69,8 +69,10 @@ type pageController struct {
 	nodeID   int64
 	nodeSlug string
 	threadID int64
-	cursor   string
-	offset   int
+	// R-06 详情屏分页：当前页起点、已加载回复批次与游标，随会话存活。
+	detail detailState
+	cursor string
+	offset int
 	// P1-M3 检索态：关键词与 1-based 页码，供 n/p 翻页与刷新复用。
 	searchQuery string
 	searchPage  int
@@ -390,15 +392,11 @@ func (p *pageController) showDetail(ctx context.Context, sess pageSession, threa
 	if p.service == nil {
 		return p.writeFixed(sess, "论坛服务尚未就绪")
 	}
-	v := p.viewContext(sess)
-	v.RowOffset = 0
-	sc, err := p.service.ScreenThreadDetail(ctx, threadID, v)
-	if err != nil {
-		return p.fail(sess, err)
-	}
-	p.setScreen(sc)
+	// R-06：详情屏改为分页装配——正文按物理行切、回复按整条装箱。
+	// 这里只重置状态并渲染第 1 页，取数与装箱由 detail_page.go 负责。
 	p.threadID = threadID
-	return p.render(sess)
+	p.detail = detailState{page: 1}
+	return p.renderDetailPage(ctx, sess, detailPagePos{})
 }
 
 func (p *pageController) refresh(ctx context.Context, sess pageSession) error {
@@ -508,6 +506,10 @@ func (p *pageController) restoreFocus(anchor int64) {
 }
 
 func (p *pageController) nextPage(ctx context.Context, sess pageSession) error {
+	if p.screen.Kind == viewmodel.ScreenThreadDetail {
+		// R-06：详情屏的 n 是"往下读一页"——正文先翻完，再翻回复。
+		return p.detailNextPage(ctx, sess)
+	}
 	if p.screen.Kind == viewmodel.ScreenSearchResults {
 		if !p.screen.Pagination.HasMore || p.searchPage >= 1<<20 {
 			return nil
@@ -522,6 +524,10 @@ func (p *pageController) nextPage(ctx context.Context, sess pageSession) error {
 }
 
 func (p *pageController) firstPage(ctx context.Context, sess pageSession) error {
+	if p.screen.Kind == viewmodel.ScreenThreadDetail {
+		// R-06：详情屏的 p 与列表页同义——回到第 1 页，不是"上一页"。
+		return p.detailFirstPage(ctx, sess)
+	}
 	if p.screen.Kind == viewmodel.ScreenSearchResults {
 		if p.searchPage <= 1 {
 			return nil
@@ -665,10 +671,10 @@ func (p *pageController) edit(ctx context.Context, sess pageSession, args []stri
 		// 翻到第 2 页时会把某条回复当成正文删掉（R-06）。
 		head, err := p.service.ThreadHead(ctx, p.threadID)
 		if err != nil {
-			if errors.Is(err, forum.ErrNotFound) {
-				return p.writeFixed(sess, "主题正文不存在")
-			}
 			return p.fail(sess, err)
+		}
+		if head.Post.ID == 0 {
+			return p.writeFixed(sess, "主题正文不存在")
 		}
 		targetID = head.Post.ID
 	}

@@ -241,8 +241,42 @@ func (s *Service) ScreenThreadDetail(ctx context.Context, threadID int64, v View
 	return sc, nil
 }
 
-// ScreenSearchResults 输出检索结果屏。Row.ID 取 threadID，Enter 可直接打开主题；
-// postID 放在 Meta.Extra 里作为语义元信息，不参与渲染，避免把用户文本带进固定文案。
+// ScreenThreadDetailPage 输出详情屏的**一页**：主题正文（整段，行窗口由呈现层切）
+// + 从 afterID 之后取 limit 条回复（R-06）。
+//
+// 与 ScreenThreadDetail 的区别只在取数方式：后者一次取满 MaxPostsPerThread，
+// 供既有调用方与测试沿用；本函数按 keyset 分页，供翻页使用。
+func (s *Service) ScreenThreadDetailPage(ctx context.Context, threadID, afterID int64, limit int, v ViewContext) (viewmodel.Screen, error) {
+	head, err := s.ThreadHead(ctx, threadID)
+	if err != nil {
+		return viewmodel.Screen{}, err
+	}
+	page, err := s.ListReplies(ctx, threadID, afterID, limit)
+	if err != nil {
+		return viewmodel.Screen{}, err
+	}
+	detail := viewmodel.Detail{
+		ID:        head.Thread.ID,
+		Title:     head.Thread.Title,
+		Body:      head.Post.BodyMD,
+		AuthorID:  head.Post.UserID,
+		CreatedAt: head.Post.CreatedAt.Unix(),
+		EditedAt:  head.Post.EditedAt,
+	}
+	rows := detailRows(page.Replies, v.RowOffset)
+	if err := s.fillRowAuthors(ctx, rows, &detail); err != nil {
+		return viewmodel.Screen{}, err
+	}
+	sc := screenOf(viewmodel.ScreenThreadDetail, rows, v)
+	sc.Detail = detail
+	sc.Pagination.HasMore = page.HasMore
+	if page.NextCursor > 0 {
+		sc.Pagination.NextCursor = strconv.FormatInt(page.NextCursor, 10)
+	}
+	return sc, nil
+}
+
+// ScreenSearchResults 输出检索结果屏。Row.ID 取 threadID，Enter 可直接打开主题；// postID 放在 Meta.Extra 里作为语义元信息，不参与渲染，避免把用户文本带进固定文案。
 func (s *Service) ScreenSearchResults(ctx context.Context, in SearchInput, v ViewContext) (viewmodel.Screen, error) {
 	res, err := s.Search(ctx, in)
 	if err != nil {
