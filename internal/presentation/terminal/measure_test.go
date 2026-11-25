@@ -14,10 +14,10 @@ func TestContentWidth(t *testing.T) {
 	cases := []struct {
 		width, want int
 	}{
-		{80, 68},  // 80 - prefixCol(12)
-		{40, 28},  // 40 - 12
-		{20, 20},  // 20-12=8 < minContentCol(20)，抬到下限
-		{0, 0},    // 宽度未知：返回 0，调用方降级
+		{80, 68}, // 80 - prefixCol(12)
+		{40, 28}, // 40 - 12
+		{20, 20}, // 20-12=8 < minContentCol(20)，抬到下限
+		{0, 0},   // 宽度未知：返回 0，调用方降级
 	}
 	for _, c := range cases {
 		if got := ContentWidth(c.width); got != c.want {

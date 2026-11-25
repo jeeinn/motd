@@ -20,12 +20,12 @@ type detailPagePos struct {
 // detailPage 是一页的内容区间与下一页游标。
 // 区间均为左闭右开：正文 [BodyFrom, BodyTo)、回复 [ReplyFrom, ReplyTo)。
 type detailPage struct {
-	BodyFrom   int
-	BodyTo     int
-	ReplyFrom  int
-	ReplyTo    int
-	Used       int // 本页占用的物理行数（可能超过容量：单块内容过高时的保底）
-	Next       detailPagePos
+	BodyFrom  int
+	BodyTo    int
+	ReplyFrom int
+	ReplyTo   int
+	Used      int // 本页占用的物理行数（可能超过容量：单块内容过高时的保底）
+	Next      detailPagePos
 }
 
 // paginateDetail 从 from 起按 capacity 装箱，返回本页内容与下一页游标。
