@@ -249,3 +249,66 @@ func TestDetailTailAfterReplyCanReturnFirstPage(t *testing.T) {
 		t.Fatalf("第 1 页正文应从第 0 行起，实际 %d", pc.screen.Detail.BodyFrom)
 	}
 }
+
+// 真机回归 1：正文已翻完的回复页，不得把整段正文再渲染一遍。
+// 根因曾是"窗口为空(BodyFrom==BodyTo)"与"整段输出"共用同一个 0/0 值。
+func TestDetailReplyPageOmitsConsumedBody(t *testing.T) {
+	ctx, h, rt, _, writer := setupMVPRuntime(t)
+	sess := newFakePageSessionWithSize(80, 24, 1)
+	pc := h.newPageController(sess)
+	threadID := seedFirstPost(t, ctx, pc, sess, rt)
+
+	long := strings.Repeat("正文第一段\n", 40)
+	replaceBody(t, ctx, writer, threadID, long)
+	seedReplies(t, ctx, writer, threadID, 25)
+
+	if err := pc.showDetail(ctx, sess, threadID); err != nil {
+		t.Fatal(err)
+	}
+	// 翻到"正文已翻完且有回复"的那一页：正文与回复同页衔接是设计行为，
+	// 真正要防的是正文翻完之后还被整段重画。
+	for i := 0; i < 12 && !(len(pc.screen.Rows) > 0 && pc.screen.Detail.BodyFrom == pc.screen.Detail.BodyTo); i++ {
+		if err := pc.detailNextPage(ctx, sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(pc.screen.Rows) == 0 {
+		t.Fatal("应已翻到含回复的页")
+	}
+	if !pc.screen.Detail.BodyWindowed {
+		t.Fatal("详情屏必须显式标记正文窗口，否则会被当整段渲染")
+	}
+	if pc.screen.Detail.BodyFrom != pc.screen.Detail.BodyTo {
+		t.Fatalf("正文应已翻完（窗口为空），实际 [%d,%d)", pc.screen.Detail.BodyFrom, pc.screen.Detail.BodyTo)
+	}
+
+	sess.reset()
+	if err := pc.render(sess); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(sess.output(), "正文第一段") {
+		t.Fatalf("回复页不应重复渲染正文：%q", sess.output())
+	}
+}
+
+// 真机回归 2：本页没有回复但后面还有页时，不能说「暂无回复」。
+func TestDetailNoRowsWithMoreHidesEmptyHint(t *testing.T) {
+	ctx, h, rt, _, writer := setupMVPRuntime(t)
+	sess := newFakePageSessionWithSize(80, 24, 1)
+	pc := h.newPageController(sess)
+	threadID := seedFirstPost(t, ctx, pc, sess, rt)
+
+	replaceBody(t, ctx, writer, threadID, strings.Repeat("第一段\n", 40))
+	seedReplies(t, ctx, writer, threadID, 5)
+
+	sess.reset()
+	if err := pc.showDetail(ctx, sess, threadID); err != nil {
+		t.Fatal(err)
+	}
+	if len(pc.screen.Rows) != 0 || !pc.screen.Pagination.HasMore {
+		t.Fatalf("前提：首页应为纯正文且有后续，实际 rows=%d hasMore=%v", len(pc.screen.Rows), pc.screen.Pagination.HasMore)
+	}
+	if strings.Contains(sess.output(), "暂无回复") {
+		t.Fatalf("后面还有回复时不应显示「暂无回复」：%q", sess.output())
+	}
+}

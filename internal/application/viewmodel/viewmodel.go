@@ -194,10 +194,12 @@ type Detail struct {
 	CreatedAt int64
 	EditedAt  int64
 	// BodyFrom / BodyTo 是正文的**物理行窗口**（左闭右开），供详情屏分页使用（R-06）。
-	// BodyTo <= BodyFrom 表示输出整段正文（既有行为）。
+	// 只有 BodyWindowed 为 true 时才按窗口切片；false 表示输出整段正文（既有行为）。
+	// 需要显式标记是因为"窗口为空"（正文已翻完）与"整段输出"都是 0/0，无法用值区分。
 	// 这里只放行号、不放宽度/高度：终端度量属 presentation，Viewmodel 不得携带（archtest 守卫）。
-	BodyFrom int
-	BodyTo   int
+	BodyWindowed bool
+	BodyFrom     int
+	BodyTo       int
 }
 
 // Screen 是 application 层输出的一屏完整语义状态。

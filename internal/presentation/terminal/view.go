@@ -98,7 +98,12 @@ func RenderScreenWithLocale(s viewmodel.Screen, width int, locale string) (strin
 	}
 
 	// Device Flow 浮层自带内容，不需要「暂无内容」占位行。
-	if len(s.Rows) == 0 && s.Overlay.Kind != viewmodel.OverlayDeviceCode {
+	//
+	// 详情屏分页后，本页没有回复**不等于**该帖没有回复——正文很长时前几页全被正文占满，
+	// 回复在后面的页里。此时说「暂无回复」是错的（R-06 实测发现）。
+	emptyDetailPage := s.Kind == viewmodel.ScreenThreadDetail &&
+		(s.Pagination.HasMore || s.Pagination.Page > 1)
+	if len(s.Rows) == 0 && !emptyDetailPage && s.Overlay.Kind != viewmodel.OverlayDeviceCode {
 		if err := sys(&b, emptyHint(s.Kind), safe.StyleDim); err != nil {
 			return "", err
 		}
@@ -366,7 +371,7 @@ func extBodyWindow(b *strings.Builder, d viewmodel.Detail, width int) error {
 		return nil
 	}
 	rendered := safe.RenderUser(d.Body, safe.Options{Width: width})
-	if d.BodyTo > d.BodyFrom {
+	if d.BodyWindowed {
 		lines := strings.Split(rendered, "\n")
 		from, to := d.BodyFrom, d.BodyTo
 		if from < 0 {

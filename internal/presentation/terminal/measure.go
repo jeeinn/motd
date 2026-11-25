@@ -47,6 +47,26 @@ func BodyLines(body string, width int) int {
 	return safe.MeasureWrap(rendered, width).Rows
 }
 
+// DetailHeaderLines 返回详情屏"帖子标题"占用的物理行数。
+//
+// 详情屏顶部实际是两行标题：固定的「motd · 主题详情」+ 帖子标题。
+// 帖子标题按 contentWidth 渲染且可能折行，分页必须把它算进去，
+// 否则长标题会把整页顶出一行（真机实测踩到过）。
+// 空标题仍占 1 行（渲染层会输出一个空行）。
+func DetailHeaderLines(title string, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	if title == "" {
+		return 1
+	}
+	rendered := safe.RenderUser(title, safe.Options{Width: ContentWidth(width)})
+	if n := safe.MeasureWrap(rendered, width).Rows; n > 0 {
+		return n
+	}
+	return 1
+}
+
 // RowsLines 返回每个行在 width 下占用的物理行数（与 rows 等长）。
 //
 // 拼装顺序必须与 view.go 的渲染循环逐段一致：前缀 → 回复数（仅主题列表）
