@@ -56,19 +56,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 写到仓库外（$RUNNER_TEMP）：GoReleaser 会校验 git 工作区干净，
+          # 若把生成文件放在仓库根会被判为 dirty 而拒绝发版。
+          notes="$RUNNER_TEMP/release-notes.md"
           python3 scripts/extract_release_notes.py \
             "${{ steps.tag.outputs.version }}" \
             CHANGELOG.md \
-            .release-notes.md
+            "$notes"
           echo "--- 提取到的 Release 正文前 8 行 ---"
-          head -8 .release-notes.md
+          head -8 "$notes"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean --release-notes=.release-notes.md
+          # --release-notes 接受绝对路径；用 $RUNNER_TEMP 保持工作区干净。
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
