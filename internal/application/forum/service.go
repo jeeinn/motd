@@ -218,6 +218,117 @@ func (s *Service) GetThread(ctx context.Context, threadID int64) (*ThreadDetail,
 	return &ThreadDetail{Thread: t, Posts: posts, HasMore: hasMore}, nil
 }
 
+// ThreadHead 是主题与其正文（首帖），不含回复。
+//
+// 详情屏分页（R-06）后，正文不再靠「回复列表的第一条」推断，而是显式取：
+// 分页会把 Posts 换成"某一页回复"，若继续用 Posts[0] 当正文，
+// /delete 之类的路径会删错内容。
+type ThreadHead struct {
+	Thread  thread.Thread
+	Post    post.Post
+	HasMore bool // 是否还有回复
+}
+
+func (s *Service) ThreadHead(ctx context.Context, threadID int64) (*ThreadHead, error) {
+	if threadID <= 0 {
+		return nil, fmt.Errorf("%w: 主题 ID 非法", ErrNotFound)
+	}
+	t, err := s.repos.GetThread(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	posts, hasMore, err := s.repos.ListPosts(ctx, PostQuery{ThreadID: threadID, Limit: 1})
+	if err != nil {
+		return nil, err
+	}
+	if len(posts) == 0 {
+		// 主题行存在但没有任何内容：正常写入流程不可能产生（CreateThread 在同一事务
+		// 里写首帖），但历史数据/异常删除可能有。这里不报错——详情屏仍应显示标题，
+		// 让调用方按 Post.ID == 0 判断"没有正文"，避免整屏变成错误页。
+		return &ThreadHead{Thread: t}, nil
+	}
+	return &ThreadHead{Thread: t, Post: posts[0], HasMore: hasMore}, nil
+}
+
+// ReplyPage 是主题下的一页回复（不含正文）。NextCursor 是本页最后一条的 id。
+type ReplyPage struct {
+	Replies    []post.Post
+	HasMore    bool
+	NextCursor int64
+}
+
+// ListReplies 按 keyset 取一页回复。
+//
+// afterID <= 0 表示"从第一页开始"：内部先取正文锚点再取它之后的内容，
+// 因此调用方不必自己记住首帖 id，也不会把正文当成一条回复返回。
+func (s *Service) ListReplies(ctx context.Context, threadID, afterID int64, limit int) (*ReplyPage, error) {
+	if threadID <= 0 {
+		return nil, fmt.Errorf("%w: 主题 ID 非法", ErrNotFound)
+	}
+	if afterID <= 0 {
+		head, err := s.ThreadHead(ctx, threadID)
+		if err != nil {
+			return nil, err
+		}
+		if head.Post.ID == 0 || !head.HasMore {
+			return &ReplyPage{}, nil // 没有正文或没有回复
+		}
+		afterID = head.Post.ID
+	}
+	rows, hasMore, err := s.repos.ListPosts(ctx, PostQuery{
+		ThreadID: threadID, AfterID: afterID, Limit: normalizePageSize(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	page := &ReplyPage{Replies: rows, HasMore: hasMore}
+	if n := len(rows); n > 0 {
+		page.NextCursor = rows[n-1].ID
+	}
+	return page, nil
+}
+
+// CountReplies 返回主题下可见回复条数（不含正文），供末页视图计算序号偏移。
+func (s *Service) CountReplies(ctx context.Context, threadID int64) (int, error) {
+	if threadID <= 0 {
+		return 0, fmt.Errorf("%w: 主题 ID 非法", ErrNotFound)
+	}
+	head, err := s.ThreadHead(ctx, threadID)
+	if err != nil {
+		return 0, err
+	}
+	if head.Post.ID == 0 {
+		return 0, nil
+	}
+	return s.repos.CountPosts(ctx, threadID, head.Post.ID)
+}
+
+// ListRepliesTail 取主题的**最后一页**回复（升序）。
+//
+// 回复成功后用它定位：新回复必然在末尾，于是不需要算页码、也不需要 count 全表。
+// 返回的 HasMore 恒为 false——它就是最后一页。
+func (s *Service) ListRepliesTail(ctx context.Context, threadID int64, limit int) (*ReplyPage, error) {
+	if threadID <= 0 {
+		return nil, fmt.Errorf("%w: 主题 ID 非法", ErrNotFound)
+	}
+	head, err := s.ThreadHead(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if head.Post.ID == 0 || !head.HasMore {
+		return &ReplyPage{}, nil
+	}
+	rows, err := s.repos.ListPostsTail(ctx, threadID, head.Post.ID, normalizePageSize(limit))
+	if err != nil {
+		return nil, err
+	}
+	page := &ReplyPage{Replies: rows}
+	if n := len(rows); n > 0 {
+		page.NextCursor = rows[n-1].ID
+	}
+	return page, nil
+}
+
 // ---------------------------------------------------------------------------
 // 写入用例
 // ---------------------------------------------------------------------------

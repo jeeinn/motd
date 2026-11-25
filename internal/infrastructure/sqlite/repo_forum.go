@@ -303,6 +303,52 @@ func (r *ForumRepos) ListPosts(ctx context.Context, q forum.PostQuery) ([]post.P
 	return out, hasMore, nil
 }
 
+// ListPostsTail 返回主题下最后 limit 条内容（id > afterID），结果按 id 升序。
+//
+// 用于「跳到末页」：回复成功后要定位到刚发的那条，而它必然在末尾。这里用
+// ORDER BY id DESC LIMIT n 再反转，避免为了算页码去 count 一遍全部回复。
+// 与 ListPosts 一样固定过滤软删除。
+func (r *ForumRepos) ListPostsTail(ctx context.Context, threadID, afterID int64, limit int) ([]post.Post, error) {
+	limit = normalizeLimit(limit)
+	rows, err := r.pools.QueryContext(ctx,
+		selectPosts+` WHERE thread_id = ? AND status = 'normal' AND id > ? ORDER BY id DESC LIMIT ?`,
+		threadID, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("列出主题末尾内容: %w", err)
+	}
+	defer rows.Close()
+
+	var out []post.Post
+	for rows.Next() {
+		p, err := scanPost(rows)
+		if err != nil {
+			return nil, fmt.Errorf("扫描内容: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历内容: %w", err)
+	}
+	// 查询按 id DESC，返回前反转成升序，与 ListPosts 的口径一致。
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// CountPosts 统计 id > afterID 的可见内容条数（同样过滤软删除）。
+// 末页视图用它算出序号偏移：末页第一条的全局序号 = 总数 - 本页条数 + 1。
+func (r *ForumRepos) CountPosts(ctx context.Context, threadID, afterID int64) (int, error) {
+	var n int
+	err := r.pools.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM posts WHERE thread_id = ? AND status = 'normal' AND id > ?`,
+		threadID, afterID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计主题内容条数: %w", err)
+	}
+	return n, nil
+}
+
 // PostAuthor 供编辑入口进入 composer 前只读判权；只认 normal 内容，
 // 不存在 / 软删 / 隐藏一律 ErrNotFound，与 PostOwner 的口径一致。
 func (r *ForumRepos) PostAuthor(ctx context.Context, postID int64) (int64, error) {

@@ -172,6 +172,12 @@ type Pagination struct {
 	Loaded     int
 	HasMore    bool
 	NextCursor string
+	// Page 是 1-based 页码，0 表示不展示页码（列表/检索等仍走既有提示文案，
+	// 详情屏末页因不计算总页数也不写数字）。
+	Page int
+	// HasPrev 表示"前面还有内容"，用于 footer 决定是否提示 p。
+	// 与 Page 分开是因为末页视图知道"有前置页"但不知道是第几页。
+	HasPrev bool
 }
 
 // Detail 是详情屏的主体内容（主题本身）。回复列表仍放在 Rows。
@@ -187,6 +193,13 @@ type Detail struct {
 	Node      string
 	CreatedAt int64
 	EditedAt  int64
+	// BodyFrom / BodyTo 是正文的**物理行窗口**（左闭右开），供详情屏分页使用（R-06）。
+	// 只有 BodyWindowed 为 true 时才按窗口切片；false 表示输出整段正文（既有行为）。
+	// 需要显式标记是因为"窗口为空"（正文已翻完）与"整段输出"都是 0/0，无法用值区分。
+	// 这里只放行号、不放宽度/高度：终端度量属 presentation，Viewmodel 不得携带（archtest 守卫）。
+	BodyWindowed bool
+	BodyFrom     int
+	BodyTo       int
 }
 
 // Screen 是 application 层输出的一屏完整语义状态。

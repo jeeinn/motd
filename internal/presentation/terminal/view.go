@@ -76,7 +76,7 @@ func RenderScreenWithLocale(s viewmodel.Screen, width int, locale string) (strin
 		}
 		b.WriteByte('\n')
 		if s.Detail.Body != "" {
-			if err := ext(&b, s.Detail.Body, width); err != nil {
+			if err := extBodyWindow(&b, s.Detail, width); err != nil {
 				return "", err
 			}
 			b.WriteByte('\n')
@@ -98,7 +98,12 @@ func RenderScreenWithLocale(s viewmodel.Screen, width int, locale string) (strin
 	}
 
 	// Device Flow 浮层自带内容，不需要「暂无内容」占位行。
-	if len(s.Rows) == 0 && s.Overlay.Kind != viewmodel.OverlayDeviceCode {
+	//
+	// 详情屏分页后，本页没有回复**不等于**该帖没有回复——正文很长时前几页全被正文占满，
+	// 回复在后面的页里。此时说「暂无回复」是错的（R-06 实测发现）。
+	emptyDetailPage := s.Kind == viewmodel.ScreenThreadDetail &&
+		(s.Pagination.HasMore || s.Pagination.Page > 1)
+	if len(s.Rows) == 0 && !emptyDetailPage && s.Overlay.Kind != viewmodel.OverlayDeviceCode {
 		if err := sys(&b, emptyHint(s.Kind), safe.StyleDim); err != nil {
 			return "", err
 		}
@@ -160,17 +165,57 @@ func RenderScreenWithLocale(s viewmodel.Screen, width int, locale string) (strin
 	if err := renderStatusBar(&b, s, width, locale); err != nil {
 		return "", err
 	}
-	if err := sys(&b, screenFooter(s.Kind), safe.StyleDim); err != nil {
+	footer := screenFooter(s.Kind)
+	if s.Kind == viewmodel.ScreenThreadDetail {
+		footer = detailFooter(s.Pagination)
+	}
+	if err := sys(&b, footer, safe.StyleDim); err != nil {
 		return "", err
 	}
 	b.WriteByte('\n')
-	if s.Pagination.HasMore {
-		if err := sys(&b, "（还有更多，按 n 加载下一页，p 回第一页）", safe.StyleDim); err != nil {
+	if hint := paginationHint(s); hint != "" {
+		if err := sys(&b, hint, safe.StyleDim); err != nil {
 			return "", err
 		}
 		b.WriteByte('\n')
 	}
 	return b.String(), nil
+}
+
+// detailFooter 按详情屏当前页动态给出 n/p 提示。
+//
+// 此前 footer 对除登录屏外的所有屏统一写「n 下一页」，但详情屏的 n 是空转的——
+// 这正是 R-06 要拆掉的"界面骗人"源头：不出现做不到的操作。
+func detailFooter(p viewmodel.Pagination) string {
+	switch {
+	case p.HasMore && p.HasPrev:
+		return "j/k 移动 · h/q 返回 · r 回复 · n 下一页 · p 回第 1 页 · / 命令 · ? 帮助"
+	case p.HasMore:
+		return "j/k 移动 · h/q 返回 · r 回复 · n 下一页 · / 命令 · ? 帮助"
+	case p.HasPrev:
+		return "j/k 移动 · h/q 返回 · r 回复 · p 回第 1 页 · / 命令 · ? 帮助"
+	default:
+		return "j/k 移动 · h/q 返回 · r 回复 · / 命令 · ? 帮助"
+	}
+}
+
+// paginationHint 返回页码/还有更多 的提示行；空串表示不输出（不占行高）。
+func paginationHint(s viewmodel.Screen) string {
+	if s.Kind == viewmodel.ScreenThreadDetail {
+		switch {
+		case s.Pagination.Page > 0 && s.Pagination.HasMore:
+			return fmt.Sprintf("（第 %d 页 · 还有更多回复，按 n 继续）", s.Pagination.Page)
+		case s.Pagination.Page > 0:
+			return fmt.Sprintf("（第 %d 页）", s.Pagination.Page)
+		case s.Pagination.HasMore:
+			return "（还有更多回复，按 n 继续）"
+		}
+		return ""
+	}
+	if s.Pagination.HasMore {
+		return "（还有更多，按 n 加载下一页，p 回第一页）"
+	}
+	return ""
 }
 
 // renderOverlay 渲染登录浮层。信任域约定（写进函数契约，防止后续误用）：
@@ -313,6 +358,37 @@ func ext(b *strings.Builder, text string, width int) error {
 		return nil
 	}
 	b.WriteString(safe.RenderUser(text, safe.Options{Width: width}))
+	return nil
+}
+
+// extBodyWindow 渲染详情屏正文的物理行窗口 [BodyFrom, BodyTo)（R-06 分页）。
+//
+// 切片放在**渲染之后**：RenderUser 已按 width 折行，所以「一行 = 一个物理行」，
+// 不会切到半个宽字符；且每个行内片段都是 open/close 成对的 SGR，按行切开不会
+// 留下未闭合样式。BodyTo<=BodyFrom 时输出整段，与既有行为逐字节一致。
+func extBodyWindow(b *strings.Builder, d viewmodel.Detail, width int) error {
+	if d.Body == "" {
+		return nil
+	}
+	rendered := safe.RenderUser(d.Body, safe.Options{Width: width})
+	if d.BodyWindowed {
+		lines := strings.Split(rendered, "\n")
+		from, to := d.BodyFrom, d.BodyTo
+		if from < 0 {
+			from = 0
+		}
+		if from > len(lines) {
+			from = len(lines)
+		}
+		if to < from {
+			to = from
+		}
+		if to > len(lines) {
+			to = len(lines)
+		}
+		rendered = strings.Join(lines[from:to], "\n")
+	}
+	b.WriteString(rendered)
 	return nil
 }
 
