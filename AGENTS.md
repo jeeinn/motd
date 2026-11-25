@@ -2,7 +2,7 @@
 
 > 本文件面向在本仓库工作的 AI 智能体与人类贡献者，记录**必须遵守的硬约束**与**易踩坑点**。
 > 与 `CONTRIBUTING.md` 分工：后者面向人类贡献者（提交规范、Issue 流程）；本文件额外强调智能体最容易违反的边界。
-> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~074）、`.github/workflows/ci.yml`、实际 git/代码状态。
+> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~075）、`.github/workflows/ci.yml`、实际 git/代码状态。
 
 ## 1. 项目定位
 
@@ -92,7 +92,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | --- | --- | --- |
 | `README.md` | 用户入口：功能、安装、配置表、快速开始 | 改对外描述 / 配置 |
 | `CONTRIBUTING.md` | 开发约定、提交前门禁、PR 规范 | 任何提交前 |
-| `docs/DECISIONS.md` | ADR-001~074，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
+| `docs/DECISIONS.md` | ADR-001~075，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
 | `docs/OPS.md` | 部署、备份恢复、演练记录、监控告警；§9 实战部署清单、§10 AI 智能体自动部署指南 | 改运维相关 / 部署；智能体执行远程部署前**必读 §10** |
 | `docs/ROADMAP.md` | 未实施方向的单一入口：待办总览（R-01~R-13）+ 逐项详情 + 已否决项 | **排期或接新需求前必读**，避免重复评估已否决项 |
 | `docs/archived/` | 已完成的设计稿与阶段计划（P0/PHASE1/PHASE2/P2/P3/P4/P4.5、6 份 DESIGN、原始评审稿），索引见其 `README.md` | 追溯需求来源 / 查历史方案 |

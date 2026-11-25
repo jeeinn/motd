@@ -989,6 +989,8 @@
 - 关联：`P3-PLAN.md §7`（M6）、`ADR-015`（插件权限）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-014`（等级仅显示）。
 - **patch（v0.7.2，用户 2026-11-22 反馈）**：`/help` 里彩蛋命令被显示在「管理员命令（需白名单指纹授权）」标题之下，读者会误判权限。根因是排版边界而非分组误标：`eggRegistry` 没给彩蛋设 `Group`，`WithCommands` 把彩蛋 append 到内置表末尾（管理员组之后），而 `Help()` 只用一个 `inAdminGroup` bool、仅在首次遇到 `GroupAdmin` 时插说明行，之后再无分组边界。修法：新增 `command.GroupEgg` 与 `eggGroupHelpHeader`（「彩蛋命令（无需权限，纯娱乐）」），`Help()` 改用 `map[string]bool` 按分组首次出现插头，`eggRegistry` 两处构造（插件元数据 + `EggCommands()` 兜底）都补 `Group`。**未隐藏任何命令**：`?` 是彩蛋唯一发现入口（ADR-061 的「命令表唯一入口」），隐藏会让功能事实上不存在；`Group` 仍只是展示元数据，鉴权零变化。
 
+- **已修订（ADR-075，2026-11-25）**：本条登记的 6 条命令类彩蛋中，`/fortune`、`/xkcd`、`/blame` 及其语料已删除（用户 2026-11-25 要求）。命令表与 demo 插件元数据同步清理（`/fortune` 的实际元数据来源正是 demo 插件那条），`/cowsay`、`/sudo`、`/matrix` 与全部状态类成就保留；插件链路、命令表唯一入口、`GroupEgg` 分组机制均不变。
+
 ## ADR-062 v0.6.0 彩蛋扩展：签到、合规数字雨与按用户解锁隐藏版块
 
 - 状态：已采纳，v0.6.0 落地。用户 2026-11-21 拍板：做完剩余彩蛋 4/10/11，按方案 2（ViewContext 注入）实现 /dev/null 按用户解锁，版本定 0.6.0。
@@ -1312,3 +1314,34 @@
   3. 四门禁（gofmt / build / vet / test）+ 两条 SSH 闭环专项全绿；测试函数 1114 → 1119。
 - 落地进度：代码与测试 `5a31ea4`（`internal/transport/ssh/session.go`、`server.go`、`cmd/server/ssh_handler.go` + 两个新测试文件）；本 ADR / ROADMAP / AGENTS.md 随文档提交同步落地。**未 push / 未发版**，回退点 `backup/pre-v0.9.2-20261125`。
 - 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（原地重绘语义）、`ADR-071` 代价 2、`ADR-072` 边界 2、`ADR-073`（详情分页状态机）、`docs/ROADMAP.md` R-09。
+
+## ADR-075 删除三条彩蛋命令：/fortune、/xkcd、/blame
+
+- 状态：**已采纳并实施（2026-11-25）**；用户明确要求删除这三个彩蛋命令及其功能。**尚未 push / 未发版**。
+- 性质：缩减既有对外命令面（0.x 契约未冻结，允许收敛）。**不修订** ADR-061 的接入机制、ADR-062 的状态类成就、ADR-015 的插件边界——只移除三条命令与其语料。
+- 背景：
+  1. ADR-061（v0.5.1）一次登记 6 条命令类彩蛋：`/fortune`（20 条箴言）、`/cowsay`、`/xkcd`（12 条本地标题）、`/blame`（5 条甩锅模板，需 1 个参数）、`/sudo`、`/matrix`；本次只删前三条中的 fortune / xkcd / blame，后三条保留。
+  2. **`/fortune` 有两个元数据来源**：demo 插件登记的 `/fortune`（描述「随机输出一句箴言（M3 接入命令分发）」）与 `command.EggCommands()` 的同名条目；cmd 装配层 `eggRegistry` 优先采用插件元数据，故实际生效的是插件那一份。删除时必须两处同删，否则会留下「命令表声明了、却没有语料」的空壳。
+  3. `/blame` 是彩蛋中**唯一带参**的命令，参数只做个数校验、不回显（ADR-026）；删除后彩蛋组内不再有任何带参命令。
+- 决策：
+  1. **命令与语料同删**：`command.EggCommands()` 移除三条登记项；`fortunes` / `xkcdTitles` / `blameLines` 三组语料与 `Fortune()` / `XKCD()` / `Blame()` 三个导出函数一并删除——不留孤儿语料，避免误以为仍有该命令。
+  2. **demo 插件不再登记命令**：`internal/plugin/demo` 的 `Commands` 置空。该插件的真正职责是「首次发帖」成就（订阅 `PostCreated`），命令登记只是早期演示元数据，删除不影响成就链路。
+  3. **分发层同步收口**：`cmd/server` 的命令分发由 5 条彩蛋收敛为 `/cowsay`、`/sudo` 两条；`eggText()` 同步只覆盖这两条（`/matrix` 是整屏动画，不走 `eggText`）。
+  4. **保留项**：`/cowsay`、`/sudo`、`/matrix`、`/quit` 的 12% 告别语、全部状态类成就（`first_post` / `night_owl` / `first_vote` / `streak_7`）、Konami 解锁 `/dev/null`、`GroupEgg` 分组机制——一律不动。
+  5. **回归防护**：命令表层与 cmd 装配层各加一组断言——已删除的三个命令**不得再被解析**、`eggText` 不得再产出文案，防止后续合并把旧条目带回来。
+- 理由：
+  - 命令面收敛优先于「彩蛋数量」：三条命令信息密度低（随机语料），却各自占用一条 `/help` 位置与一份语料维护成本。
+  - 两处元数据来源必须同时清理：`eggRegistry` 的兜底合并逻辑（插件元数据优先、`EggCommands()` 补齐）会让「只删一处」变成隐形的半删除状态。
+  - `/blame` 删除后彩蛋组不再有带参命令，参数回显面（ADR-026）在本组内归零。
+- 代价 / 边界：
+  1. **对外契约缩减**：`/help` 不再列出这三条；已记住命令的老用户会得到「未知命令」提示。0.x 阶段可接受，若有用户依赖需在发版说明中点名。
+  2. **插件职责收窄**：`internal/plugin/demo` 不再有任何命令登记，只剩成就处理器；`registry.Plugin.Commands` 字段保留（其它插件仍可能使用）。
+  3. 无 schema 迁移、无新依赖、无新环境变量、无键位改动、无 ANSI 序列变化；白名单与 archtest 守卫零改动。
+  4. 历史 ADR / CHANGELOG 的相关记述按惯例**不删改**，只在本条与 `docs/eggs.md` 标注现状。
+- 验证：
+  1. `internal/application/command/eggs_test.go`：合并后的命令表只含 `/cowsay` `/sudo` `/matrix`；已删除的 `/fortune` `/xkcd` `/blame` 解析必须报错；语料表只剩 cowsay / sudo。
+  2. `internal/application/command/registry_test.go`：`GroupEgg` 分组顺序回归改用 `/cowsay` 作样本（原用 `/fortune`）。
+  3. `cmd/server/egg_test.go`：`eggText` 只覆盖 cowsay / sudo，已删除命令返回空串；`eggRegistry` 注入后已删除命令不可解析。
+  4. `internal/plugin/demo/demo_test.go`：断言插件不再登记任何命令，成就链路断言不变。
+  5. 四门禁 + 两条 SSH 闭环专项全绿。
+- 关联：`ADR-015`（插件权限）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-061`（彩蛋接入与命令合并）、`ADR-062`（彩蛋扩展）、`ADR-072`（整屏干净重绘）、`docs/eggs.md`。
