@@ -241,6 +241,7 @@ func run() error {
 		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
 		withSecurity(gate).withCommands(eggReg).withLoginHook(onLogin).
 		withStats(statsSvc).
+		withMatrixDuration(cfg.MatrixDuration).
 		withUnlockHooks(onUnlock, checkInStore.UnlockedNodes)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:     cfg.SSHAddr,

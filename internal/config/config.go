@@ -45,6 +45,9 @@ type Config struct {
 	// AdminFingerprints 是节点治理命令的公钥指纹白名单（键为服务端算出的指纹）。
 	// 空 map 表示无人可管；判定统一走 application/admin.CanAdmin。
 	AdminFingerprints map[string]struct{}
+	// MatrixDuration 是 /matrix 单次播放的时长上限（v0.9.2 / ADR-076）。
+	// 0 表示不限时（用户显式把 MOTD_MATRIX_DURATION 设为 0）。
+	MatrixDuration time.Duration
 	// LogLevel debug / info / warn / error。
 	LogLevel string
 	// LogFormat text / json。
@@ -92,6 +95,7 @@ func Load() (Config, error) {
 		AuditFlushInterval:   DurationEnv("MOTD_AUDIT_FLUSH_INTERVAL", DefaultAuditFlushInterval),
 		LogLevel:             strings.ToLower(env("MOTD_LOG_LEVEL", "info")),
 		LogFormat:            strings.ToLower(env("MOTD_LOG_FORMAT", "text")),
+		MatrixDuration:       MatrixDurationEnv("MOTD_MATRIX_DURATION", DefaultMatrixDuration),
 		DotEnvDisabled:       dotEnvDisabled(),
 	}
 
@@ -186,6 +190,32 @@ func DurationEnv(key string, fallback time.Duration) time.Duration {
 	}
 	v, err := time.ParseDuration(strings.TrimSpace(raw))
 	if err != nil || v <= 0 {
+		return fallback
+	}
+	return v
+}
+
+// DefaultMatrixDuration 是 /matrix 单次播放的默认时长上限（v0.9.2 / ADR-076）。
+//
+// 兜底而非硬上限：不限时需要用户显式设 0 才会生效，且服务端另有并发上限 2
+// 兜住带宽。默认给 60s，是为了让"忘了退出"的会话不至于长期占用整站上行。
+const DefaultMatrixDuration = 60 * time.Second
+
+// MatrixDurationEnv 解析 /matrix 的时长上限。
+//
+// 与 DurationEnv 的唯一区别：这里允许 0 表示"不限时"（用户显式设 0 才会走到），
+// 而 DurationEnv 会把 <=0 一律回落默认值，无法表达这个语义。
+func MatrixDurationEnv(key string, fallback time.Duration) time.Duration {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "0" || trimmed == "0s" {
+		return 0
+	}
+	v, err := time.ParseDuration(trimmed)
+	if err != nil || v < 0 {
 		return fallback
 	}
 	return v

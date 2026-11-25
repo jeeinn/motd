@@ -22,7 +22,7 @@ func EggCommands() []Command {
 		{Name: "cowsay", Group: GroupEgg, Usage: "/cowsay", Summary: "ASCII 牛说一句话", MaxArgs: 0},
 		{Name: "sudo", Group: GroupEgg, Usage: "/sudo", Summary: "尝试提权（注定失败）", MaxArgs: 0},
 		// ADR-065：/karma 命令入口已删除，声望/等级并入 /whoami；KarmaReader 能力层保留（状态栏消费）。
-		{Name: "matrix", Group: GroupEgg, Usage: "/matrix", Summary: "看一小段数字雨（按 Ctrl-C 可中断）", MaxArgs: 0},
+		{Name: "matrix", Group: GroupEgg, Usage: "/matrix", Summary: "屏内数字雨（按任意键中断）", MaxArgs: 0},
 	}
 }
 

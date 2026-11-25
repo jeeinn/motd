@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
@@ -16,6 +17,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/application/viewmodel"
+	"github.com/jeeinn/motd/internal/config"
 	"github.com/jeeinn/motd/internal/domain/node"
 	"github.com/jeeinn/motd/internal/presentation/terminal"
 	"github.com/jeeinn/motd/internal/presentation/terminal/safe"
@@ -62,7 +64,38 @@ type inputHandler struct {
 	unlockedNodes func(context.Context, int64) ([]node.Node, error)
 	// stats 是 /stats 的统计用例（v0.7.1），nil 时命令只给固定提示。
 	stats *appuser.StatsService
+	// matrixDuration 是 /matrix 单次播放的时长上限（v0.9.2 / ADR-076）。
+	// 0 = 不限时（用户显式把 MOTD_MATRIX_DURATION 设为 0）。
+	matrixDuration time.Duration
+	// matrixActive 是当前正在播放 /matrix 的会话数（进程级）。
+	// 用于并发上限：整站上行 1 Mbps 是共享资源，多个会话同时播雨帘会拖慢全站。
+	matrixActive atomic.Int32
 }
+
+// withMatrixDuration 注入 /matrix 的时长上限（v0.9.2 / ADR-076）。
+// 零值保持默认（config.DefaultMatrixDuration），负值视为不限时。
+func (h *inputHandler) withMatrixDuration(d time.Duration) *inputHandler {
+	if d < 0 {
+		d = 0
+	}
+	h.matrixDuration = d
+	return h
+}
+
+// acquireMatrixSlot 尝试占用一个 /matrix 播放名额。
+//
+// 整站上行 1 Mbps 是共享资源：单会话 12fps 已占两成多，3~4 个并发即打满，
+// 届时全站论坛对所有人变慢。返回 false 表示已达上限，调用方须给固定提示。
+func (h *inputHandler) acquireMatrixSlot() bool {
+	if int(h.matrixActive.Load()) >= matrixMaxConcurrent {
+		return false
+	}
+	h.matrixActive.Add(1)
+	return true
+}
+
+// releaseMatrixSlot 归还播放名额（与 acquireMatrixSlot 成对调用）。
+func (h *inputHandler) releaseMatrixSlot() { h.matrixActive.Add(-1) }
 
 // withStats 注入社区统计用例（v0.7.1 / ADR-064）。读端口在 application/user，
 // 命令层只做排版，端口注入沿用 withCommands / withLoginHook 的既有先例。
@@ -109,7 +142,7 @@ func (h *inputHandler) withForum(svc *forum.Service, users appuser.StatusReader,
 }
 
 func newInputHandler() *inputHandler {
-	return &inputHandler{reg: command.Default()}
+	return &inputHandler{reg: command.Default(), matrixDuration: config.DefaultMatrixDuration}
 }
 
 // withUnlockHooks 注入隐藏节点的解锁写钩子与已解锁读钩子（v0.6.0）。
@@ -496,10 +529,29 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 		case "help":
 			_, _ = io.WriteString(sess, h.reg.Help())
 		case "matrix":
-			// v0.9.0 / ADR-072：全屏动画（进入清屏 → 提示 + 逐行雨帘 → 退出清屏）。
+			// v0.9.2 / ADR-076：屏内雨帘（进入清屏 → 提示 + 逐帧覆盖 → 退出清屏）。
 			// 动画期不改 screen/notice/selection，退出后用同一纯函数重绘原页面。
-			_, height, _ := sess.Window()
-			h.runMatrix(ctx, sess, msgs, int(height), poll)
+			// 并发上限：超出直接给固定提示，不进入动画（整站上行是共享资源）。
+			if !h.acquireMatrixSlot() {
+				writeSystem(sess, matrixBusyText+"\r\n")
+				break
+			}
+			defer h.releaseMatrixSlot()
+			width, height, _ := sess.Window()
+			heartbeat := func() {}
+			if h.presence != nil {
+				// presence 只在 Session.Read 时刷新；动画期可能长时间无按键，
+				// 不补心跳会让用户从在线名单消失（Reap 超时 20s）。
+				heartbeat = func() { _ = h.presence.Touch(sess.ID()) }
+			}
+			h.runMatrix(ctx, sess, msgs, poll, matrixRun{
+				Width:     int(width) - 1, // 留最右列不写，永不 pending-wrap
+				Height:    int(height),
+				Duration:  h.matrixDuration,
+				FrameGap:  matrixFrameGap,
+				Heartbeat: heartbeat,
+				Window:    func() (uint32, uint32, string) { return sess.Window() },
+			})
 			_ = pc.render(sess)
 		case "cowsay", "sudo":
 			// v0.5.1 / P3-M6：彩蛋都是固定语料，经安全渲染路径输出。
@@ -598,7 +650,39 @@ func writeSystem(sess io.Writer, text string) {
 func writeEgg(sess io.Writer, text string) { writeSystem(sess, text) }
 
 // matrixHint 是动画首行的固定提示：用户必须知道怎么退出（纯服务端常量）。
-const matrixHint = "[Esc 返回] · 约 1.2s 自动结束\r\n"
+//
+// v0.9.2 / ADR-076：动画从「约 1.2s 自动结束」改为可持续播放，出口统一为
+// 「任意键中断」——动画期吞掉的按键会让用户以为界面卡死。
+const matrixHint = "[Esc 返回] · 任意键中断\r\n"
+
+// matrixFrameGap 是帧间隔（v0.9.2 / ADR-076）：12fps。
+//
+// 帧率由带宽倒推：屏内覆盖每帧要写整屏（约 2~3 KB），12fps 即约 28 KB/s，
+// 占整站 1 Mbps 上行的两成多。电影感主要来自「雨头 + 拖尾」而非帧率。
+const matrixFrameGap = 83 * time.Millisecond
+
+// matrixMaxConcurrent 是同时播放 /matrix 的会话数上限（v0.9.2 / ADR-076）。
+//
+// 整站上行 1 Mbps 是共享资源：单会话 12fps 已占两成多，3~4 个并发即打满，
+// 届时全站论坛对所有人变慢——这比彩蛋本身严重得多。超出上限直接给固定提示。
+const matrixMaxConcurrent = 2
+
+// matrixBusyText 是并发超限时的固定提示（服务端常量，不含用户数据）。
+const matrixBusyText = "已有其他会话在播放数字雨，请稍后再试。"
+
+// matrixRun 是一次 /matrix 播放的可调参数。生产与测试走同一套代码路径，
+// 测试据此注入帧数上限与零等待帧间隔，避免依赖墙钟产生 flaky。
+type matrixRun struct {
+	Width     int           // 雨区列数（终端宽度 - 1，留最右列不写）
+	Height    int           // 终端总高度（含第 1 行提示）
+	Frames    int           // 帧数上限；0 = 不限
+	Duration  time.Duration // 时长上限；0 = 不限
+	FrameGap  time.Duration // 帧间隔
+	Heartbeat func()        // 每帧调用一次（presence 心跳）；nil = 不调用
+	// Window 可选：返回当前终端尺寸。动画期主循环被阻塞，resize 通知
+	// （ADR-074）收不到，只能靠它自己发现尺寸变化并重新铺屏。
+	Window func() (width, height uint32, term string)
+}
 
 // escPoller 补做「孤立 ESC」的判定。KeyDecoder 只在有人调用 Poll 时才把单独
 // 按下的 Esc 判定出来（见 transport/ssh/decoder.go 的 25ms 决策窗口）；而动画
@@ -607,51 +691,73 @@ const matrixHint = "[Esc 返回] · 约 1.2s 自动结束\r\n"
 // nil 表示无需补判定（直接用 msgs 注入 Esc 的测试场景）。
 type escPoller func() []input.KeyMsg
 
-// runMatrix 输出全屏滚动雨帘（v0.6.0；v0.9.0 / ADR-072 改整屏动画）。
+// runMatrix 输出屏内滚动的数字雨（v0.9.2 / ADR-076）。
 //
-// 帧结构：进入 ESC[H + ESC[2J 清出动画区 → 第 1 行固定提示 → 逐行追加雨帘
-// （height-2 行，至少 8 帧，每帧 50ms）→ 退出 ESC[H + ESC[2J。
-// 清屏后的空屏上逐行追加不产生残影，因此不需要 ring buffer 局部覆盖：
-// 每帧只写一行，视觉等价、带宽更低（ADR-072 §5）。
+// 形态：进入整屏（清屏 + 提示行 + 雨区铺满）→ 每帧 CursorUp 回雨区首行逐行
+// 覆盖 → 退出整屏清屏，由调用方重绘原页面。
 //
-// 三条退出路径统一由 defer 收口，避免漏路径留脏屏：
-//  1. Esc：动画期监听 msgs（主循环此时阻塞在 handle 内，不会并发读），
-//     并每帧调用一次 poll 补判「孤立 ESC」；
-//  2. 自然结束：写满 frames 行；
-//  3. 断连：ctx 取消或 msgs 关闭（读协程 defer close 发生在连接结束时）。
+// 为什么不是「逐行追加」（v0.9.0 的做法）：追加式无法回改已打印行，做不出电影
+// Matrix 的雨头 + 拖尾；且不限时会让 scrollback 以每秒十几行增长，把用户的论坛
+// 历史冲掉（ED 2 只清可视屏、不清 scrollback）。屏内覆盖只重画可视区，
+// scrollback 零增长。
+//
+// 退出路径（统一由 defer 收口，避免漏路径留脏屏）：
+//  1. 任意按键：动画期监听 msgs（主循环此时阻塞在 handle 内，不会并发读），
+//     并每帧调用 poll 补判「孤立 ESC」；
+//  2. ctx 取消 / msgs 关闭（断连）；
+//  3. 时长上限（默认 60s，MOTD_MATRIX_DURATION=0 才不限时）或帧数上限。
 //
 // 独占：本函数在 handle 内同步执行，主循环阻塞，期间不会有页面 render 覆盖动画；
 // 调用方在返回后重绘原页面（动画期未改任何页面状态，纯函数自然复现）。
-// 合规：只用 safe.RenderSystem 的 SGR 上色与 H/2J 整屏序列，绝不用备用屏 / OSC /
-// 3J，也不做带参 CUP 定位——参数面为零，无注入面。
-func (h *inputHandler) runMatrix(ctx context.Context, sess io.Writer, msgs <-chan input.KeyMsg, height int, poll escPoller) {
-	const frameGap = 50 * time.Millisecond
-	if height <= 0 {
-		height = 24
+// 合规：只用白名单内的 SGR / H / 2J / CUU，绝不用备用屏 / OSC / 3J，也不做
+// 带参 CUP 定位——参数面为零，无注入面。
+func (h *inputHandler) runMatrix(ctx context.Context, sess io.Writer, msgs <-chan input.KeyMsg, poll escPoller, opt matrixRun) {
+	if opt.Height <= 0 {
+		opt.Height = 24
 	}
-	frames := height - 2 // 留 1 行提示 + 1 行余量，避免追加时把提示顶出可视区
-	if frames < 8 {
-		frames = 8
+	if opt.Width <= 0 {
+		opt.Width = 79
+	}
+	if opt.FrameGap <= 0 {
+		opt.FrameGap = matrixFrameGap
+	}
+	rainHeight := opt.Height - 1 // 第 1 行留给提示
+	if rainHeight < 1 {
+		rainHeight = 1
 	}
 
-	_, _ = io.WriteString(sess, safe.CursorHome()+safe.ClearScreen())
-	_, _ = io.WriteString(sess, matrixHint)
-	// 退出：无论 Esc / 自然结束 / 断连，统一清屏；调用方随后重绘原页面。
-	defer func() { _, _ = io.WriteString(sess, safe.CursorHome()+safe.ClearScreen()) }()
+	rain := command.NewMatrixRain(opt.Width, rainHeight)
+	rows := make(terminal.MatrixRows, rainHeight)
+	collect := func() {
+		for y := 0; y < rainHeight; y++ {
+			rows[y] = rain.Row(y)
+		}
+	}
 
-	ticker := time.NewTicker(frameGap)
+	// 进入整屏：清屏 + 复位 SGR + 提示行 + 雨区首帧。
+	collect()
+	_, _ = io.WriteString(sess, terminal.RenderMatrixScreen(rows, matrixHint))
+	// 退出：无论 Esc / 断连 / 时长上限，统一清屏并复位 SGR；调用方随后重绘原页面。
+	defer func() { _, _ = io.WriteString(sess, terminal.RenderMatrixExit()) }()
+
+	ticker := time.NewTicker(opt.FrameGap)
 	defer ticker.Stop()
-	for i := 0; i < frames; i++ {
+	start := time.Now()
+	for frame := 0; opt.Frames <= 0 || frame < opt.Frames; frame++ {
 		select {
 		case <-ctx.Done():
 			return
-		case msg, ok := <-msgs:
-			if !ok || msg.Kind == input.KeyEsc { // channel 关闭 = 断连
-				return
+		case _, ok := <-msgs:
+			if !ok {
+				return // channel 关闭 = 断连
 			}
+			// 任意键中断：动画期吞掉的按键会让用户以为界面卡死。
+			// v0.9.2 修正：此前只认 Esc、且把 Ctrl-C 静默丢弃，与 /help 文案
+			// 「按 Ctrl-C 可中断」不符。
+			return
 		case <-ticker.C:
 		}
-		// 补判孤立 ESC：每帧（50ms）轮询一次解码器，Esc 最迟约 75ms 生效。
+		// 补判孤立 ESC：每帧轮询一次解码器。
 		if poll != nil {
 			for _, m := range poll() {
 				if m.Kind == input.KeyEsc {
@@ -659,13 +765,37 @@ func (h *inputHandler) runMatrix(ctx context.Context, sess io.Writer, msgs <-cha
 				}
 			}
 		}
-		rendered, err := safe.RenderSystem(command.MatrixFrame(), safe.StyleCode)
-		if err != nil {
-			return // 安全渲染失败立即停，绝不裸写
+		// presence 心跳：动画期可能长时间无按键，而 presence 只在 Read 时刷新，
+		// 超过 20s 未刷新会被 Reap 移出注册表（用户从在线名单消失）。
+		if opt.Heartbeat != nil {
+			opt.Heartbeat()
 		}
-		if _, err := io.WriteString(sess, rendered+"\r\n"); err != nil {
+		// 时长上限：默认 60s 兜底；opt.Duration=0 表示不限时（用户显式设置）。
+		if opt.Duration > 0 && time.Since(start) >= opt.Duration {
 			return
 		}
+		// 终端尺寸变化：动画期主循环被阻塞，resize 通知收不到，只能自己发现。
+		if opt.Window != nil {
+			w, ht, _ := opt.Window()
+			if int(w) > 0 && int(ht) > 0 {
+				newW, newH := int(w)-1, int(ht)
+				if newW != opt.Width || newH != opt.Height {
+					opt.Width, opt.Height = newW, newH
+					rainHeight = opt.Height - 1
+					if rainHeight < 1 {
+						rainHeight = 1
+					}
+					rain = command.NewMatrixRain(opt.Width, rainHeight)
+					rows = make(terminal.MatrixRows, rainHeight)
+					collect()
+					_, _ = io.WriteString(sess, terminal.RenderMatrixScreen(rows, matrixHint))
+					continue
+				}
+			}
+		}
+		rain.Advance()
+		collect()
+		_, _ = io.WriteString(sess, terminal.RenderMatrixFrame(rows, rainHeight))
 	}
 }
 
