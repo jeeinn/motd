@@ -13,8 +13,8 @@ const (
 	MaxTitleRunes = 120
 	MaxBodyBytes  = 8 << 10 // 8 KiB，防止一条内容打满带宽（按字节而非字符计）
 
-	DefaultPageSize   = 20
-	MaxPageSize       = 100
+	DefaultPageSize = 20
+	MaxPageSize     = 100
 	// MaxPostsPerThread 是 GetThread / ScreenThreadDetail 的**单次批量**上限。
 	// R-06 起详情屏走分页（每批 detailReplyPageSize 条），本常量只服务于
 	// 仍一次性取满的旧调用方与测试，不再代表"可见内容上限"。
