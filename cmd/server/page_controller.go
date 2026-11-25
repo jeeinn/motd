@@ -660,16 +660,17 @@ func (p *pageController) edit(ctx context.Context, sess pageSession, args []stri
 		}
 		targetID = id
 	} else {
-		// 无参 = 当前主题正文（首帖）。正文不在 Rows 里（Rows 从 Posts[1:] 起），
-		// 用只读用例取首帖 id，避免靠展示数据猜目标。
-		d, err := p.service.GetThread(ctx, p.threadID)
+		// 无参 = 当前主题正文（首帖）。详情屏分页后 Rows 只承载"某一页回复"，
+		// 正文必须显式取（ThreadHead），不能再用 Rows/Posts[0] 推断——否则
+		// 翻到第 2 页时会把某条回复当成正文删掉（R-06）。
+		head, err := p.service.ThreadHead(ctx, p.threadID)
 		if err != nil {
+			if errors.Is(err, forum.ErrNotFound) {
+				return p.writeFixed(sess, "主题正文不存在")
+			}
 			return p.fail(sess, err)
 		}
-		if len(d.Posts) == 0 {
-			return p.writeFixed(sess, "主题正文不存在")
-		}
-		targetID = d.Posts[0].ID
+		targetID = head.Post.ID
 	}
 
 	if err := p.service.CanEditPost(ctx, p.ownerActor(ctx, sess), targetID); err != nil {

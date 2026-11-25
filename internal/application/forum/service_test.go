@@ -244,6 +244,22 @@ func (r *fakeRepos) ListPosts(ctx context.Context, q PostQuery) ([]post.Post, bo
 	return out, hasMore, nil
 }
 
+// ListPostsTail 与真实仓储同口径：只取 id > afterID 的 normal 内容，升序返回末尾 limit 条。
+func (r *fakeRepos) ListPostsTail(ctx context.Context, threadID, afterID int64, limit int) ([]post.Post, error) {
+	var out []post.Post
+	for _, p := range r.state.posts {
+		if p.ThreadID == threadID && p.Status == post.StatusNormal && p.ID > afterID {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	limit = normalizePageSize(limit)
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, nil
+}
+
 // PostAuthor 与真实仓储一致：只认 normal 内容，其余返回 ErrNotFound。
 func (r *fakeRepos) PostAuthor(ctx context.Context, postID int64) (int64, error) {
 	p, ok := r.state.posts[postID]
