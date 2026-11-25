@@ -59,6 +59,23 @@ go test -count=1 ./cmd/server -run TestMVPRestartAndBackupWithRealData
 - 行为变更必须带测试；修 bug 请附一个能复现原问题的测试。
 - 首版处于 `0.x`，任何破坏性变更请在 PR 标题标注 `BREAKING`，并同步更新 `CHANGELOG.md`。
 
+## 自动发版（tag 触发）
+
+跨平台二进制与 GitHub Release 由 `.github/workflows/release.yml` 自动完成，无需手工打包上传。发起流程：
+
+1. **先在 `CHANGELOG.md` 登记该版本段**：`## [x.y.z] - YYYY-MM-DD` 起，到下一个 `## [` 止。发布说明直接提取这一段，**不存在则 workflow 失败**（fail-fast，避免发出无说明的 Release）。
+2. 按 `AGENTS.md` §5 取得发版确认，commit → push → PR → CI 双绿 → merge → main CI 绿。
+3. 打 annotated tag 并推送：`git tag -a vX.Y.Z -m "说明" && git push origin vX.Y.Z`。tag 需匹配 `vMAJOR.MINOR.PATCH`（预发布 `-rc1` 等亦可）。
+4. workflow 自动产出 6 个归档（linux / windows / darwin × amd64 / arm64）+ `checksums.txt`，注入 `main.version`，并以 CHANGELOG 段作为 Release 正文。
+
+本地校验（不改仓库文件）：
+
+```bash
+python3 scripts/extract_release_notes.py 0.10.0 CHANGELOG.md /tmp/notes.md  # 验证提取
+```
+
+构建配置见 `.goreleaser.yml`（`CGO_ENABLED=0`、`-trimpath`、提交时间作时间戳，保证可复现）。**生产部署不随 Release 自动进行**，仍按 `docs/OPS.md` §10 单独执行。
+
 ## 报告问题
 
 使用 GitHub Issue 模板提交 Bug 或功能建议。安全问题**不要**用公开 Issue，按 [SECURITY.md](SECURITY.md) 的方式私下报告。

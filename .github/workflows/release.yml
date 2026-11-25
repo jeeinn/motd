@@ -1,0 +1,90 @@
+name: Release
+
+# 跨平台可执行文件自动构建 + GitHub Release。
+# 触发：推送 v* 标签（如 git tag -a v0.11.0 -m "..." && git push origin v0.11.0）。
+# 前置：CHANGELOG.md 必须先有对应版本段落（## [0.11.0] - ...），否则 fail-fast，
+#       不会发出没有说明的 Release。版本号从 tag 去掉 v 前缀得到。
+#
+# 产物：linux/windows/darwin × amd64/arm64 共 6 个归档 + checksums.txt。
+# Release 正文：从 CHANGELOG.md 提取的版本段（scripts/extract_release_notes.py），
+#               不是 GitHub 自动生成的 commit 列表。
+# 注意：本 workflow 不涉及生产部署（生产由运维按 docs/OPS.md §10 单独执行）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  goreleaser:
+    name: Build Cross-Platform & Publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 Release、上传归档需要写权限
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # GoReleaser 需要完整历史与 tag 来计算版本、changelog 与提交时间。
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate tag format
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # 标准发布标签形如 v0.10.0 / v1.2.3；预发布 v1.2.3-rc1 也接受。
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "错误: 标签格式不合法: $tag（需为 vMAJOR.MINOR.PATCH）" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "发布版本: ${version}"
+
+      - name: Extract changelog section as release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/extract_release_notes.py \
+            "${{ steps.tag.outputs.version }}" \
+            CHANGELOG.md \
+            .release-notes.md
+          echo "--- 提取到的 Release 正文前 8 行 ---"
+          head -8 .release-notes.md
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean --release-notes=.release-notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "--- 产物清单 ---"
+          ls -lh dist/*.tar.gz dist/*.zip dist/checksums.txt 2>/dev/null
+          # 期望 6 个归档：linux×amd64/arm64 + darwin×amd64/arm64 = 4 个 tar.gz，
+          # windows×amd64/arm64 = 2 个 zip；外加 checksums.txt。
+          count=$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
+          echo "归档数量: $count"
+          if [ "$count" -lt 6 ]; then
+            echo "错误: 归档数量不足 6（期望 3 OS × 2 arch）" >&2
+            exit 1
+          fi
+          test -f dist/checksums.txt || { echo "错误: 缺少 checksums.txt" >&2; exit 1; }
+          echo "产物校验通过"
