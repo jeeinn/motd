@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-25
+
+补丁版本：新增 GitHub Actions 自动发版能力，push `v*` tag 即自动构建 6 个跨平台可执行文件并创建 Release。本版用以验证自动发版流水线（首个由 workflow 生成的 Release），无业务功能变更、无 schema 迁移、无新依赖、无新环境变量、无键位/渲染改动。
+
+### Added
+
+- **跨平台自动构建 workflow**（`.github/workflows/release.yml`）：推送 `vMAJOR.MINOR.PATCH` 标签触发，自动构建 **linux / windows / darwin × amd64 / arm64 共 6 个归档** + `checksums.txt`，用户可直接在 GitHub Releases 页下载。权限最小化（顶层 `contents: read`，仅发布 job 给 `contents: write`），产物数量与 checksums 在 workflow 内校验，缺一即失败。
+- **Release 正文自动抓取 CHANGELOG**（`scripts/extract_release_notes.py`）：按 `## [x.y.z]` 精确切出对应版本段作为 Release 正文，不再用 GitHub 默认的 commit 列表。**CHANGELOG 未登记该版本则 fail-fast**，避免发出没有说明的 Release；Unreleased 段永不作为发布说明。
+- **可复现构建与版本注入**（`.goreleaser.yml`）：`-trimpath` 去本地路径、`mod_timestamp` 用提交时间、`-X main.version={{.Version}}` 注入版本号（`/healthz` 与 `/stats` 回显真实版本，不再是 `dev`）；归档名带版本与平台（`motd_0.10.1_linux_amd64` 等）。
+
+### Changed
+
+- **发版方式补充**：手动 `gh release create` 不再是唯一路径；tag push 后由 workflow 自动构建并建 Release。生产部署仍按 `docs/OPS.md` §10 单独执行，不随 Release 自动上线。
+
 ## [0.10.0] - 2026-11-25
 
 次要版本：社区运营优化（R-15 / ADR-079）——**主题置顶/取消置顶、回复投票、管理员白名单热重载**三项新能力。新增 1 个 schema 迁移（`0012_threads_mark`）、游标升 v2（兼容 v1）、2 条管理员命令；**无新环境变量、无新依赖、无键位改动**，ANSI 白名单不变。另含一项真机冒烟发现并修复的 P0（热重载 SIGHUP 反注册导致整体失效）。测试函数 1135 → 1151。
