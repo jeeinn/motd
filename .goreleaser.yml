@@ -2,12 +2,24 @@ version: 2
 
 project_name: motd
 
+# 跨平台可执行文件：单进程 Go 二进制，纯 Go 依赖（modernc.org/sqlite），CGO 关闭即可交叉编译。
+# 每次 tag push 由 .github/workflows/release.yml 触发；Release 正文由 CHANGELOG.md 提取注入
+# （goreleaser release --release-notes=<generated>），不用 github 自动生成的 commit 列表。
 builds:
   - id: motd
     main: ./cmd/server
     binary: motd
     env:
       - CGO_ENABLED=0
+    # -trimpath 去掉本地绝对路径，配合 mod_timestamp 得到可复现构建。
+    flags:
+      - -trimpath
+    # main.version 是 cmd/server/main.go:34 的版本变量；/healthz 与 /stats 回显它。
+    # -s -w 去符号表与调试信息，缩小下载体积（与 OPS.md 生产构建口径一致）。
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    # 用提交时间而非构建时间作为二进制时间戳，保证同一 tag 复现出相同产物。
+    mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - linux
       - windows
@@ -18,6 +30,8 @@ builds:
 
 archives:
   - id: default
+    # 归档名带版本与平台，用户下载后一眼可辨：motd_0.10.0_linux_amd64.tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     format_overrides:
       - goos: windows
@@ -30,8 +44,12 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# 正常由 workflow 注入 --release-notes（CHANGELOG 提取段）；此处保留 github-native
+# 仅作为「本地手动 goreleaser release」未带 notes 参数时的兜底，不影响自动流程。
 changelog:
   use: github-native
 
 release:
   prerelease: auto
+  # 不重复覆盖 Release 正文：--release-notes 注入的 CHANGELOG 段是唯一来源。
+  mode: replace

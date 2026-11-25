@@ -419,6 +419,8 @@ find data/backups -name 'motd-*.db' -mtime +14 -print
 
 ### 9.1 构建：两条路径，版本必须注入
 
+> **公开下载用的跨平台产物走自动流程**：推送 `v*` tag 由 `.github/workflows/release.yml` 用 GoReleaser 构建 6 个平台归档（linux / windows / darwin × amd64 / arm64）+ `checksums.txt`，Release 正文从 `CHANGELOG.md` 对应版本段自动提取。用户可在 GitHub Releases 页直接下载；版本号经 `-X main.version=` 注入（`/healthz` 回显）。下文两条路径是**自行部署到目标机**时的手工方式，与自动产物互为补充；发版触发步骤见 `CONTRIBUTING.md`「自动发版」。
+
 **路径 A（原约定）：本地交叉编译后上传。** 适合本地网络好、目标机不便装 Go 的场景。
 
 ```bash

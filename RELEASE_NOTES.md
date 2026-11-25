@@ -1,3 +1,44 @@
+## v0.10.1
+
+**发布日期**：2026-11-25
+**Git tag**：`v0.10.1`（待打）
+**Module**：`github.com/jeeinn/motd`
+
+> 补丁版本：新增跨平台自动发版能力，本版为自动发版流水线的首个实战验证。无业务功能变更、无 schema 迁移、无新依赖、无新环境变量、无键位/渲染改动。
+
+> 注：本 Release 的正文由 workflow 从 `CHANGELOG.md` 的 `[0.10.1]` 段自动提取；本文件作为仓库内的发版说明存档，两者内容一致。
+
+## 本次发布概览
+
+### 一、跨平台自动构建
+
+推送 `vMAJOR.MINOR.PATCH` 标签后，GitHub Actions 自动构建 **linux / windows / darwin × amd64 / arm64 共 6 个归档** 与 `checksums.txt`，用户可在 Releases 页直接下载对应平台的程序。权限最小化，产物数量与校验和在 workflow 内校验，缺一即失败。
+
+### 二、Release 正文自动抓取 CHANGELOG
+
+`scripts/extract_release_notes.py` 按 `## [x.y.z]` 精确切出版本段作为 Release 正文，不再用 GitHub 默认 commit 列表。CHANGELOG 未登记该版本则 workflow 失败，避免发出没有说明的 Release。
+
+### 三、可复现构建与版本注入
+
+二进制注入真实版本号（`/healthz`、`/stats` 回显，不再是 `dev`），`-trimpath` 与提交时间戳保证同一 tag 复现出相同产物。归档名带版本与平台，便于识别下载。
+
+## 破坏性变更
+
+无。命令集合、权限、数据契约、键位、渲染契约不变；生产部署仍按 `docs/OPS.md` 单独执行，不随 Release 自动上线。
+
+## 验证
+
+- 6 平台交叉编译全部成功（12–13 MB/个）；注入版二进制 `/healthz` 回显 `0.10.0`、`version=0.10.0` 日志确认 ldflags 生效。
+- CHANGELOG 提取脚本 4 项边界测试通过（正常 / 版本不存在 fail-fast / Unreleased 拒绝 / 无 v 前缀）。
+- workflow 与 goreleaser 配置经 YAML 解析与关键字段语义校验；四门禁全绿、25 包测试通过。
+- 本 tag 由 workflow 首次实战验证：自动构建产物与 Release 正文提取以 CI 实际结果为准。
+
+## 变更明细
+
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.10.1]` 段；流程说明见 [`CONTRIBUTING.md`](CONTRIBUTING.md)「自动发版」与 `docs/OPS.md` §9.1。
+
+---
+
 ## v0.10.0
 
 **发布日期**：2026-11-25
