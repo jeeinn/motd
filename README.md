@@ -131,7 +131,7 @@ internal/
   infrastructure/        sqlite / github / email —— 外部实现
   presentation/          terminal（分层安全渲染）/ browser（规划中）
   plugin/                registry / events / demo / social —— 编译期注册、事件分化
-docs/                    版本说明、发布文档、eggs.md（彩蛋清单）、ROADMAP.md（路线图）
+docs/                    决策（DECISIONS.md）、运维（OPS.md）、路线图（ROADMAP.md）、彩蛋（eggs.md）、归档（archived/）
 scripts/                 备份恢复脚本
 ```
 

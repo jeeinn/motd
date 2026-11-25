@@ -94,11 +94,15 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | `CONTRIBUTING.md` | 开发约定、提交前门禁、PR 规范 | 任何提交前 |
 | `docs/DECISIONS.md` | ADR-001~072，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
 | `docs/OPS.md` | 部署、备份恢复、演练记录、监控告警；§9 实战部署清单、§10 AI 智能体自动部署指南 | 改运维相关 / 部署；智能体执行远程部署前**必读 §10** |
-| `docs/P0-PLAN.md` / `PHASE1-PLAN.md` / `PHASE2-PLAN.md` / `P2-PLAN.md` | 各阶段计划与完成状态（历史快照，不回改） | 追溯需求来源 |
+| `docs/ROADMAP.md` | 未实施方向的单一入口：待办总览（R-01~R-13）+ 逐项详情 + 已否决项 | **排期或接新需求前必读**，避免重复评估已否决项 |
+| `docs/archived/` | 已完成的设计稿与阶段计划（P0/PHASE1/PHASE2/P2/P3/P4/P4.5、6 份 DESIGN、原始评审稿），索引见其 `README.md` | 追溯需求来源 / 查历史方案 |
 | `docs/MVP-DELIVERY.md` | MVP 交付复盘（D1~D7 判定） | 理解项目起点 |
 | `docs/DEVIATIONS.md` | 对设计评审稿的偏差登记 | 改设计相关 |
+| `docs/eggs.md` | 彩蛋清单、实现位置与未做项 | 改彩蛋 |
 | `CHANGELOG.md` / `RELEASE_NOTES.md` | 变更记录 / 当前版本说明 | 发版 |
 | `docs/images/` | README 引用的截图，命名规范见其 README | 新增截图 |
+
+**归档约定**：设计稿对应功能发版、结论固化进 ADR 后移入 `docs/archived/`，并把未完成项迁到 `docs/ROADMAP.md`。历史 ADR 中以 `docs/xxx.md` 行内代码引用的旧路径**不回改**（`DECISIONS.md` 是历史原文），查同名文件到 `docs/archived/`。
 
 **惯例**：历史结论不删改，只标注"已修订"并追加新 ADR / 新章节。新增 ADR 从当前最大号顺延（现为 ADR-072）。
 

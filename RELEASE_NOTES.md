@@ -63,7 +63,7 @@
 
 ## 变更明细
 
-见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.9.0]` 段；[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-069（方案 B 追加重建）、ADR-070（物理行模型 + i18n 基建）、ADR-071（视口有界重绘）、ADR-072（全屏干净重绘，修订 ADR-027 白名单边界）；设计稿 [`docs/DESIGN-v090-display-i18n.md`](docs/DESIGN-v090-display-i18n.md) 与 [`docs/DESIGN-clean-redraw.md`](docs/DESIGN-clean-redraw.md)。
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.9.0]` 段；[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-069（方案 B 追加重建）、ADR-070（物理行模型 + i18n 基建）、ADR-071（视口有界重绘）、ADR-072（全屏干净重绘，修订 ADR-027 白名单边界）；设计稿 [`docs/archived/DESIGN-v090-display-i18n.md`](docs/archived/DESIGN-v090-display-i18n.md) 与 [`docs/archived/DESIGN-clean-redraw.md`](docs/archived/DESIGN-clean-redraw.md)。
 
 ---
 
@@ -119,4 +119,4 @@
 
 ## 变更明细
 
-见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.8.4]` 段、[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-068，以及决策文档 [`docs/DESIGN-hint-reply-focus.md`](docs/DESIGN-hint-reply-focus.md)。
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.8.4]` 段、[`docs/DECISIONS.md`](docs/DECISIONS.md) 的 ADR-068，以及决策文档 [`docs/archived/DESIGN-hint-reply-focus.md`](docs/archived/DESIGN-hint-reply-focus.md)。
