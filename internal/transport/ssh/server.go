@@ -446,7 +446,11 @@ func (s *Server) handleSession(ctx context.Context, nch gossh.NewChannel, p auth
 					_ = req.Reply(false, nil)
 					continue
 				}
-				sess.setSize(r.Columns, r.Rows)
+				// R-09：尺寸真的变了才通知 Handler 重绘当前页。transport 只投递
+				// 信号、不在这里 Write 终端，避免与按键回显交错或并发读写页面状态。
+				if sess.setSize(r.Columns, r.Rows) {
+					sess.notifyResize()
+				}
 				_ = req.Reply(true, nil)
 			case "shell":
 				_ = req.Reply(true, nil)

@@ -1,4 +1,4 @@
-// Package demo 是一个编译期注册的彩蛋插件（评审稿 v0.2 §3.4）。
+// Package demo 是一个编译期注册的成就插件（评审稿 v0.2 §3.4）。
 //
 // 它订阅 PostCreated，通过受限只读接口取主题标题作为 evidence，
 // 再向 application/user 申请「首次发帖」成就。插件不接触数据库：
@@ -18,12 +18,12 @@ import (
 const pluginName = "achievement.first-post"
 
 func init() {
+	// ADR-075：/fortune 彩蛋命令已删除。插件原本登记的 /fortune 元数据是命令表
+	// 里 /fortune 的实际来源（cmd 装配层优先采用插件元数据），随该命令一并删除；
+	// 本插件只剩「首次发帖」成就职责，不再登记任何命令。
 	registry.MustRegister(registry.Plugin{
-		Name:    pluginName,
-		Version: "0.1.0",
-		Commands: []registry.Command{
-			{Name: "/fortune", Usage: "/fortune", Description: "随机输出一句箴言（M3 接入命令分发）"},
-		},
+		Name:                pluginName,
+		Version:             "0.1.0",
 		DomainSubscriptions: []event.DomainEventType{event.EventPostCreated},
 		Handler:             firstPostHandler{},
 	})

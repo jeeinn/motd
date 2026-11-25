@@ -2,14 +2,14 @@
 
 > 本文件面向在本仓库工作的 AI 智能体与人类贡献者，记录**必须遵守的硬约束**与**易踩坑点**。
 > 与 `CONTRIBUTING.md` 分工：后者面向人类贡献者（提交规范、Issue 流程）；本文件额外强调智能体最容易违反的边界。
-> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~073）、`.github/workflows/ci.yml`、实际 git/代码状态。
+> 事实来源：`README.md`、`CONTRIBUTING.md`、`docs/DECISIONS.md`（ADR-001~076）、`.github/workflows/ci.yml`、实际 git/代码状态。
 
 ## 1. 项目定位
 
 SSH 优先的命令行论坛：用户 `ssh` 连入，用键盘与斜杠命令浏览版块、发帖、回复，**无需浏览器**。
 
 - Go module：`github.com/jeeinn/motd`，Go `1.26.3`
-- 当前版本：`v0.9.1`（2026-11-25），处于 `0.x`，对外契约未稳定
+- 当前版本：`v0.9.2`（2026-11-25），处于 `0.x`，对外契约未稳定
 - 单进程二进制：`cmd/server`（服务）+ `cmd/motdctl`（离线备份恢复）
 - 依赖极少：`golang.org/x/crypto`（SSH）、`modernc.org/sqlite`（纯 Go SQLite）。**非必要不引入新依赖**
 
@@ -29,7 +29,7 @@ internal/
 
 - **依赖单向**：`transport → application → domain`；`presentation → application`；`infrastructure` 实现 `application` 定义的接口；`domain` 不依赖任何上层。端口（接口）定义在**使用方**。
 - `internal/archtest/` 有一批静态守卫，违反依赖方向或安全渲染会直接测试失败。**改完先跑 archtest**。
-- 统计量级：1114 个测试函数，全量 `go test -count=1 ./...` 约 10 秒。
+- 统计量级：1133 个测试函数，全量 `go test -count=1 ./...` 约 10 秒。
 
 ## 3. 必须遵守的安全与实现约定
 
@@ -92,7 +92,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 | --- | --- | --- |
 | `README.md` | 用户入口：功能、安装、配置表、快速开始 | 改对外描述 / 配置 |
 | `CONTRIBUTING.md` | 开发约定、提交前门禁、PR 规范 | 任何提交前 |
-| `docs/DECISIONS.md` | ADR-001~073，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
+| `docs/DECISIONS.md` | ADR-001~076，所有已落地的技术决策与理由 | **做设计决策前必读**，避免推翻既有结论 |
 | `docs/OPS.md` | 部署、备份恢复、演练记录、监控告警；§9 实战部署清单、§10 AI 智能体自动部署指南 | 改运维相关 / 部署；智能体执行远程部署前**必读 §10** |
 | `docs/ROADMAP.md` | 未实施方向的单一入口：待办总览（R-01~R-13）+ 逐项详情 + 已否决项 | **排期或接新需求前必读**，避免重复评估已否决项 |
 | `docs/archived/` | 已完成的设计稿与阶段计划（P0/PHASE1/PHASE2/P2/P3/P4/P4.5、6 份 DESIGN、原始评审稿），索引见其 `README.md` | 追溯需求来源 / 查历史方案 |
@@ -111,7 +111,7 @@ go test -count=1 ./...                  # ④ Test（禁用缓存）
 - **`data/` 是本地运行时/演练目录**，被 `.gitignore` 排除；里面有 v7/v8 源码副本，**不要**格式化、不要提交、不要当生产代码改。
 - **`.env` 含真实凭据**（163 SMTP 授权码等），已被 `.gitignore` 排除；`motd.exe`、`bin/`、`dist/` 同理。任何 `git add` 都要先看 `git status`。
 - **配置文件真相源**：`internal/config/config.go`；`.env.sample` 是示例，新增环境变量两处都要登记 + README 配置表。
-- **README 环境变量计数**：改配置后同步更新（当前 24 个 `MOTD_*` + `MOTDCTL_BIN` = 25 项）。
+- **README 环境变量计数**：改配置后同步更新（当前 25 个 `MOTD_*` + `MOTDCTL_BIN` = 26 项）。
 - **CI 的 Node.js 20 deprecated 警告**不影响结果（actions 被强制跑在 Node 24），忽略即可。
 - **用户信息无 `display` 字段投影**：终端只显示 `@username`（v0.3.3 起），改显示契约按 ADR-014 三层守卫评估。
 - **回复计数用 `INDEXED BY idx_posts_thread`**：索引名硬绑定是已知技术债，重命名索引须同步改查询。

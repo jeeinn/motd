@@ -51,7 +51,27 @@ const (
 	accentANSI = "\x1b[34m" // 深蓝
 	noticeANSI = "\x1b[33m" // 琥珀
 	errorANSI  = "\x1b[31m" // 暗红
+	// v0.9.2 / ADR-076：/matrix 雨幕的两档绿。基础 SGR（不含 256 色与真彩），
+	// 与 ROADMAP §4「256 色 / 真彩明确不做」的决策一致——tmux/screen 无需任何
+	// 配置即可正确显示，不引入兼容性负债。
+	matrixHeadANSI = "\x1b[1;92m" // 亮绿 + 粗体：雨头
+	matrixTailANSI = "\x1b[2;32m" // 暗绿：拖尾
 )
+
+// MatrixHeadInk 返回雨头的 SGR（亮绿 + 粗体）。v0.9.2 / ADR-076。
+//
+// 独立 accessor 而非新增 Style 枚举：Style 是给用户内容映射用的选色通道，
+// 彩蛋色阶是服务端固定素材，不该占用那条通道（archtest/color_test.go 守门）。
+func MatrixHeadInk() string { return matrixHeadANSI }
+
+// MatrixTailInk 返回拖尾的 SGR（暗绿）。v0.9.2 / ADR-076。
+func MatrixTailInk() string { return matrixTailANSI }
+
+// ResetInk 返回显式复位序列（\x1b[0m）。
+//
+// SGR 状态在整帧内跨行保持（跳变式渲染），而 ED 2（\x1b[2J）**不重置 SGR**，
+// 因此退出整屏动画时必须显式发一次，否则绿色会漏到随后重绘的论坛页面上。
+func ResetInk() string { return resetANSI }
 
 func openANSI(s Style) string {
 	switch s {

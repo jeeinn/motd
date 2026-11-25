@@ -989,6 +989,8 @@
 - 关联：`P3-PLAN.md §7`（M6）、`ADR-015`（插件权限）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-014`（等级仅显示）。
 - **patch（v0.7.2，用户 2026-11-22 反馈）**：`/help` 里彩蛋命令被显示在「管理员命令（需白名单指纹授权）」标题之下，读者会误判权限。根因是排版边界而非分组误标：`eggRegistry` 没给彩蛋设 `Group`，`WithCommands` 把彩蛋 append 到内置表末尾（管理员组之后），而 `Help()` 只用一个 `inAdminGroup` bool、仅在首次遇到 `GroupAdmin` 时插说明行，之后再无分组边界。修法：新增 `command.GroupEgg` 与 `eggGroupHelpHeader`（「彩蛋命令（无需权限，纯娱乐）」），`Help()` 改用 `map[string]bool` 按分组首次出现插头，`eggRegistry` 两处构造（插件元数据 + `EggCommands()` 兜底）都补 `Group`。**未隐藏任何命令**：`?` 是彩蛋唯一发现入口（ADR-061 的「命令表唯一入口」），隐藏会让功能事实上不存在；`Group` 仍只是展示元数据，鉴权零变化。
 
+- **已修订（ADR-075，2026-11-25）**：本条登记的 6 条命令类彩蛋中，`/fortune`、`/xkcd`、`/blame` 及其语料已删除（用户 2026-11-25 要求）。命令表与 demo 插件元数据同步清理（`/fortune` 的实际元数据来源正是 demo 插件那条），`/cowsay`、`/sudo`、`/matrix` 与全部状态类成就保留；插件链路、命令表唯一入口、`GroupEgg` 分组机制均不变。
+
 ## ADR-062 v0.6.0 彩蛋扩展：签到、合规数字雨与按用户解锁隐藏版块
 
 - 状态：已采纳，v0.6.0 落地。用户 2026-11-21 拍板：做完剩余彩蛋 4/10/11，按方案 2（ViewContext 注入）实现 /dev/null 按用户解锁，版本定 0.6.0。
@@ -1245,6 +1247,8 @@
   5. 四门禁（gofmt / build / vet / test）+ 两条 SSH 闭环专项 + archtest 全绿。
 - 落地进度：地基（`safe.CursorHome` / `safe.ClearScreen` / `terminal.RenderCleanFrame` 与守卫放宽）`e68f44d`；页面与登录屏接入 `d5c2ec1`（`screenLines` 与 `invalidateScreen` 全仓清零）；彩蛋全屏动画 `dbce109`；本 ADR 及文档同步随阶段 5 提交。测试函数 1070 → 1085。
 - 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（本条修订其结论 2/3/4/5/6）、`ADR-034`、`ADR-062`、`ADR-066`（back 双渲染）、`ADR-068`、`ADR-069`、`ADR-070`、`ADR-071`（其视口钳制 / 帧末归位机制在目标态被取代）、`docs/DESIGN-clean-redraw.md`。
+- **已修订（ADR-074，2026-11-25）**：代价 / 边界 2「缩放后若用户不按键…下一次 `render()` 才对齐」已由 transport 通知 + handler 主循环重绘收口，整屏重绘机制本身不变。理由段「无需新增 SIGWINCH → `pageController` 通知钩子」仅针对**行数陈旧型错位**成立，不覆盖「不按键就不重绘」这一独立的即时性问题——后者仍需一条通知钩子，但钩子只投递信号、不直接写终端。
+- **已修订（ADR-076，2026-11-25）**：本条决策 8 中「彩蛋 `/matrix` 改真全屏动画」的**实现口径**已由 ADR-076 收口——从「逐帧追加一行、靠终端滚屏」改为「整屏铺满 + 每帧 `CUU` 回顶逐行覆盖」；白名单机制（无参 `H` / 无参 `2J`）与决策 1~7 不变。改口径的原因是追加式做不出雨头拖尾，且不限时会让 scrollback 以每秒十几行增长冲掉用户历史。
 
 ## ADR-073 v0.9.1 详情屏内容分页：正文与回复装进同一页序列（R-06）
 
@@ -1279,3 +1283,108 @@
 - 验证：新增 14 项测试（装箱 7 项、行高测量 4 项、真实 SQL 3 项、`Tail`/`Replies` 分页 7 项）+ 2 项真机回归（回复页不得重复渲染正文、有后续时不得显示"暂无回复"）。真实 SSH 80×24 实测（60 行正文 + 250 条回复 + 长标题）：每页 ≤ 24 行、正文按 1/17/33 行连续、20 页覆盖 250 条无重复、末页 `p` 真回第 1 页、长标题不溢出、回复后焦点落在刚发那条（序号 236..251 连续）。四门禁 + 两 SSH 闭环全绿，测试函数 1085 → 1114。
 - 落地进度：`a9460f4` 行高测量 + 装箱分页器 → `876521e` 查询链 → `90cf464` 页面接入 → `dc79c1f` 回复锚定 → `e4ffdc6` 真机实测修正。
 - 关联：`ADR-066` / `ADR-068`（焦点回填）、`ADR-070`（物理行模型）、`ADR-072`（整屏干净重绘）、`docs/DESIGN-detail-pagination.md`、`docs/ROADMAP.md` R-06。
+
+## ADR-074 resize 即时对齐：transport 只投信号、handler 主循环重绘（R-09）
+
+- 状态：**已采纳并实施（2026-11-25）**；R-09 为 S 级独立搭车项，v0.9.1 发版后补做，**随 v0.9.2 发布**（代码 `5a31ea4`）。
+- 性质：收口 `ADR-071` 代价 2 / `ADR-072` 边界 2 登记的已知边界；**不修订** ADR-072 的整屏重绘机制（澄清见该条末尾「已修订」标注）。
+- 背景：
+  1. ADR-072 让 `render()` 与上一屏行数解耦，但 `render()` 只由按键 / 解码器 ticker / 登录轮询触发；`window-change`（`internal/transport/ssh/server.go`）此前只 `setSize`。用户拖动窗口后不按键时，当前屏仍是旧宽度排版的字节、由终端自行重排，可能短暂错位，下一次交互才按新尺寸重画。
+  2. `window-change` 在 SSH 请求处理 goroutine 里执行，而页面状态（`pageController.screen` / `editor` / `emailFlow` / R-06 详情分页）归 `inputHandler.Serve` 主循环 goroutine 所有。由 transport 直接 `Write` 重绘会与正在进行的按键回显字节交错，且并发读写页面状态构成竞态。
+  3. R-09 在 `docs/ROADMAP.md` 标 S 级、独立、风险低；用户 2026-11-25 明确要求搭车做掉。
+- 决策：
+  1. `Session` 增容量 1 的 `resizeC chan struct{}`，导出只读 `ResizeNotify() <-chan struct{}`，内部 `notifyResize()` 用 `select` + `default` **非阻塞投递**。通道**永不关闭**：会话收口后请求 goroutine 可能仍在处理迟到的 `window-change`，关闭会让投递 panic；handler 退出靠 `Done()`。
+  2. `window-change` 分支：`setSize` 改为返回 `bool`（尺寸是否真的变化），仅变化时 `notifyResize()`；`pty-req` 仍只 `setWindow`、不投递（首帧由 handler 自己输出）。容量 1 天然合并窗口拖动期间的连续事件，handler 消费时读到的 `Window()` 已是最终尺寸。
+  3. **transport 绝不直接写终端**：只投递信号。`inputHandler.Serve` 主循环 `select` 增 `case <-sess.ResizeNotify():`，在自己的 goroutine 里调 `pc.render(sess)`，保持「只有一个 goroutine 写终端」——这是 ADR-026 回显净化与整屏帧字节顺序的前提，比给 `Session.Write` 加写锁更根本（写锁只能保字节不交错，保不住页面状态一致性）。
+  4. **只重绘、不重新取数、不改分页状态**：刻意不调 `pc.refresh()`——它对详情页会走 `showDetail()` 重置到第 1 页并重查库，也会覆盖登录 / 编辑器态。`pc.render` 读 `sess.Window()` 的新宽高、重画当前 `p.screen`，零 IO、零状态变更。
+  5. **交互态跳过**：新增纯函数 `resizeRedrawable(cl, pc, inLogin)`——命令输入 / 编辑器 / 登录 / 邮箱流程依赖「页面帧之后逐字节追加回显」，整屏 `H + 2J` 会抹掉用户已输入但尚未提交的内容；这些态跳过，下一次自然 `render` 对齐。
+  6. **不改 `pageSession` 接口**：主循环持有 `*sshd.Session`，fake `pageSession` 零改动；transport 不 import `presentation` / `cmd`，依赖方向与 archtest 守卫零改动。
+- 理由：
+  - 非阻塞 + 容量 1 合并：既不拖住 SSH 请求 goroutine，也不会在拖动窗口时产生重绘风暴。
+  - 信号与动作分离：通知钩子是 transport 的协议适配职责，重绘策略留在 handler，避免把 `presentation` 概念漏进传输层。
+  - 只重绘不取数：把 R-09 严格限制在「即时对齐」，不触碰 R-06 的分页状态机（那三条链的回归面已被 ADR-073 判定需独立验证）。
+- 代价 / 边界：
+  1. 详情页 resize 只按新宽度重绘**当前已装箱的一页**，不重算 `capacity` 分页装箱；用户按 `n` / `p` 或任意导航键后即按新容量重新组装。避免为对齐引入取数与页状态变更。
+  2. 命令输入 / 编辑器 / 登录 / 邮箱交互态不即时对齐，仍等下一次自然 `render`；这些态本身是追加式输出且多为短时状态。
+  3. `/matrix` 动画期间主循环阻塞在 `handle` 内，resize 通知会滞留通道；动画结束后主循环立即消费并重绘一次，与 `runMatrix` 返回后的重绘叠加成两次幂等整屏重绘（无害，不新增序列）。
+  4. 无新 ANSI 序列、无 schema 迁移、无新依赖、无新环境变量、无键位改动；白名单与 archtest 守卫零改动。
+  5. 线上 VPS 仍为 v0.9.0；本次改动随 v0.9.2 发布，升级需另行授权并留回退点。
+- 验证：
+  1. `internal/transport/ssh/resize_test.go`：通知合并 / 非阻塞 / 通道不关闭、`setSize` 尺寸变化语义、真实 SSH `window-change` 端到端投递（含 `pty-req` 不通知、重复尺寸不通知）。
+  2. `cmd/server/resize_test.go`：`resizeRedrawable` 6 项表驱动；真实 SSH + 真实 SQLite 端到端——resize 后不按键即收到新的 `H+2J` 整屏帧且仍是版块列表、命令输入态不重绘、取消命令态后恢复重绘。
+  3. 四门禁（gofmt / build / vet / test）+ 两条 SSH 闭环专项全绿；测试函数 1114 → 1119。
+- 落地进度：代码与测试 `5a31ea4`（`internal/transport/ssh/session.go`、`server.go`、`cmd/server/ssh_handler.go` + 两个新测试文件）；本 ADR / ROADMAP / AGENTS.md 随文档提交同步落地。**随 v0.9.2 发布**，回退点 `backup/pre-v0.9.2-20261125`。
+- 关联：`ADR-019`（信任域）、`ADR-026`（回显净化）、`ADR-027`（原地重绘语义）、`ADR-071` 代价 2、`ADR-072` 边界 2、`ADR-073`（详情分页状态机）、`docs/ROADMAP.md` R-09。
+
+## ADR-075 删除三条彩蛋命令：/fortune、/xkcd、/blame
+
+- 状态：**已采纳并实施（2026-11-25）**；用户明确要求删除这三个彩蛋命令及其功能。**随 v0.9.2 发布**。
+- 性质：缩减既有对外命令面（0.x 契约未冻结，允许收敛）。**不修订** ADR-061 的接入机制、ADR-062 的状态类成就、ADR-015 的插件边界——只移除三条命令与其语料。
+- 背景：
+  1. ADR-061（v0.5.1）一次登记 6 条命令类彩蛋：`/fortune`（20 条箴言）、`/cowsay`、`/xkcd`（12 条本地标题）、`/blame`（5 条甩锅模板，需 1 个参数）、`/sudo`、`/matrix`；本次只删前三条中的 fortune / xkcd / blame，后三条保留。
+  2. **`/fortune` 有两个元数据来源**：demo 插件登记的 `/fortune`（描述「随机输出一句箴言（M3 接入命令分发）」）与 `command.EggCommands()` 的同名条目；cmd 装配层 `eggRegistry` 优先采用插件元数据，故实际生效的是插件那一份。删除时必须两处同删，否则会留下「命令表声明了、却没有语料」的空壳。
+  3. `/blame` 是彩蛋中**唯一带参**的命令，参数只做个数校验、不回显（ADR-026）；删除后彩蛋组内不再有任何带参命令。
+- 决策：
+  1. **命令与语料同删**：`command.EggCommands()` 移除三条登记项；`fortunes` / `xkcdTitles` / `blameLines` 三组语料与 `Fortune()` / `XKCD()` / `Blame()` 三个导出函数一并删除——不留孤儿语料，避免误以为仍有该命令。
+  2. **demo 插件不再登记命令**：`internal/plugin/demo` 的 `Commands` 置空。该插件的真正职责是「首次发帖」成就（订阅 `PostCreated`），命令登记只是早期演示元数据，删除不影响成就链路。
+  3. **分发层同步收口**：`cmd/server` 的命令分发由 5 条彩蛋收敛为 `/cowsay`、`/sudo` 两条；`eggText()` 同步只覆盖这两条（`/matrix` 是整屏动画，不走 `eggText`）。
+  4. **保留项**：`/cowsay`、`/sudo`、`/matrix`、`/quit` 的 12% 告别语、全部状态类成就（`first_post` / `night_owl` / `first_vote` / `streak_7`）、Konami 解锁 `/dev/null`、`GroupEgg` 分组机制——一律不动。
+  5. **回归防护**：命令表层与 cmd 装配层各加一组断言——已删除的三个命令**不得再被解析**、`eggText` 不得再产出文案，防止后续合并把旧条目带回来。
+- 理由：
+  - 命令面收敛优先于「彩蛋数量」：三条命令信息密度低（随机语料），却各自占用一条 `/help` 位置与一份语料维护成本。
+  - 两处元数据来源必须同时清理：`eggRegistry` 的兜底合并逻辑（插件元数据优先、`EggCommands()` 补齐）会让「只删一处」变成隐形的半删除状态。
+  - `/blame` 删除后彩蛋组不再有带参命令，参数回显面（ADR-026）在本组内归零。
+- 代价 / 边界：
+  1. **对外契约缩减**：`/help` 不再列出这三条；已记住命令的老用户会得到「未知命令」提示。0.x 阶段可接受，若有用户依赖需在发版说明中点名。
+  2. **插件职责收窄**：`internal/plugin/demo` 不再有任何命令登记，只剩成就处理器；`registry.Plugin.Commands` 字段保留（其它插件仍可能使用）。
+  3. 无 schema 迁移、无新依赖、无新环境变量、无键位改动、无 ANSI 序列变化；白名单与 archtest 守卫零改动。
+  4. 历史 ADR / CHANGELOG 的相关记述按惯例**不删改**，只在本条与 `docs/eggs.md` 标注现状。
+- 验证：
+  1. `internal/application/command/eggs_test.go`：合并后的命令表只含 `/cowsay` `/sudo` `/matrix`；已删除的 `/fortune` `/xkcd` `/blame` 解析必须报错；语料表只剩 cowsay / sudo。
+  2. `internal/application/command/registry_test.go`：`GroupEgg` 分组顺序回归改用 `/cowsay` 作样本（原用 `/fortune`）。
+  3. `cmd/server/egg_test.go`：`eggText` 只覆盖 cowsay / sudo，已删除命令返回空串；`eggRegistry` 注入后已删除命令不可解析。
+  4. `internal/plugin/demo/demo_test.go`：断言插件不再登记任何命令，成就链路断言不变。
+  5. 四门禁 + 两条 SSH 闭环专项全绿。
+- 关联：`ADR-015`（插件权限）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-061`（彩蛋接入与命令合并）、`ADR-062`（彩蛋扩展）、`ADR-072`（整屏干净重绘）、`docs/eggs.md`。
+
+## ADR-076 v0.9.2 /matrix 电影化改造：ASCII 字符池、屏内覆盖动画与两档绿
+
+- 状态：**已采纳并实施（2026-11-25）**；用户拍板三项：**色深走 A（16 色两档绿）**、**默认时长 60s 兜底**（`MOTD_MATRIX_DURATION=0` 才不限时）、**并发上限 2**。**随 v0.9.2 发布**。
+- 性质：修订 ADR-072 中 `/matrix` 的**实现口径**（不推翻其白名单机制），并修掉三个此前一直未修的缺陷。**不修订** ROADMAP §4「256 色 / 真彩明确不做」的冻结决策。
+- 背景：
+  1. **字符集字形缺陷**：半角片假名（`U+FF61..`）在 Windows Terminal 默认字体无字形，回落字体被放大成全角 → 整行字符网格错位（P0 视觉缺陷）。
+  2. **宽度硬编码**：`matrixWidth = 60` 不看终端宽度，窄终端（<60 列）物理折行 → 每帧变 2 个物理行，帧数假设与退出复原全错位。
+  3. **退出口径与文案不符**：`/help` 写「按 Ctrl-C 可中断」，实现只认 Esc，且 `runMatrix` 消费了 `KeyCtrlC` 却只判 `KeyEsc`——Ctrl-C 被静默丢弃。
+  4. **时长过短**：逐帧追加 22~24 行、50ms/帧，动画总长约 1.1s。
+  5. **追加式做不出电影感**：append-only 无法回改已打印行，雨头拖尾无从谈起；且不限时会让 scrollback 以每秒十几行增长，把用户的论坛历史冲掉。
+  6. **逐字符渐变的带宽不可行**：80 列整屏逐字符 SGR，单帧 10 KB 以上，12fps 即超整站 1 Mbps 上行的九成。
+- 决策：
+  1. **字符池换纯 ASCII**：`A-Za-z0-9_|` 64 字符，每字 1 字节 1 列，跨终端零差异。
+  2. **雨幕改为状态机**（`command.MatrixRain`）：每列一个雨头往下推进，落地后随机等待再从顶部进入；拖尾是雨头上方若干格已生成的字符（下落过程中保持稳定）。**只产出字符 + 色阶的纯数据，不含 ESC**，颜色字节在 presentation 层组装（application 不 import presentation）。
+  3. **屏内覆盖动画**：进入清屏并铺满雨区 → 每帧 `\r` + `CUU(H-2)` 回雨区首行逐行重写 → **屏幕底行不写 CRLF**（否则触发滚屏、scrollback 增长）→ 退出清屏 + `ESC[0m` 复位。
+  4. **两档绿、跳变式上色**：`ESC[1;92m` 亮绿雨头 / `ESC[2;32m` 暗绿底色与拖尾。**空格也归入暗绿档**——视觉上不可见，却把每行的色阶跳变从几十次压到个位数（否则单帧从 2.4 KB 涨到 10 KB 以上）。雨柱隔列分布，使雨帘铺满全宽而每帧跳变受控。
+  5. **帧率 12fps（83ms）**：由带宽倒推——单帧约 2.4 KB × 12 ≈ 29 KB/s，占整站 1 Mbps 的两成多。
+  6. **时长兜底**：默认 60s（`MOTD_MATRIX_DURATION`），显式设 `0` 才不限时。`DurationEnv` 会把 <=0 回落默认值，无法表达「不限时」，故新增 `MatrixDurationEnv`。
+  7. **并发上限 2**：整站上行是共享资源，3~4 个并发即打满，届时全站论坛对所有人变慢；超出给固定提示，不进入动画。
+  8. **任意键中断**：动画期吞掉的按键会让用户以为界面卡死。提示行同步改为「[Esc 返回] · 任意键中断」。
+  9. **动画期 presence 心跳**：presence 只在 `Session.Read` 时刷新，超过 20s 未刷新会被 Reap 移出注册表（用户从在线名单消失）。
+  10. **动画期自检尺寸**：动画阻塞主循环，resize 通知（ADR-074）收不到，故每帧自读 `Window()`，尺寸变化即清屏重铺。
+- 理由：
+  - **两档绿而非 256 色**：电影 Matrix 的辨识度约九成来自「绿色 + 亮头 + 拖尾衰减 + 雨幕竖落」，不是色阶数；16 色在 tmux/screen 上零配置可用，而 256 色要求用户自配 `default-terminal`——为一层渐变引入兼容性负债不划算。
+  - **空格并入暗绿档**：这是带宽倒推出的设计，不是省事。空格着色视觉不可见，却把每行色段从几十个压到个位数，是「单帧 2.4 KB」与「单帧 10 KB+」的分界。
+  - **屏内覆盖而非追加**：追加式省带宽但做不出拖尾、还会冲掉 scrollback；屏内覆盖每帧多写约 2 KB，换来零 scrollback 增长与电影感。
+  - **并发上限是事故闸门**：单会话 29 KB/s 意味着 3~4 个并发即打满整站上行——那不是彩蛋事故，是全站论坛变慢。
+- 代价 / 边界：
+  1. 拖尾只有「暗 → 亮」两档，层次感弱于连续色阶——这是避开 256 色的代价。
+  2. 时长默认 60s，想长时间挂着需显式设 `MOTD_MATRIX_DURATION=0`。
+  3. 并发上限 2 时，第三个用户看到的是一句拒绝提示而不是动画。
+  4. 退出必须显式 `ESC[0m`（`ED 2` 不重置 SGR），漏了会让绿色漏到重绘后的页面。
+  5. 窄屏（<60 列）的真实观感仍由单测覆盖宽度换算——本机 SSH 客户端无法设置 pty 尺寸（沿用 v0.9.1 实测的同一限制）。
+  6. 无 schema 迁移、无新依赖、无键位改动；ANSI 白名单只增两条基础 SGR；archtest 的光标控制消费点允许集新增 `internal/presentation/terminal/matrix.go` 一个文件。
+- 验证：
+  1. 新增 `internal/application/command/matrix_test.go`：字符池恰为 64 个 ASCII、行宽等于传入宽度、初始帧全空格、雨头逐帧下移且拖尾在其上方、拖尾字符稳定、落地整列清空、单元格全为可打印 ASCII。
+  2. 新增 `internal/presentation/terminal/matrix_test.go`：进入帧前缀（`H`+`2J`+复位+提示）、每帧含 `CUU(H-2)` 且**帧末无 CRLF**、**单帧字节预算 4096**、退出帧必含复位、只用基础绿（断言无 `38;5;` / `38;2;`）、无任何禁止序列。
+  3. 改写 `cmd/server/ssh_handler_test.go` 的 6 项 matrix 断言（按帧计数而非按换行计数，消除对墙钟的依赖）+ 新增「任意键中断」「并发名额上限」两项；`mvp_e2e_test.go` 的自然结束断言改为客户端主动发 Esc。
+  4. **真实 SSH 实测**（临时实例 + ed25519 访客连接）：6 秒内 73 帧（≈12fps）、单帧 2.4 KB、**稳态 29.7 KB/s（占整站 24.4%）**；两档绿 SGR 均出现；无任何禁止序列；Esc 退出后末帧以 `H+2J` 开头且含「版块列表」与「/dev/ai」，页面干净复原；三个并发会话中前两个进入动画、第三个收到「已有其他会话在播放数字雨」且未进入动画。
+  5. 四门禁 + 两条 SSH 闭环专项全绿；测试函数 1119 → 1133。
+- 关联：`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-027`（ANSI 白名单）、`ADR-071`（帧末不写 CRLF）、`ADR-072`（整屏干净重绘）、`ADR-074`（resize 通知）、`docs/ROADMAP.md` R-02、`docs/eggs.md`。

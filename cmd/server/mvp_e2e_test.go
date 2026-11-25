@@ -495,8 +495,10 @@ func TestMatrixRedrawsPageAfterExit(t *testing.T) {
 	c.send(t, "/matrix\r")
 	c.out.waitSince(t, matrixMark, "[Esc 返回]")
 
-	// 动画自然结束（约 1.1s）后应重绘原页面：等页面专属中文标题出现。
+	// 动画可持续播放（v0.9.2：默认 60s 兜底，MOTD_MATRIX_DURATION=0 才不限时）：
+	// 由客户端主动发 Esc 退出，再断言原页面被重绘。
 	pageMark := c.out.mark()
+	c.send(t, "\x1b")
 	c.out.waitSince(t, pageMark, "版块列表")
 	segment := c.out.text()[pageMark:]
 	if !strings.Contains(segment, "/dev/ai") {
@@ -507,8 +509,8 @@ func TestMatrixRedrawsPageAfterExit(t *testing.T) {
 	if !strings.HasPrefix(last, "\x1b[H\x1b[2J") || !strings.Contains(last, "版块列表") {
 		t.Fatalf("退出后的最后一帧应是原页面: %q", last)
 	}
-	// 退出清屏紧跟重绘：两次连续 H+2J（前者由 defer 收口，后者由 render 发出）。
-	if !strings.Contains(c.out.text()[matrixMark:], "\x1b[H\x1b[2J\x1b[H\x1b[2J") {
+	// 退出清屏+复位紧跟重绘：两次连续 H+2J（前者由 defer 收口，后者由 render 发出）。
+	if !strings.Contains(c.out.text()[matrixMark:], "\x1b[H\x1b[2J\x1b[0m\x1b[H\x1b[2J") {
 		t.Fatalf("退出清屏后应紧跟页面重绘: %q", c.out.text()[matrixMark:])
 	}
 	cmdOnlyWhitelistedANSI(t, segment)

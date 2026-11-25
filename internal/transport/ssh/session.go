@@ -49,6 +49,11 @@ type Session struct {
 	hb       *time.Ticker
 	done     chan struct{}
 	once     sync.Once // 幂等关闭序列：固定文案 → exit-status → 关闭 channel
+
+	// resizeC 是窗口变化通知（容量 1）。transport 在 window-change 时非阻塞投递，
+	// handler 在自己的主循环里收到后重绘——保持「只有一个 goroutine 写终端」，
+	// 避免重绘字节与正在进行的按键回显交错（R-09）。
+	resizeC chan struct{}
 }
 
 // sessionHeartbeatInterval 是连接级心跳周期，取 presence 默认超时的一半。
@@ -109,7 +114,8 @@ func newSession(id string, ch gossh.Channel, fp, pk string, p auth.Principal, re
 	s := &Session{
 		id: id, ch: ch, fingerprint: fp, publicKey: pk, remoteIP: ip,
 		principal: p, reg: reg,
-		done: make(chan struct{}),
+		done:    make(chan struct{}),
+		resizeC: make(chan struct{}, 1),
 	}
 	// 默认挂进程级计数器：直接 newSession 的调用方（含单测）也有确定目标。
 	s.bw.Store(ProcessBandwidth())
@@ -310,10 +316,37 @@ func (s *Session) setWindow(term string, width, height uint32) {
 	s.term, s.width, s.height = term, width, height
 }
 
-func (s *Session) setSize(width, height uint32) {
+// setSize 记录 window-change 的新尺寸，返回尺寸是否真的变化。
+// 尺寸未变时不必通知 Handler，避免一次冗余的整屏重绘。
+func (s *Session) setSize(width, height uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.width == width && s.height == height {
+		return false
+	}
 	s.width, s.height = width, height
+	return true
+}
+
+// ResizeNotify 返回窗口变化通知通道（容量 1，只读）。
+//
+// 分层约定（R-09）：transport 只投递信号，绝不直接重绘终端。页面状态归
+// Handler 的主循环 goroutine 所有；若由 window-change 的请求处理 goroutine
+// 直接 Write，重绘字节会与正在进行的按键回显交错，且读写页面状态构成竞态。
+// Handler 在自己的主循环里收到信号后自行重绘，全程「只有一个 goroutine
+// 写终端」。
+//
+// 通道永不关闭：会话收口后请求 goroutine 可能仍在处理迟到的 window-change，
+// 关闭会让非阻塞投递 panic。Handler 退出靠 Done()，不依赖本通道关闭。
+func (s *Session) ResizeNotify() <-chan struct{} { return s.resizeC }
+
+// notifyResize 非阻塞投递一次窗口变化通知。容量 1 天然合并窗口拖动期间的
+// 连续事件：Handler 消费时读到的 Window() 已是最终尺寸。
+func (s *Session) notifyResize() {
+	select {
+	case s.resizeC <- struct{}{}:
+	default:
+	}
 }
 
 // ptyRequest / windowChange 是 RFC 4254 的载荷结构，字段名供 ssh.Unmarshal 使用。

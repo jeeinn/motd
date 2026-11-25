@@ -7,7 +7,7 @@
 
 SSH 优先的终端论坛。用户 `ssh` 上来，用键盘和斜杠命令浏览、发帖、回复；所有交互都在终端内完成，无需浏览器。
 
-- 版本：`v0.9.1`（2026-11-25）
+- 版本：`v0.9.2`（2026-11-25）
 - Go module：`github.com/jeeinn/motd`
 - 许可证：MIT
 
@@ -89,8 +89,9 @@ ssh -p 2222 localhost
 | `MOTD_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App 的 `client_id`；未设置时 `/login` 返回明确提示，不 panic、日志不回显值 |
 | `MOTD_AUTH_LIMIT_*` / `MOTD_AUDIT_*` | 见示例 | 认证限流与审计参数（P1 新增），共 6 项 |
 | `MOTD_ADMIN_FINGERPRINTS` | 空 | 管理员公钥指纹白名单（P2 新增），逗号分隔；留空 = 无人可管。比对已认证会话指纹，变更需重启生效 |
+| `MOTD_MATRIX_DURATION` | `60s` | `/matrix` 数字雨单次播放时长上限；填 `0` = 不限时（单会话约 30 KB/s，服务端另有并发上限 2） |
 
-全部环境变量（24 个 `MOTD_*` + 脚本用的 `MOTDCTL_BIN`，共 25 项）及其默认值见 [`.env.sample`](.env.sample)。复制为 `.env` 后按需修改：`cp .env.sample .env && chmod 600 .env`——**程序启动时会自动加载**（先当前目录、再可执行文件目录；进程已有环境变量优先、文件只填空缺），无需手动 source；可用 `MOTD_DOTENV_DISABLED=true` 关闭。凭证不要提交到仓库（`.gitignore` 已覆盖）。
+全部环境变量（25 个 `MOTD_*` + 脚本用的 `MOTDCTL_BIN`，共 26 项）及其默认值见 [`.env.sample`](.env.sample)。复制为 `.env` 后按需修改：`cp .env.sample .env && chmod 600 .env`——**程序启动时会自动加载**（先当前目录、再可执行文件目录；进程已有环境变量优先、文件只填空缺），无需手动 source；可用 `MOTD_DOTENV_DISABLED=true` 关闭。凭证不要提交到仓库（`.gitignore` 已覆盖）。
 
 ## 开发
 

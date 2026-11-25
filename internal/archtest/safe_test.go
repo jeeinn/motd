@@ -154,7 +154,8 @@ func TestCursorControlGuardRejectsForbiddenSequences(t *testing.T) {
 			t.Errorf("禁止序列被误判为合法: %q", s)
 		}
 	}
-	for _, s := range []string{"\x1b[0m", "\x1b[1;4m", "\x1b[K", "\x1b[%dA", "\x1b[H", "\x1b[2J"} {
+	for _, s := range []string{"\x1b[0m", "\x1b[1;4m", "\x1b[K", "\x1b[%dA", "\x1b[H", "\x1b[2J",
+		"\x1b[1;92m", "\x1b[2;32m"} { // v0.9.2 / ADR-076：/matrix 两档绿
 		if !allowedANSI(s) {
 			t.Errorf("白名单序列被误拒: %q", s)
 		}
@@ -182,15 +183,17 @@ func TestUserContentPathHasNoCursorControl(t *testing.T) {
 	}
 }
 
-// TestCursorControlsOnlyUsedByFrame 保证光标/清屏控制只有一个消费点：
-// presentation/terminal 的 frame.go（RenderFrame / RenderCleanFrame）。
+// TestCursorControlsOnlyUsedByFrame 保证光标/清屏控制只在受控消费点出现：
+// presentation/terminal 的 frame.go（RenderFrame / RenderCleanFrame）与
+// matrix.go（/matrix 屏内雨帘帧组装，v0.9.2 / ADR-076）。
 // cmd 层只通过它们间接使用。
 func TestCursorControlsOnlyUsedByFrame(t *testing.T) {
 	root := findModuleRoot(t)
 	internalDir := filepath.Join(root, "internal")
 	allowed := map[string]bool{
 		"internal/presentation/terminal/safe/ansi.go": true, // 定义处
-		"internal/presentation/terminal/frame.go":     true, // 唯一调用处
+		"internal/presentation/terminal/frame.go":     true, // 页面整屏重绘
+		"internal/presentation/terminal/matrix.go":    true, // /matrix 屏内雨帘（v0.9.2）
 	}
 	calls := []string{"CursorUp(", "ClearToEOL(", "CursorHome(", "ClearScreen("}
 	err := filepath.WalkDir(internalDir, func(path string, d fs.DirEntry, err error) error {

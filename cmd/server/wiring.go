@@ -14,7 +14,7 @@ import (
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/domain/event"
 	"github.com/jeeinn/motd/internal/infrastructure/sqlite"
-	_ "github.com/jeeinn/motd/internal/plugin/demo" // 编译期注册：首次发帖成就 + /fortune 彩蛋
+	_ "github.com/jeeinn/motd/internal/plugin/demo" // 编译期注册：首次发帖成就
 	"github.com/jeeinn/motd/internal/plugin/events"
 	"github.com/jeeinn/motd/internal/plugin/registry"
 	_ "github.com/jeeinn/motd/internal/plugin/social" // 编译期注册：夜行者 / 首次被投票成就
@@ -46,7 +46,8 @@ func eggRegistry(plugins []registry.Plugin) (*command.Registry, error) {
 		}
 	}
 	// 兜底：把 EggCommands 里声明但插件元数据未登记的命令一并合入，
-	// 避免两处清单漂移（demo 插件当前只登记 /fortune）。
+	// 避免两处清单漂移（ADR-075：/fortune 随插件元数据一并删除后，
+	// demo 插件已不登记任何命令，彩蛋命令全部来自 EggCommands）。
 	seen := make(map[string]bool, len(eggs))
 	for _, e := range eggs {
 		seen[e.Name] = true

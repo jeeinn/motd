@@ -57,15 +57,5 @@ func TestKonamiSingleArrowNoTrigger(t *testing.T) {
 	}
 }
 
-func TestMatrixFrameSafe(t *testing.T) {
-	s := MatrixFrame()
-	if len(s) == 0 {
-		t.Error("MatrixFrame 不应为空")
-	}
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			t.Errorf("MatrixFrame 含控制字符: %q", r)
-			break
-		}
-	}
-}
+// 注：/matrix 的字符池与雨幕状态机回归已迁至 matrix_test.go
+// （v0.9.2 / ADR-076：字符池换 ASCII 池、雨幕改为状态机）。
