@@ -1421,3 +1421,32 @@
   2. 既有 flow 单测零改动全绿（notice 指针为 nil 时行为不变）；四门禁 + 两条 SSH 闭环专项全绿；archtest 全绿（未改 ANSI 白名单）。
   3. 专家团评审：全栈研发师给出"可行但不推荐 B、推荐 C1a"的 P0 结论，质量测试官给出可见性判据与测试方案；两个阻塞项（白名单扩展口径、可见性可测口径）经用户拍板关闭。
 - 关联：`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-072`（整屏干净重绘，本条澄清其决策 7）、`ADR-027`（ANSI 白名单）、`cmd/server/email_visibility_e2e_test.go`。
+
+## ADR-078 v0.10.0 `/game` 游戏指令与排行榜：立项决策与 V1.0 范围
+
+- 状态：**已立项（2026-11-25），未实施**。用户拍板立项 R-14，四项决策均按推荐；专家团（产品 / 研发 / 运营）三轮方案评审收敛。**尚未写任何代码、未迁移、未提交**。
+- 性质：立项决策 + 范围界定。本文只固化"做什么、不做什么、为何如此裁剪"，实施细节（状态机接口、DDL 逐字、埋点字段集）留到开工时按本文边界展开。
+- 背景：现有彩蛋（`/cowsay`、`/sudo`、`/matrix` 等）均为一次性无状态玩笑，无复玩闭环；论坛已有 karma/等级、签到成就等成长心理基础设施，缺娱乐内容承接。用户诉求：`/game` 指令 + 3 款经典终端摸鱼游戏 + 排行榜记分。
+- 目标：给论坛用户无聊时的短时消遣，用"刷新个人最佳 + 看榜首易主"补回访钩子（Retention），**不承担获客**（SSH 有门槛，玩小游戏不足以拉新）。
+- 决策（用户拍板 4 项）：
+  1. **立项** R-14 + 本 ADR。
+  2. **MVP 做 2 款**：2048（回合制、一键一帧）+ Snake（输入驱动渲染）；扫雷 V1.1。
+  3. **每日计分上限 10 局**：每用户每游戏每日前 10 局计入榜单，第 11 局起仍可玩、显示分数、留埋点，但两榜不计。
+  4. **`/stats` 游戏榜段放 V1.1**：不进 V1.0 MVP。
+- 范围裁定（团长裁决，防止过度设计）：
+  1. **V1.0 两表**：`game_scores`（含 `is_counted` 留痕列）+ `game_leaderboard_week`。`game_events` 埋点表、`session_start` 分母、TelemetryBuffer、`/stats` 游戏榜段、历史荣誉墙独立表**全部 V1.1**。理由：这是 1 Mbps 小 VPS、在线个位数的摸鱼功能；全套埋点流水线 + 定时聚合会把 M（5–7 人日）抬成 M~L（8–13 人日），收益不匹配。
+  2. **周榜用结算增量 UPSERT**，不用定时器全表重算、不设缓存：`game_end && counted` 时在同一 `WriteTx` 写 `game_score` + UPSERT 周表 `best_score=MAX`；零延迟、零定时组件，且 `archtest/state_machine_test.go` 守卫 application 禁起 ticker，定时方案会撞守卫。rank 不落库、查询期派生；总榜从周表 `MAX` 聚合，不建新表。
+  3. **治理"超限局绕过上限"陷阱**：`is_counted=false` 的超限局也**必须写 `game_scores`**（带标记），因为 `CountToday` 数的是该表当日行数；否则第 12 局被误判"当日仅 10 局"而绕过上限。`is_valid`（有效局门槛）在 domain 纯函数，`is_counted` 在 application 读 `CountToday<10`；计数 + 写分 + UPSERT 同一 `WriteTx`，靠 ADR-010 单 worker 串行保证原子。
+  4. **两榜口径一致**：周榜与总榜**均只聚合 `is_counted=true`**；最佳成绩制（当周单局最高分，不累加）。
+  5. **访客可玩不上榜**：只 `IsUser()` 上榜；分数由服务端状态机算出，`Submit` 端口无分数入参（防伪造）；`game_scores.user_id` 非空。
+- 技术底线（实施时不可省）：安全渲染——棋盘/固定文案走 `RenderSystem`、用户名逐段 `RenderUser`（`archtest/author_projection_test.go` 静态守卫，裸拼 `strings.Builder` 会判失败）、game name 零回显原始输入（错误分支照 `formatResult` 不回显 `inv.Args`，成功仅回显白名单常量）；接入用 game mode 状态机（类比 `emailFlow`，`pageController.game` + `handleOne` 分支，主循环不阻塞，Esc/presence/resize 走既有链路）；棋盘走 `RenderCleanFrame`（H+2J 整屏重绘，禁纯追加否则 scrollback 随步增长）；`/stats` 命令输出保持追加语义（ADR-072 决策 7），整屏重绘**仅用于棋盘**——两者不混，重演 ADR-077 的 P0 是不可接受的。
+- 参数（观察期可校准，非定值）：有效局门槛（2048 有效移动≥5 且得分≥4 / Snake 食物≥1）按周看 `is_valid=false` 占比校准（>30% 下调 / <5% 收紧，目标 5%–30%，不误伤新手优先）；每日上限 10 局为初始假设值。
+- 迁移：新增 `0012_game_scores.sql`（两表 + 两索引：`(game_key, score DESC, created_at, id)` 供 Top N、`(user_id, game_key, local_date)` 供限流）；须同步 `internal/infrastructure/sqlite/indexes_test.go` 的 want→`[1..12]`；不改历史迁移。
+- 代价 / 边界：
+  1. V1.0 无细粒度埋点，参与率/分群复访等指标需 V1.1 埋点表就位后才可测；周活分母不可复用 `login_success`（公钥重连不计登录，ADR-064），须用 `session_start` 事件。
+  2. 棋盘只用可打印 ASCII + 基础 16 色 SGR；256 色/真彩仍为 ROADMAP §4 冻结项，备用屏 / OSC / 3J 永禁。
+  3. 时限流靠内存计数（同 `SecurityGate` 先例），进程重启清零；MVP 可接受，若发现绕过再评估持久化。
+  4. 估工 M（约 5–7 人日），不含 V1.1 的埋点、扫雷、`/stats` 段。
+- 验证（实施时的验收方向，非本次已完成）：四门禁 + 两条 SSH 闭环专项；archtest 全绿（ESC 零内联、用户文本路径无光标控制）；限流陷阱专项（构造第 11、12 局断言上限不被绕过）；两榜口径断言（超限局不上榜）；真实 SSH 确认棋盘整屏重绘、退出复原论坛页、scrollback 零增长。
+- 关联：`ADR-010`（单写连接）、`ADR-019`（信任域）、`ADR-026`（零回显）、`ADR-027`（ANSI 白名单）、`ADR-046`（展示时区）、`ADR-057`（读时聚合）、`ADR-064`（重连不计登录）、`ADR-072`（整屏重绘）、`ADR-077`（终态文案可见性）、`docs/ROADMAP.md` R-14。
+
