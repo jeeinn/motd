@@ -551,6 +551,8 @@ systemctl status motd --no-pager -l | head -20
 
 `ProtectSystem=full` 下只有 `ReadWritePaths=/var/lib/motd` 可写；不要把数据目录留在 `/opt/motd/data`，否则运行期写库会被只读挂载挡住。
 
+**Description 版本标签**：unit `Description` 括号内的版本号仅作展示，不参与运行判定。跨版本升级后若标签滞后，可同步为新版本号；改 `Description` 只需 `systemctl daemon-reload`，**无需重启服务进程、不中断在线会话**。版本真相源以 `/healthz` 回显与构建时 `-X main.version=` 注入为准，不以 unit 标签为准。
+
 ### 9.4 启动自检（逐条留证）
 
 ```bash
