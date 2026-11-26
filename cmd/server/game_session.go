@@ -55,18 +55,22 @@ func newGameSession(svc *appgame.Service, key domgame.GameKey, userID int64) (*g
 
 // step 应用一次按键。返回 done=true 表示**用户确认退出**（调用方摘掉 pc.game 并复页）。
 //
-// 两态交互（2026-11-26 实测反馈修复）：
+// 两态交互（2026-11-26 实测反馈）：
 //   - 进行中：方向键/WASD 走一步；q/Esc/Ctrl-C 中途放弃并直接退出。
-//   - 结束态（over）：棋盘停在最后一帧并给出「得分 + 结算 + 按 Enter/ Esc 退出」
-//     提示；此时方向键一律忽略（不再喂领域机，否则 ErrSessionOver 会被当无效键
-//     静默重绘），只有 Enter / Esc / q / Ctrl-C 才确认退出。
+//   - 结束态（over）：棋盘停在最后一帧并给出「得分 + 结算 + Enter 再来一局 / Esc 退出」
+//     提示；方向键一律忽略（不再喂领域机，否则 ErrSessionOver 会被当无效键静默重绘）；
+//     **Enter 重开同款新局**（不返回论坛页），Esc / q / Ctrl-C 退出。
 func (g *gameSession) step(ctx context.Context, sess pageSession, m input.KeyMsg) (bool, error) {
 	if g.over {
-		// 结束态：Enter / Esc / q / Ctrl-C 确认退出，其余键（含方向键）保持结束画面。
-		if m.Kind == input.KeyEnter || isGameQuitKey(m) {
+		// Enter：重开一局（新棋盘、新分数，仍受每日 10 局限流约束）。
+		if m.Kind == input.KeyEnter {
+			return false, g.restart(sess)
+		}
+		// Esc / q / Ctrl-C：退出到论坛页。
+		if isGameQuitKey(m) {
 			return true, nil
 		}
-		return false, nil // 不重绘、不退出：避免方向键把用户直接弹回论坛页
+		return false, nil // 方向键等：保持结束画面，不重绘、不退出
 	}
 	// 进行中：q / Esc / Ctrl-C 中途放弃。
 	if isGameQuitKey(m) {
@@ -102,7 +106,7 @@ func (g *gameSession) advance(ctx context.Context, sess pageSession, dir domgame
 		g.over = true
 		g.running = false
 		notice := g.settleOnce(ctx, frame)
-		return false, g.renderFrame(sess, notice, "本局结束，按 Enter 或 Esc 退出")
+		return false, g.renderFrame(sess, notice, "本局结束，按 Enter 再来一局 / Esc 退出")
 	}
 	return false, g.renderFrame(sess, "")
 }
@@ -119,6 +123,22 @@ func (g *gameSession) tick(ctx context.Context, sess pageSession, now time.Time)
 	}
 	g.lastTick = now
 	return g.advance(ctx, sess, g.session.CurrentDirection())
+}
+
+// restart 在结束态按 Enter 时重开同款新局。新棋盘 + 新分数，所有会话态复位；
+// 仍受每日 10 局限流约束（新局照常写 game_scores，由 Store.CountToday 判定）。
+func (g *gameSession) restart(sess pageSession) error {
+	s, err := domgame.NewSession(g.session.Key())
+	if err != nil {
+		return err
+	}
+	g.session = s
+	g.over = false
+	g.settled = false
+	g.running = false
+	g.lastTick = time.Time{}
+	g.start = time.Now()
+	return g.renderFrame(sess, "")
 }
 
 // isGameQuitKey 是进行中/结束态通用的放弃键（q / Esc / Ctrl-C）。
@@ -173,7 +193,7 @@ func (g *gameSession) renderFrame(sess pageSession, notices ...string) error {
 		}
 	}
 	if !g.over {
-		// 结束态已有「按 Enter 或 Esc 退出」提示行，不再叠加领域的「按 q 退出」。
+		// 结束态已有「Enter 再来一局 / Esc 退出」提示行，不再叠加领域的「按 q 退出」。
 		hint := f.Hint
 		if g.session.Key() == domgame.KeySnake {
 			if !g.running {

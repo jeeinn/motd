@@ -143,8 +143,8 @@ var _ = command.GroupGame
 
 // ---- 游戏结束态交互回归（2026-11-26 实测反馈）----
 // 问题：原实现 frame.Over 时立即 return true → 调用方 pc.game=nil 复原论坛页，
-// 用户没看到最终得分/结算就被弹回。修复：结束态停留，Enter/Esc 才退出，
-// 方向键忽略。下面用例按此语义断言。
+// 用户没看到最终得分/结算就被弹回。修复：结束态停留，方向键忽略；
+// Enter 再来一局，Esc 退出（2026-11-26 键位调整）。
 
 func TestGameOverStateWaitsForConfirm(t *testing.T) {
 	ctx, h, _, pools, writer := setupMVPRuntime(t)
@@ -168,8 +168,8 @@ func TestGameOverStateWaitsForConfirm(t *testing.T) {
 		t.Fatalf("撞墙应进入结束态而非退出: done=%v err=%v", done, err)
 	}
 	out := sess.output()
-	if !strings.Contains(out, "本局结束，按 Enter 或 Esc 退出") {
-		t.Fatalf("结束帧应含确认退出提示: %q", out)
+	if !strings.Contains(out, "本局结束，按 Enter 再来一局 / Esc 退出") {
+		t.Fatalf("结束帧应含重开/退出提示: %q", out)
 	}
 	if !strings.Contains(out, "得分") {
 		t.Fatalf("结束帧应显示得分: %q", out)
@@ -185,10 +185,57 @@ func TestGameOverStateWaitsForConfirm(t *testing.T) {
 		t.Fatalf("结束态方向键应零输出，实际 %q", sess.output())
 	}
 
-	// 第三步：Enter 确认退出。
+	// 第三步：Enter 重开一局（不退出、状态复位、渲染新首帧）。
+	oldSession := gs.session
+	sess.reset()
 	done, err = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyEnter})
+	if err != nil || done {
+		t.Fatalf("Enter 应重开而非退出: done=%v err=%v", done, err)
+	}
+	if gs.session == oldSession || gs.over || gs.settled || gs.running {
+		t.Fatal("Enter 后应重建 session 并复位所有状态")
+	}
+	if !strings.Contains(sess.output(), "已暂停 · 按方向键开始") {
+		t.Fatalf("重开后应显示暂停态新首帧: %q", sess.output())
+	}
+
+	// 第四步：Esc 退出。
+	done, err = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyEsc})
 	if err != nil || !done {
-		t.Fatalf("Enter 应确认退出: done=%v err=%v", done, err)
+		t.Fatalf("Esc 应退出: done=%v err=%v", done, err)
+	}
+}
+
+// 结束态 Enter 重开后仍能正常结算写榜（新局独立计分，不继承旧局 settled）。
+func TestGameRestartResetsSettlement(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	h.gameSvc = appgame.NewService(sqlite.NewGameStore(pools, writer), nil, nil)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	inv, _ := h.reg.Parse("/game play snake")
+	h.runGame(ctx, sess, pc, inv)
+	gs := pc.game
+	gs.session.ForceStateForTest()
+	gs.running = true
+	_, _ = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyArrowRight}) // 撞墙结算
+	if !gs.over || !gs.settled {
+		t.Fatal("撞墙后应结算")
+	}
+	_, _ = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyEnter}) // 重开
+	if gs.settled || gs.over {
+		t.Fatal("重开应复位结算标记")
+	}
+	// 新局再次撞墙应能重新结算（不可因旧 settled 被跳过）。
+	gs.session.ForceStateForTest()
+	gs.running = true
+	_, _ = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyArrowRight})
+	var n int
+	if err := pools.QueryRowContext(ctx, `SELECT COUNT(*) FROM game_scores`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	// 两局都是无效局（未吃食物），本就不写榜；这里只断言流程不卡死。
+	if n != 0 {
+		t.Fatalf("无效局不应写榜，实际 %d 行", n)
 	}
 }
 
