@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jeeinn/motd/internal/application/auth"
+	appgame "github.com/jeeinn/motd/internal/application/game"
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
 	"github.com/jeeinn/motd/internal/config"
@@ -239,11 +240,14 @@ func run() error {
 	onUnlock := func(ctx context.Context, userID int64) error {
 		return checkInStore.UnlockSlug(ctx, userID, "/dev/null", time.Now())
 	}
+	// R-14 / ADR-078：游戏积分与榜单用例（gameStore 内部走同一 writer 单写队列）。
+	gameSvc := appgame.NewService(sqlite.NewGameStore(pools, writer), nil, cfg.DisplayLocation)
 	handler := newInputHandler().withDeviceFlow(deviceFlow).withDeviceAuth(deviceAuth).withLogin(login).
 		withForum(rt.Service, sqlite.NewUserStatusReader(pools), rt.Presence).
 		withSecurity(gate).withCommands(eggReg).withLoginHook(onLogin).
 		withStats(statsSvc).
 		withMatrixDuration(cfg.MatrixDuration).
+		withGame(gameSvc).
 		withUnlockHooks(onUnlock, checkInStore.UnlockedNodes)
 	sshSrv, err := sshd.New(sshd.Config{
 		Addr:     cfg.SSHAddr,

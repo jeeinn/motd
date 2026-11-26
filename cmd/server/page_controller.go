@@ -96,6 +96,9 @@ type pageController struct {
 	pendingEmail   string
 	pendingPurpose string
 	emailFlow      *emailFlow
+	// R-14 / ADR-078：game mode 每会话一份，非空时优先吃按键（类比 emailFlow）。
+	// 不进 viewmodel.Screen；退出后 pc.game=nil + render 复原原页。
+	game *gameSession
 	// v0.3.1：命令输入提示每会话只打一次。pageController 由 Serve 每连接新建，
 	// 所以重连是新会话、会重新打印一次；绝不放到进程级 inputHandler 上。
 	entryHintShown bool
