@@ -436,6 +436,18 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 				return nil
 			}
 		case <-ticker.C:
+			// R-14 Snake 自动移动：会话循环持有节奏（archtest 守卫状态机零 ticker）。
+			// tick 内部按 snakeStepInterval 节流，不影响 25ms 的 ESC 轮询。
+			if pc.game != nil {
+				done, err := pc.game.tick(ctx, sess, time.Now())
+				if err != nil {
+					_ = pc.fail(sess, err)
+				}
+				if done {
+					pc.game = nil
+					_ = pc.render(sess)
+				}
+			}
 			for _, m := range dec.Poll() {
 				if handleOne(m) {
 					return nil

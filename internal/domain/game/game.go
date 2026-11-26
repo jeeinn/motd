@@ -101,6 +101,16 @@ func NewSession(key GameKey) (*Session, error) {
 // Key 返回本局的游戏标识。
 func (s *Session) Key() GameKey { return s.key }
 
+// CurrentDirection 返回当前朝向（仅 Snake 有意义；2048 返回 DirRight）。
+// 供 cmd 层自动驱动用：暂停态结束、方向键启动后，会话循环按固定间隔
+// 用此方向调 Step 推进蛇身。领域机本身零 ticker（archtest 守卫）。
+func (s *Session) CurrentDirection() Direction {
+	if s.snake != nil {
+		return s.snake.dir
+	}
+	return DirRight
+}
+
 // Step 应用一次方向输入，返回本帧。结束态后再输入返回 ErrSessionOver。
 // 每帧输出由渲染层整屏重绘（RenderCleanFrame），scrollback 零增长。
 func (s *Session) Step(d Direction) (Frame, error) {
@@ -167,4 +177,13 @@ func (s *Session) frame() Frame {
 		valid = s.score >= 10 // 至少吃到 1 个食物
 	}
 	return Frame{Rows: rows, Score: s.score, Over: s.over, Valid: valid, Hint: hint}
+}
+
+// Turn 只更新当前朝向、不推进棋盘（Snake 专用；2048 为无操作）。
+// 供 cmd 层暂停态"按方向键开始"使用：先定方向，再由会话循环推进。
+// 180° 反向按 Snake 规则忽略，避免启动瞬间自撞。
+func (s *Session) Turn(d Direction) {
+	if s.snake != nil {
+		s.snake.turn(d)
+	}
 }

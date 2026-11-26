@@ -34,7 +34,16 @@ type gameSession struct {
 	// 最终得分与结算提示，等 Enter / Esc / q 确认再退出。方向键在结束态被忽略。
 	over    bool
 	settled bool // 结算只做一次（结束态可能多次按键，防重复写榜）
+
+	// Snake 自动移动（2026-11-26）：进入为暂停态，方向键启动后由会话循环
+	// 按固定间隔推进。节奏由 cmd 层持有（archtest 守卫状态机零 ticker）。
+	running  bool
+	lastTick time.Time
 }
+
+// snakeStepInterval 是蛇自动前进间隔。180ms ≈ 5.5 格/秒，手速可跟且不致瞬间撞墙；
+// 这是**会话循环**的节流值，不是状态机的定时器（ADR-078 / archtest 边界）。
+const snakeStepInterval = 180 * time.Millisecond
 
 func newGameSession(svc *appgame.Service, key domgame.GameKey, userID int64) (*gameSession, error) {
 	s, err := domgame.NewSession(key)
@@ -68,6 +77,21 @@ func (g *gameSession) step(ctx context.Context, sess pageSession, m input.KeyMsg
 		// 非方向键：重绘当前帧（忽略无效输入，不报错、不刷屏）。
 		return false, g.renderFrame(sess, "")
 	}
+	// Snake 暂停态：第一个方向键只设定朝向并启动自动移动，本次不推进蛇身
+	// （避免启动瞬间白走一格，用户还没反应就撞墙）。后续方向键负责改向。
+	if g.session.Key() == domgame.KeySnake && !g.running {
+		g.running = true
+		g.lastTick = time.Now()
+		// 设定方向但不移动：领域机没有"只转向"的公开方法，借 Step 前向一步后
+		// 立即回退不可行（有随机食物）。改为在 snakeState 加 Turn 方法（见下）。
+		g.session.Turn(dir)
+		return false, g.renderFrame(sess, "")
+	}
+	return g.advance(ctx, sess, dir)
+}
+
+// advance 推进一帧（方向键改向 / 自动 tick 共用），处理结束态与结算。
+func (g *gameSession) advance(ctx context.Context, sess pageSession, dir domgame.Direction) (bool, error) {
 	frame, err := g.session.Step(dir)
 	if err != nil {
 		return false, g.renderFrame(sess, "")
@@ -76,10 +100,25 @@ func (g *gameSession) step(ctx context.Context, sess pageSession, m input.KeyMsg
 		// 进入结束态：先结算一次，再把「得分 + 结算提示 + 确认退出提示」
 		// 渲染在最后一帧上，停留等用户确认，不立即返回论坛页。
 		g.over = true
+		g.running = false
 		notice := g.settleOnce(ctx, frame)
 		return false, g.renderFrame(sess, notice, "本局结束，按 Enter 或 Esc 退出")
 	}
 	return false, g.renderFrame(sess, "")
+}
+
+// tick 由会话循环（cmd 层）以固定节奏调用：Snake 启动后按当前方向自动前进。
+// 节流在本方法内做——主循环的 ESC-poll ticker 约 25ms，直接每次推进会太快。
+// ctx/sess 用于结算；返回是否因本 tick 退出（结束态不退出，恒 false）。
+func (g *gameSession) tick(ctx context.Context, sess pageSession, now time.Time) (bool, error) {
+	if g == nil || g.over || !g.running || g.session.Key() != domgame.KeySnake {
+		return false, nil
+	}
+	if now.Sub(g.lastTick) < snakeStepInterval {
+		return false, nil
+	}
+	g.lastTick = now
+	return g.advance(ctx, sess, g.session.CurrentDirection())
 }
 
 // isGameQuitKey 是进行中/结束态通用的放弃键（q / Esc / Ctrl-C）。
@@ -135,7 +174,15 @@ func (g *gameSession) renderFrame(sess pageSession, notices ...string) error {
 	}
 	if !g.over {
 		// 结束态已有「按 Enter 或 Esc 退出」提示行，不再叠加领域的「按 q 退出」。
-		b.WriteString(systemLine(f.Hint, safe.StyleDim))
+		hint := f.Hint
+		if g.session.Key() == domgame.KeySnake {
+			if !g.running {
+				hint = "已暂停 · 按方向键开始，蛇会自动前进"
+			} else {
+				hint = "方向键改向 · q 退出"
+			}
+		}
+		b.WriteString(systemLine(hint, safe.StyleDim))
 	}
 	return writeGameCleanFrame(sess, b.String())
 }

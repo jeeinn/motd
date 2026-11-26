@@ -6,6 +6,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jeeinn/motd/internal/application/command"
 	appgame "github.com/jeeinn/motd/internal/application/game"
@@ -155,8 +156,10 @@ func TestGameOverStateWaitsForConfirm(t *testing.T) {
 	h.runGame(ctx, sess, pc, inv)
 
 	// 构造必死：蛇头放到右边界、朝右，下一步撞墙。
+	// running=true 跳过暂停态首键（新语义：首个方向键只启动不推进）。
 	gs := pc.game
 	gs.session.ForceStateForTest()
+	gs.running = true
 
 	// 第一步：撞墙 → 进入结束态，但不退出。
 	sess.reset()
@@ -237,5 +240,100 @@ func TestGameTopAfterSubmitShowsScore(t *testing.T) {
 	}
 	if strings.Contains(out, "暂无记录") {
 		t.Fatalf("不应显示空榜: %q", out)
+	}
+}
+
+// ---- Snake 暂停态与自动移动（2026-11-26）----
+
+func TestSnakeStartsPausedAndDirectionKeyStarts(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	h.gameSvc = appgame.NewService(sqlite.NewGameStore(pools, writer), nil, nil)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	inv, _ := h.reg.Parse("/game play snake")
+	sess.reset()
+	h.runGame(ctx, sess, pc, inv)
+	if !strings.Contains(sess.output(), "按方向键开始") {
+		t.Fatalf("进入应为暂停态并提示开始: %q", sess.output())
+	}
+	gs := pc.game
+	if gs.running {
+		t.Fatal("刚进入不应自动运行")
+	}
+	headBefore := gs.session.Frame().Rows[5][5].Text // 初始蛇头位置标记
+
+	// 首个方向键：启动但不推进蛇身。
+	sess.reset()
+	done, err := gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyArrowRight})
+	if err != nil || done {
+		t.Fatalf("首键应启动不退出: done=%v err=%v", done, err)
+	}
+	if !gs.running {
+		t.Fatal("首键后应进入运行态")
+	}
+	if !strings.Contains(sess.output(), "方向键改向") {
+		t.Fatalf("运行态提示应更新: %q", sess.output())
+	}
+	headAfter := gs.session.Frame().Rows[5][5].Text
+	if headBefore != headAfter || gs.session.Frame().Rows[5][6].Text == "@" {
+		t.Fatalf("首键不应推进蛇身（@ 应仍在 x=5）: before=%q after=%q", headBefore, headAfter)
+	}
+}
+
+func TestSnakeTickAutoAdvancesWithThrottle(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	h.gameSvc = appgame.NewService(sqlite.NewGameStore(pools, writer), nil, nil)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	inv, _ := h.reg.Parse("/game play snake")
+	h.runGame(ctx, sess, pc, inv)
+	gs := pc.game
+	gs.running = true
+	now := time.Now()
+	gs.lastTick = now
+
+	// 间隔内 tick：不推进（蛇头仍在 x=5）。
+	sess.reset()
+	_, _ = gs.tick(ctx, sess, now.Add(50*time.Millisecond))
+	if sess.output() != "" {
+		t.Fatalf("节流期内应零输出，实际 %q", sess.output())
+	}
+	if gs.session.Frame().Rows[5][6].Text == "@" {
+		t.Fatal("节流期内蛇头不应移动")
+	}
+
+	// 超过间隔 tick：自动前进一步（@ 到 x=6）。
+	sess.reset()
+	_, _ = gs.tick(ctx, sess, now.Add(snakeStepInterval+10*time.Millisecond))
+	if !strings.Contains(sess.output(), "\x1b[H\x1b[2J") {
+		t.Fatal("自动推进应整屏重绘")
+	}
+	if gs.session.Frame().Rows[5][6].Text != "@" {
+		t.Fatalf("超间隔应自动前进一步到 x=6，实际第5行: %v", gs.session.Frame().Rows[5])
+	}
+}
+
+func TestSnakeDirectionKeyChangesHeading(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	h.gameSvc = appgame.NewService(sqlite.NewGameStore(pools, writer), nil, nil)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	inv, _ := h.reg.Parse("/game play snake")
+	h.runGame(ctx, sess, pc, inv)
+	gs := pc.game
+	// 首键向上：只启动并改向，不推进。
+	_, _ = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyArrowUp})
+	if gs.session.CurrentDirection() != domgame.DirUp {
+		t.Fatal("首键应改变朝向")
+	}
+	if gs.session.Frame().Rows[5][5].Text != "@" {
+		t.Fatal("首键不应推进蛇身")
+	}
+	// 下一次 tick 应沿新方向（向上）前进。
+	now := time.Now()
+	gs.lastTick = now.Add(-snakeStepInterval - time.Second)
+	_, _ = gs.tick(ctx, sess, now)
+	if gs.session.Frame().Rows[4][5].Text != "@" {
+		t.Fatal("自动推进应沿新方向向上")
 	}
 }

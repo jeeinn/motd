@@ -131,3 +131,11 @@ func (s *Session) ForceStateForTest() {
 		s.snake.food = point{x: 0, y: 0}
 	}
 }
+
+// turn 只设定朝向、不推进蛇身（供暂停态首键启动用）。180° 反向仍被忽略，
+// 与 step 的转向规则一致；未开始时调用只会改方向，不产生任何计分或碰撞。
+func (s *snakeState) turn(d Direction) {
+	if !opposite(d, s.dir) {
+		s.dir = d
+	}
+}
