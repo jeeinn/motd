@@ -30,6 +30,10 @@ type gameSession struct {
 	service *appgame.Service
 	userID  int64 // 0=访客（可玩不上榜）
 	start   time.Time
+	// R-14 游戏结束态：棋盘满/撞墙后不立即退页，先停在结束画面让用户看清
+	// 最终得分与结算提示，等 Enter / Esc / q 确认再退出。方向键在结束态被忽略。
+	over    bool
+	settled bool // 结算只做一次（结束态可能多次按键，防重复写榜）
 }
 
 func newGameSession(svc *appgame.Service, key domgame.GameKey, userID int64) (*gameSession, error) {
@@ -40,12 +44,24 @@ func newGameSession(svc *appgame.Service, key domgame.GameKey, userID int64) (*g
 	return &gameSession{session: s, service: svc, userID: userID, start: time.Now()}, nil
 }
 
-// step 应用一次按键。返回 done=true 表示本局结束（调用方摘掉 pc.game 并复页）。
+// step 应用一次按键。返回 done=true 表示**用户确认退出**（调用方摘掉 pc.game 并复页）。
+//
+// 两态交互（2026-11-26 实测反馈修复）：
+//   - 进行中：方向键/WASD 走一步；q/Esc/Ctrl-C 中途放弃并直接退出。
+//   - 结束态（over）：棋盘停在最后一帧并给出「得分 + 结算 + 按 Enter/ Esc 退出」
+//     提示；此时方向键一律忽略（不再喂领域机，否则 ErrSessionOver 会被当无效键
+//     静默重绘），只有 Enter / Esc / q / Ctrl-C 才确认退出。
 func (g *gameSession) step(ctx context.Context, sess pageSession, m input.KeyMsg) (bool, error) {
-	// 退出键：q / Esc / Ctrl-C。
-	if m.Kind == input.KeyEsc || m.Kind == input.KeyCtrlC ||
-		(m.Kind == input.KeyRune && (m.Rune == 'q' || m.Rune == 'Q')) {
-		return true, nil // 调用方负责 pc.render(sess) 复原原页
+	if g.over {
+		// 结束态：Enter / Esc / q / Ctrl-C 确认退出，其余键（含方向键）保持结束画面。
+		if m.Kind == input.KeyEnter || isGameQuitKey(m) {
+			return true, nil
+		}
+		return false, nil // 不重绘、不退出：避免方向键把用户直接弹回论坛页
+	}
+	// 进行中：q / Esc / Ctrl-C 中途放弃。
+	if isGameQuitKey(m) {
+		return true, nil
 	}
 	dir, ok := keyDirection(m)
 	if !ok {
@@ -57,34 +73,49 @@ func (g *gameSession) step(ctx context.Context, sess pageSession, m input.KeyMsg
 		return false, g.renderFrame(sess, "")
 	}
 	if frame.Over {
-		return true, g.settle(ctx, sess, frame)
+		// 进入结束态：先结算一次，再把「得分 + 结算提示 + 确认退出提示」
+		// 渲染在最后一帧上，停留等用户确认，不立即返回论坛页。
+		g.over = true
+		notice := g.settleOnce(ctx, frame)
+		return false, g.renderFrame(sess, notice, "本局结束，按 Enter 或 Esc 退出")
 	}
 	return false, g.renderFrame(sess, "")
 }
 
-// settle 结算：仅登录用户 + 有效局写榜；访客/无效局给固定提示。
-func (g *gameSession) settle(ctx context.Context, sess pageSession, frame domgame.Frame) error {
-	var notice string
+// isGameQuitKey 是进行中/结束态通用的放弃键（q / Esc / Ctrl-C）。
+func isGameQuitKey(m input.KeyMsg) bool {
+	return m.Kind == input.KeyEsc || m.Kind == input.KeyCtrlC ||
+		(m.Kind == input.KeyRune && (m.Rune == 'q' || m.Rune == 'Q'))
+}
+
+// settleOnce 结算：仅登录用户 + 有效局写榜；访客/无效局给固定提示。
+// settled 防重复——结束态多次按键只写一次榜。
+func (g *gameSession) settleOnce(ctx context.Context, frame domgame.Frame) string {
+	if g.settled {
+		return "本局已结算"
+	}
+	g.settled = true
 	if g.service != nil && g.userID > 0 && frame.Valid {
 		res, err := g.service.Submit(ctx, string(g.session.Key()), frame.Score, true, g.userID,
 			int(time.Since(g.start).Seconds()))
 		if err != nil {
-			notice = "成绩记录失败，本次未上榜"
-		} else if res.Counted {
-			notice = fmt.Sprintf("本局 %d 分，已计入周榜（/game top 查看）", frame.Score)
-		} else {
-			notice = "今日挑战次数已用完，明天再来刷新纪录"
+			return "成绩记录失败，本次未上榜"
 		}
-	} else if g.userID == 0 {
-		notice = "访客成绩不计榜，登录后可上榜"
-	} else {
-		notice = "本局未达上榜门槛"
+		if res.Counted {
+			return fmt.Sprintf("本局 %d 分，已计入周榜（/game top 查看）", frame.Score)
+		}
+		return "今日挑战次数已用完，明天再来刷新纪录"
 	}
-	return g.renderFrame(sess, notice)
+	if g.userID == 0 {
+		return "访客成绩不计榜，登录后可上榜"
+	}
+	return "本局未达上榜门槛"
 }
 
-// renderFrame 把领域帧组装成整屏文本并输出。
-func (g *gameSession) renderFrame(sess pageSession, notice string) error {
+// renderFrame 把领域帧组装成整屏文本并输出。notices 是可变行——每行独立走
+// RenderSystem 并单独补 CRLF，**绝不把 \r 拼进 RenderSystem 输入**（它拒绝控制字符，
+// 会静默丢弃整段，参见 writeGameBoard 的同类修正）。
+func (g *gameSession) renderFrame(sess pageSession, notices ...string) error {
 	var b strings.Builder
 	title := "motd · " + string(g.session.Key())
 	b.WriteString(systemLine(title, safe.StyleAccent))
@@ -96,11 +127,16 @@ func (g *gameSession) renderFrame(sess pageSession, notice string) error {
 	}
 	b.WriteString(systemLine(fmt.Sprintf("得分 %d", f.Score), safe.StylePlain))
 	b.WriteString("\r\n")
-	if notice != "" {
-		b.WriteString(systemLine("[提示] "+notice, safe.StyleNotice))
-		b.WriteString("\r\n")
+	for _, notice := range notices {
+		if notice != "" {
+			b.WriteString(systemLine("[提示] "+notice, safe.StyleNotice))
+			b.WriteString("\r\n")
+		}
 	}
-	b.WriteString(systemLine(f.Hint, safe.StyleDim))
+	if !g.over {
+		// 结束态已有「按 Enter 或 Esc 退出」提示行，不再叠加领域的「按 q 退出」。
+		b.WriteString(systemLine(f.Hint, safe.StyleDim))
+	}
 	return writeGameCleanFrame(sess, b.String())
 }
 

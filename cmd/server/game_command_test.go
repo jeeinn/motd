@@ -139,3 +139,80 @@ func TestGameBoardCommandShowsEmptyState(t *testing.T) {
 }
 
 var _ = command.GroupGame
+
+// ---- 游戏结束态交互回归（2026-11-26 实测反馈）----
+// 问题：原实现 frame.Over 时立即 return true → 调用方 pc.game=nil 复原论坛页，
+// 用户没看到最终得分/结算就被弹回。修复：结束态停留，Enter/Esc 才退出，
+// 方向键忽略。下面用例按此语义断言。
+
+func TestGameOverStateWaitsForConfirm(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	h.gameSvc = appgame.NewService(sqlite.NewGameStore(pools, writer), nil, nil)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	inv, _ := h.reg.Parse("/game play snake")
+	sess.reset()
+	h.runGame(ctx, sess, pc, inv)
+
+	// 构造必死：蛇头放到右边界、朝右，下一步撞墙。
+	gs := pc.game
+	gs.session.ForceStateForTest()
+
+	// 第一步：撞墙 → 进入结束态，但不退出。
+	sess.reset()
+	done, err := gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyArrowRight})
+	if err != nil || done {
+		t.Fatalf("撞墙应进入结束态而非退出: done=%v err=%v", done, err)
+	}
+	out := sess.output()
+	if !strings.Contains(out, "本局结束，按 Enter 或 Esc 退出") {
+		t.Fatalf("结束帧应含确认退出提示: %q", out)
+	}
+	if !strings.Contains(out, "得分") {
+		t.Fatalf("结束帧应显示得分: %q", out)
+	}
+
+	// 第二步：方向键在结束态必须被忽略（不退出、不重绘）。
+	sess.reset()
+	done, err = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyArrowLeft})
+	if err != nil || done {
+		t.Fatalf("结束态方向键不得退出: done=%v err=%v", done, err)
+	}
+	if sess.output() != "" {
+		t.Fatalf("结束态方向键应零输出，实际 %q", sess.output())
+	}
+
+	// 第三步：Enter 确认退出。
+	done, err = gs.step(ctx, sess, input.KeyMsg{Kind: input.KeyEnter})
+	if err != nil || !done {
+		t.Fatalf("Enter 应确认退出: done=%v err=%v", done, err)
+	}
+}
+
+func TestGameOverSettlesOnce(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	h.gameSvc = appgame.NewService(sqlite.NewGameStore(pools, writer), nil, nil)
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	inv, _ := h.reg.Parse("/game play snake")
+	h.runGame(ctx, sess, pc, inv)
+
+	gs := pc.game
+	gs.session.ForceStateForTest()
+	frame, err := gs.session.Step(domgame.DirRight)
+	if err != nil || !frame.Over {
+		t.Fatalf("应撞墙结束: over=%v err=%v", frame.Over, err)
+	}
+	_ = gs.settleOnce(ctx, frame)
+	second := gs.settleOnce(ctx, frame)
+	if second != "本局已结算" {
+		t.Fatalf("重复结算应返回已结算提示，实际 %q", second)
+	}
+	var n int
+	if err := pools.QueryRowContext(ctx, `SELECT COUNT(*) FROM game_scores`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n > 1 {
+		t.Fatalf("结算不得重复写榜，实际 %d 行", n)
+	}
+}

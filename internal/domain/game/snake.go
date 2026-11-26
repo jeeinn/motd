@@ -121,3 +121,13 @@ func (s *snakeState) cells() [][]Cell {
 	rows[s.food.y][s.food.x] = Cell{Text: "*", Ink: InkFood}
 	return rows
 }
+
+// ForceStateForTest 仅供跨包测试构造必死局面（蛇头贴右墙、朝右），
+// 生产代码永不调用。测试通过它避免依赖随机的蛇移动序列。
+func (s *Session) ForceStateForTest() {
+	if s.snake != nil {
+		s.snake.body = []point{{x: snakeWidth - 1, y: 5}}
+		s.snake.dir = DirRight
+		s.snake.food = point{x: 0, y: 0}
+	}
+}
