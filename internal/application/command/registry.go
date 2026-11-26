@@ -46,6 +46,13 @@ const adminGroupHelpHeader = "\r\n管理员命令（需白名单指纹授权）�
 // 人误以为「要管理员才能用」。分组只影响 /help 排版，Parse / 鉴权完全不看它。
 const GroupEgg = "egg"
 
+// GroupGame 标记 /game 子系统（R-14 / ADR-078）。它是有状态、多轮的正式功能，
+// 与无状态玩笑（GroupEgg）语义不同，故独立分组；但同样无需权限（访客可玩不上榜）。
+const GroupGame = "game"
+
+// gameGroupHelpHeader 是固定文案（不含用户数据），Help() 进入游戏分组前插一次。
+const gameGroupHelpHeader = "\r\n游戏命令（无需权限，访客可玩但不上榜）：\r\n"
+
 // eggGroupHelpHeader 是彩蛋分组的固定说明行（v0.7.2）。措辞明说「无需权限」，
 // 因为此前它们被排在管理员标题之下，读者会误判权限。
 const eggGroupHelpHeader = "\r\n彩蛋命令（无需权限，纯娱乐）：\r\n"
@@ -57,6 +64,8 @@ func groupHelpHeader(group string) string {
 		return adminGroupHelpHeader
 	case GroupEgg:
 		return eggGroupHelpHeader
+	case GroupGame:
+		return gameGroupHelpHeader
 	default:
 		return ""
 	}
@@ -124,6 +133,12 @@ var defaultCommands = []Command{
 	// 均为只读公开信息，所有人可见（含访客），不做管理员判定。
 	{Name: "whoami", Usage: "/whoami", Summary: "查看我的账号信息与等级", MaxArgs: 0, Aliases: []string{"me"}},
 	{Name: "who", Usage: "/who [页]", Summary: "查看当前在线人员（可分页）", MinArgs: 0, MaxArgs: 1},
+	// R-14 / ADR-078：游戏子系统。Name/Sub 来自注册表白名单，用户原始输入绝不回显。
+	{Name: "game", Usage: "/game", Summary: "游戏列表（2048 / snake）", MaxArgs: 0, Group: GroupGame},
+	{Name: "game", Sub: "list", Usage: "/game list", Summary: "列出可玩的游戏", MaxArgs: 0, Group: GroupGame},
+	{Name: "game", Sub: "play", Usage: "/game play <name>", Summary: "开始一局（2048 / snake）", MinArgs: 1, MaxArgs: 1, Group: GroupGame},
+	// /game top [game] 本周榜；/game top all [game] 历史荣誉墙（all 在 cmd 层解析）。
+	{Name: "game", Sub: "top", Usage: "/game top [all] [game]", Summary: "本周榜 / all=历史最佳", MinArgs: 0, MaxArgs: 2, Group: GroupGame},
 	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 
@@ -296,7 +311,13 @@ func (r *Registry) Parse(line string) (Invocation, error) {
 	args := fields[1:]
 	if r.subNames[name] {
 		// 子命令名同样来自注册表白名单；未知子命令只回固定错误，不回显原文。
+		// 例外：若该 name 另有一条 Sub=="" 的无参命令（如 /game=list），
+		// 无参输入命中它——这是"默认子命令"，对没有此条目的 node 行为不变。
 		if len(args) == 0 {
+			if idx, exists := r.byName[name]; exists {
+				c := r.cmds[idx]
+				return Invocation{Name: c.Name, Sub: "", Args: nil}, nil
+			}
 			return Invocation{}, ErrArgCount
 		}
 		sub = args[0]

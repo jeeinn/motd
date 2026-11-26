@@ -67,8 +67,8 @@ func TestNodesStatusBackfillsSeedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	// fresh 库会一路应用到最新（现为 12，含 v0.7.1 的 0011）；0008 的回填断言在下方可独立核验。
-	if version != 12 {
-		t.Fatalf("fresh 库迁移后版本应为 12，实际 %d", version)
+	if version != 13 {
+		t.Fatalf("fresh 库迁移后版本应为 13，实际 %d", version)
 	}
 	if !hasColumn(t, pools.writer, "nodes", "status") {
 		t.Fatal("0008 应用后 nodes 应有 status 列")

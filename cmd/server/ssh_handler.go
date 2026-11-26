@@ -13,6 +13,7 @@ import (
 	"github.com/jeeinn/motd/internal/application/auth"
 	"github.com/jeeinn/motd/internal/application/command"
 	"github.com/jeeinn/motd/internal/application/forum"
+	appgame "github.com/jeeinn/motd/internal/application/game"
 	"github.com/jeeinn/motd/internal/application/input"
 	"github.com/jeeinn/motd/internal/application/presence"
 	appuser "github.com/jeeinn/motd/internal/application/user"
@@ -50,6 +51,8 @@ type inputHandler struct {
 	logout *auth.LogoutService
 	// P1-M5 邮箱认证用例，进程级单例。
 	email *auth.EmailAuthService
+	// R-14 / ADR-078：游戏积分与榜单用例，进程级单例。
+	gameSvc *appgame.Service
 
 	// MVP 页面控制器依赖：进程级共享，每会话只复制状态不复制依赖。
 	forum    *forum.Service
@@ -131,6 +134,12 @@ func (h *inputHandler) withLogout(svc *auth.LogoutService) *inputHandler {
 // withEmail 注入 P1-M5 邮箱认证用例；保持无参构造，既有会话层测试零改动。
 func (h *inputHandler) withEmail(svc *auth.EmailAuthService) *inputHandler {
 	h.email = svc
+	return h
+}
+
+// withGame 注入游戏积分用例（R-14 / ADR-078），保持 newInputHandler() 无参构造。
+func (h *inputHandler) withGame(svc *appgame.Service) *inputHandler {
+	h.gameSvc = svc
 	return h
 }
 
@@ -284,7 +293,9 @@ func actionNotice(action cmdAction, pasteLen int) string {
 // 提交的内容，且这些流程各有自己的呈现器，pc.screen 未必是它们当前显示的屏。
 // 因此只在纯浏览态重绘；其余状态保持现状，下一次自然 render 会对齐。
 func resizeRedrawable(cl *commandLine, pc *pageController, inLogin bool) bool {
-	return !cl.active && pc.editor == nil && pc.emailFlow == nil && !inLogin
+	// R-14 / ADR-078：game mode 下整屏是游戏棋盘，resize 走游戏自己的帧重绘
+	// （下一帧自然按新 Window 尺寸铺开），不能被论坛页 render 覆盖。
+	return !cl.active && pc.editor == nil && pc.emailFlow == nil && pc.game == nil && !inLogin
 }
 
 func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
@@ -376,6 +387,19 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 			_ = pc.editorKey(ctx, sess, m)
 			return false
 		}
+		if pc.game != nil {
+			// R-14 / ADR-078：game mode 优先于命令表，按键喂给游戏状态机，
+			// 主循环不阻塞 → Esc/presence/resize 走既有链路。退出后复原论坛页。
+			done, err := pc.game.step(ctx, sess, m)
+			if err != nil {
+				_ = pc.fail(sess, err)
+			}
+			if done {
+				pc.game = nil
+				_ = pc.render(sess)
+			}
+			return false
+		}
 		switch h.handle(ctx, sess, pc, m, &cl, msgs, dec.Poll) {
 		case outcomeQuit:
 			return true
@@ -412,6 +436,18 @@ func (h *inputHandler) Serve(ctx context.Context, sess *sshd.Session) error {
 				return nil
 			}
 		case <-ticker.C:
+			// R-14 Snake 自动移动：会话循环持有节奏（archtest 守卫状态机零 ticker）。
+			// tick 内部按 snakeStepInterval 节流，不影响 25ms 的 ESC 轮询。
+			if pc.game != nil {
+				done, err := pc.game.tick(ctx, sess, time.Now())
+				if err != nil {
+					_ = pc.fail(sess, err)
+				}
+				if done {
+					pc.game = nil
+					_ = pc.render(sess)
+				}
+			}
 			for _, m := range dec.Poll() {
 				if handleOne(m) {
 					return nil
@@ -529,6 +565,9 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 			return outcomeQuit
 		case "help":
 			_, _ = io.WriteString(sess, h.reg.Help())
+		case "game":
+			// R-14 / ADR-078：游戏子系统。列表 / 开局 / 榜单；开局后 pc.game 接管按键。
+			h.runGame(ctx, sess, pc, inv)
 		case "matrix":
 			// v0.9.2 / ADR-076：屏内雨帘（进入清屏 → 提示 + 逐帧覆盖 → 退出清屏）。
 			// 动画期不改 screen/notice/selection，退出后用同一纯函数重绘原页面。

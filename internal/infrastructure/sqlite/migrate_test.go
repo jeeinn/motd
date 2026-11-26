@@ -147,8 +147,8 @@ func TestFreshDatabaseReachesVersion9(t *testing.T) {
 	if err := pools.reader.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 12 {
-		t.Fatalf("fresh 库迁移后版本应为 12，实际 %d", version)
+	if version != 13 {
+		t.Fatalf("fresh 库迁移后版本应为 13，实际 %d", version)
 	}
 }
 

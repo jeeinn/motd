@@ -14,7 +14,8 @@ func TestDefaultRegistryHasP0Commands(t *testing.T) {
 	// 2026-11-22（v0.7.1 / P4.5）：/search 之后追加 /latest（跨版块最新）与 /stats（统计看板）。
 	// ADR-065：/stats 之后追加 /whoami（别名 /me）与 /who [页]；/karma 彩蛋入口删除。
 	// R-15：/pin /unpin 两条置顶命令加在 /unthread 之后。
-	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "latest", "stats", "whoami", "who", "help", "quit", "hide", "unhide", "unthread", "pin", "unpin", "node", "node", "node", "node"}
+	// R-14：/game 四条子命令加在 /who 之后、/help 之前。
+	want := []string{"top", "open", "new", "reply", "delete", "edit", "login", "register", "verify", "resend", "recover", "keys", "key", "logout", "vote", "search", "latest", "stats", "whoami", "who", "game", "game", "game", "game", "help", "quit", "hide", "unhide", "unthread", "pin", "unpin", "node", "node", "node", "node"}
 	all := Default().All()
 	if len(all) != len(want) {
 		t.Fatalf("命令应为 %d 条，实际 %d", len(want), len(all))
@@ -48,6 +49,18 @@ func TestHelpGroupsAdminCommandsWithoutHiding(t *testing.T) {
 	// 分组说明行必须由「真的有该组命令」触发，不能无条件插。
 	if n := strings.Count(help, eggGroupHelpHeader); n != 0 {
 		t.Fatalf("无彩蛋命令时不应出现彩蛋分组说明，实际 %d 次", n)
+	}
+
+	// R-14：/game 独立分组（不是彩蛋也不是管理员），4 条命令都在说明行之后。
+	if n := strings.Count(help, gameGroupHelpHeader); n != 1 {
+		t.Fatalf("游戏分组说明必须恰好出现一次，实际 %d 次", n)
+	}
+	gameAt := strings.Index(help, gameGroupHelpHeader)
+	for _, usage := range []string{"/game", "/game list", "/game play <name>", "/game top [all] [game]"} {
+		at := strings.Index(help, usage)
+		if at <= gameAt || at >= headerAt {
+			t.Fatalf("游戏命令 %q 应在游戏分组说明之后、管理员分组之前: gameAt=%d at=%d adminAt=%d", usage, gameAt, at, headerAt)
+		}
 	}
 
 	// 9 条管理员命令全在说明行之后、键位表之前；一条都不少（不隐藏）。
