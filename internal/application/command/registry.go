@@ -139,7 +139,7 @@ var defaultCommands = []Command{
 	{Name: "game", Sub: "play", Usage: "/game play <name>", Summary: "开始一局（2048 / snake）", MinArgs: 1, MaxArgs: 1, Group: GroupGame},
 	// /game top [game] 本周榜；/game top all [game] 历史荣誉墙（all 在 cmd 层解析）。
 	{Name: "game", Sub: "top", Usage: "/game top [all] [game]", Summary: "本周榜 / all=历史最佳", MinArgs: 0, MaxArgs: 2, Group: GroupGame},
-	{Name: "help", Usage: "/help", Summary: "显示本帮助", MaxArgs: 0, Aliases: []string{"?"}},
+	{Name: "help", Usage: "/help [admin|game|egg]", Summary: "显示帮助（默认常用命令，可按分组下钻）", MinArgs: 0, MaxArgs: 1, Aliases: []string{"?"}},
 	{Name: "quit", Usage: "/quit", Summary: "退出会话", MaxArgs: 0, Aliases: []string{"exit"}},
 
 	// ---- 管理员分组（B 方案：不隐藏，只在 Help() 里归组并加一行说明）----
@@ -366,6 +366,97 @@ func (r *Registry) Help() string {
 	b.WriteString("\r\n键位：\r\n")
 	for _, k := range r.Bindings() {
 		_, _ = fmt.Fprintf(&b, "  %-18s %s\r\n", k.Key, k.Desc)
+	}
+	return b.String()
+}
+
+// helpSectionIndex 是摘要索引与 section 白名单的唯一顺序表：
+// 命令行 section 名 → Group 常量 → 中文标签。索引行里的 slug 只从本表
+// 反向映射生成，不从 Group 字符串直接拼——自定义注册表的非白名单 Group
+// 值不会进索引，避免「索引可见但 /help <slug> 未命中白名单、下钻不可达」。
+var helpSectionIndex = []struct {
+	section string
+	group   string
+	label   string
+}{
+	{"admin", GroupAdmin, "管理员"},
+	{"game", GroupGame, "游戏"},
+	{"egg", GroupEgg, "彩蛋"},
+}
+
+// SectionGroup（包级函数）把命令行 section 名映射到分组常量；未登记返回 ok=false。
+func SectionGroup(section string) (string, bool) {
+	for _, s := range helpSectionIndex {
+		if s.section == section {
+			return s.group, true
+		}
+	}
+	return "", false
+}
+
+// countGroup 返回注册表中指定分组的条目数（含子命令，不按命令名去重）。
+func (r *Registry) countGroup(group string) int {
+	n := 0
+	for _, c := range r.cmds {
+		if c.Group == group {
+			n++
+		}
+	}
+	return n
+}
+
+// groupCommands 返回指定分组的命令（按注册顺序的副本）。
+func (r *Registry) groupCommands(group string) []Command {
+	out := make([]Command, 0, r.countGroup(group))
+	for _, c := range r.cmds {
+		if c.Group == group {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// HelpSummary 输出摘要视图：普通组命令 + 键位 + 其他分组索引行。
+// 内部统一用 \n 换行；复用的分组头与固定提示自带 \r\n，由出口层
+// writeSystem 统一规范化后转 CRLF，方法内部不手工去 \r。
+func (r *Registry) HelpSummary() string {
+	var b strings.Builder
+	b.WriteString("命令（常用）：\n")
+	for _, c := range r.cmds {
+		if c.Group == "" {
+			_, _ = fmt.Fprintf(&b, "  %-18s %s\n", c.Usage, c.Summary)
+		}
+	}
+	b.WriteString("\n键位：\n")
+	for _, k := range r.Bindings() {
+		_, _ = fmt.Fprintf(&b, "  %-18s %s\n", k.Key, k.Desc)
+	}
+	// 索引行只枚举白名单内、组内确有条目的分组；条数为条目数（含子命令）。
+	parts := make([]string, 0, len(helpSectionIndex))
+	for _, s := range helpSectionIndex {
+		if n := r.countGroup(s.group); n > 0 {
+			parts = append(parts, fmt.Sprintf("/help %s（%s %d）", s.section, s.label, n))
+		}
+	}
+	if len(parts) > 0 {
+		b.WriteString("\n其他分组：" + strings.Join(parts, " · ") + "\n")
+	}
+	return b.String()
+}
+
+// HelpGroup 输出指定分组的明细；组内无命令时返回空串。
+// group 取 GroupAdmin / GroupGame / GroupEgg；普通组不在下钻范围。
+func (r *Registry) HelpGroup(group string) string {
+	cmds := r.groupCommands(group)
+	if len(cmds) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	if header := groupHelpHeader(group); header != "" {
+		b.WriteString(header)
+	}
+	for _, c := range cmds {
+		_, _ = fmt.Fprintf(&b, "  %-18s %s\n", c.Usage, c.Summary)
 	}
 	return b.String()
 }
