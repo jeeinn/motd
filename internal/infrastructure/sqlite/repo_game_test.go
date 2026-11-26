@@ -129,3 +129,32 @@ func TestGameBestScoreIsMaxNotSum(t *testing.T) {
 		t.Fatalf("最佳成绩制应取最高 50 而非累加 90，实际 %+v", entries)
 	}
 }
+
+// 2026-11-26 实测 bug 复现：结算写 game_key='2048'，但 /game top 无参时
+// 把空串当具体 game_key 查询，导致"已计入周榜"却"暂无记录"。
+func TestGameTopWithoutGameKeyReturnsAllGames(t *testing.T) {
+	store, ctx, uid := setupGameStore(t)
+	rec := game.ScoreRecord{
+		UserID: uid, GameKey: "2048", Score: 100, MaxPerDay: 10,
+		WeekKey: "2026-W48", LocalDate: "2026-11-26", CreatedAt: 1764100000,
+	}
+	counted, err := store.SubmitRecord(ctx, rec)
+	if err != nil || !counted {
+		t.Fatalf("结算应计入: counted=%v err=%v", counted, err)
+	}
+	// 无 game_key 过滤（对应 /game top 无参）应返回全部游戏成绩。
+	entries, err := store.Top(ctx, "2026-W48", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Score != 100 || entries[0].GameKey != "2048" {
+		t.Fatalf("无游戏名查询应返回 2048 的成绩，实际 %+v", entries)
+	}
+	all, err := store.AllTime(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].GameKey != "2048" {
+		t.Fatalf("总榜无游戏名查询应返回 2048 的成绩，实际 %+v", all)
+	}
+}

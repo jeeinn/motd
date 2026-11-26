@@ -216,3 +216,26 @@ func TestGameOverSettlesOnce(t *testing.T) {
 		t.Fatalf("结算不得重复写榜，实际 %d 行", n)
 	}
 }
+
+// 2026-11-26 实测 bug 端到端回归：结算写榜后 /game top 无参必须能看到。
+func TestGameTopAfterSubmitShowsScore(t *testing.T) {
+	ctx, h, _, pools, writer := setupMVPRuntime(t)
+	h.gameSvc = appgame.NewService(sqlite.NewGameStore(pools, writer), nil, nil)
+	// 模拟一次有效局结算（登录用户 uid=1）。
+	res, err := h.gameSvc.Submit(ctx, "2048", 1228, true, 1, 60)
+	if err != nil || !res.Counted {
+		t.Fatalf("结算应计入: %+v err=%v", res, err)
+	}
+	sess := newFakePageSession(1)
+	pc := h.newPageController(sess)
+	inv, _ := h.reg.Parse("/game top")
+	sess.reset()
+	h.runGame(ctx, sess, pc, inv)
+	out := sess.output()
+	if !strings.Contains(out, "1228") || !strings.Contains(out, "[2048]") {
+		t.Fatalf("无参周榜应显示刚结算的成绩与游戏名: %q", out)
+	}
+	if strings.Contains(out, "暂无记录") {
+		t.Fatalf("不应显示空榜: %q", out)
+	}
+}

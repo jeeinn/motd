@@ -302,6 +302,11 @@ func writeGameBoard(sess io.Writer, title string, entries []appgame.Entry) {
 	for i, e := range entries {
 		segSystem(sess, fmt.Sprintf(" %2d. ", i+1))
 		segUser(sess, "@"+e.Username)
+		// 跨游戏榜（/game top 无参）显示来源游戏；game_key 来自服务端白名单常量，
+		// 仍走 RenderSystem 固定文案路径，不拼用户数据。
+		if e.GameKey != "" && domgame.GameKey(e.GameKey).Valid() {
+			segSystem(sess, " ["+e.GameKey+"]")
+		}
 		segSystem(sess, fmt.Sprintf("  %d 分", e.Score))
 		segCRLF(sess)
 	}

@@ -78,7 +78,7 @@ func isoWeekKey(t time.Time) string {
 	return fmt.Sprintf("%04d-W%02d", year, week)
 }
 
-// Top 返回本周周榜前 N，并投影用户名。
+// Top 返回本周周榜前 N，并投影用户名。key 为空串表示跨游戏榜（/game top 无参）。
 func (s *Service) Top(ctx context.Context, key string, n int) ([]Entry, error) {
 	if n <= 0 {
 		n = 10
@@ -91,7 +91,7 @@ func (s *Service) Top(ctx context.Context, key string, n int) ([]Entry, error) {
 	return entries, nil
 }
 
-// AllTime 返回历史荣誉墙前 N，并投影用户名。
+// AllTime 返回历史荣誉墙前 N，并投影用户名。key 为空串表示跨游戏榜。
 func (s *Service) AllTime(ctx context.Context, key string, n int) ([]Entry, error) {
 	if n <= 0 {
 		n = 10

@@ -31,9 +31,11 @@ type Store interface {
 	SubmitRecord(ctx context.Context, rec ScoreRecord) (counted bool, err error)
 
 	// Top 返回周榜前 N：按 best_score DESC，只含 counted 局聚合结果。
+	// gameKey 为空串表示不过滤游戏（/game top 无参），Entry.GameKey 带来源游戏。
 	Top(ctx context.Context, weekKey, gameKey string, n int) ([]Entry, error)
 
 	// AllTime 返回历史荣誉墙：从周表按 user_id 取 MAX(best_score)，不建新表。
+	// gameKey 为空串同样表示跨游戏榜。
 	AllTime(ctx context.Context, gameKey string, n int) ([]Entry, error)
 }
 

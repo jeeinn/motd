@@ -64,6 +64,9 @@ func (s *GameStore) SubmitRecord(ctx context.Context, rec game.ScoreRecord) (boo
 }
 
 // Top 查周榜前 N，join users 取用户名（注销用户保留原名，cmd 层仍走 RenderUser）。
+// gameKey 为空串表示**不过滤游戏**（/game top 无参）：跨游戏按分数统一排序，
+// Entry.GameKey 带来源游戏供 cmd 层显示。绝不用字符串拼接 SQL——空串语义靠
+// 参数化条件 (?=” OR game_key=?) 表达，保持零注入面。
 func (s *GameStore) Top(ctx context.Context, weekKey, gameKey string, n int) ([]game.Entry, error) {
 	if n <= 0 {
 		n = 10
@@ -71,9 +74,9 @@ func (s *GameStore) Top(ctx context.Context, weekKey, gameKey string, n int) ([]
 	rows, err := s.pools.QueryContext(ctx,
 		`SELECT w.user_id, COALESCE(u.username, ''), w.best_score, w.week_key, w.game_key
 		   FROM game_leaderboard_week w LEFT JOIN users u ON u.id = w.user_id
-		  WHERE w.week_key=? AND w.game_key=?
+		  WHERE w.week_key=? AND (?='' OR w.game_key=?)
 		  ORDER BY w.best_score DESC, w.id ASC LIMIT ?`,
-		weekKey, gameKey, n,
+		weekKey, gameKey, gameKey, n,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("查询周榜: %w", err)
@@ -87,13 +90,14 @@ func (s *GameStore) AllTime(ctx context.Context, gameKey string, n int) ([]game.
 	if n <= 0 {
 		n = 10
 	}
+	// gameKey 为空串同样表示不过滤游戏（/game top all 无参）。
 	rows, err := s.pools.QueryContext(ctx,
 		`SELECT w.user_id, COALESCE(u.username, ''), MAX(w.best_score) AS best, '', w.game_key
 		   FROM game_leaderboard_week w LEFT JOIN users u ON u.id = w.user_id
-		  WHERE w.game_key=?
+		  WHERE ?='' OR w.game_key=?
 		  GROUP BY w.user_id
 		  ORDER BY best DESC, w.user_id ASC LIMIT ?`,
-		gameKey, n,
+		gameKey, gameKey, n,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("查询总榜: %w", err)
