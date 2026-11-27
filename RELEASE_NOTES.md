@@ -1,3 +1,44 @@
+## v0.11.1
+
+**发布日期**：2026-11-27
+**Git tag**：`v0.11.1`（待打）
+**Module**：`github.com/jeeinn/motd`
+
+> 补丁版本：R-16 帮助命令摘要视图 + 分组下钻。`?` / `/help` 默认出常用命令与键位索引，管理员 / 游戏 / 彩蛋分组经 `/help admin|game|egg` 下钻。无破坏性变更，无 schema 迁移、无新依赖、无新环境变量、无新键位。
+
+> 注：本 Release 正文由 workflow 从 `CHANGELOG.md` 的 `[0.11.1]` 段自动提取；本文件为仓库内发版说明存档。
+
+## 本次发布概览
+
+### 一、帮助摘要视图
+
+`?` / `/help` 默认输出摘要：普通组命令 + 键位 + 分组索引行，不再一次铺开全量 38 条命令。管理员 / 游戏 / 彩蛋三组经 `/help admin`、`/help game`、`/help egg` 下钻查看明细。
+
+### 二、索引白名单与条数派生
+
+分组索引 slug 由注册表白名单反向映射生成，非白名单分组不进索引；索引条数按条目数（含子命令）派生，随命令增删自动更新。
+
+### 三、渲染收口与零回显
+
+两处帮助生产出口改走 `writeSystem` 可信渲染链；未知分组回固定用法提示，结果段零回显用户输入；空组提示「该分组暂无命令」。
+
+## 破坏性变更
+
+无。既有命令、键位、鉴权、数据契约与渲染契约不变；生产部署仍按 `docs/OPS.md` 单独执行，不随 Release 自动上线。
+
+## 验证
+
+- 四门禁（gofmt / build / vet / test）+ Race + archtest 全绿；测试函数 1185。
+- SSH 闭环专项 `TestMVPSSHClosedLoop`、`TestMVPRestartAndBackupWithRealData` 通过。
+- 真机 SSH 冒烟（访客态 PTY 24×80）：`?` 摘要 → `/help admin` 下钻 → 未知分组提示零回显 → 退出无禁止序列，四步通过。
+- 本 tag 由 release workflow 自动构建 6 平台产物并从 CHANGELOG 提取正文，以 CI 实际结果为准。
+
+## 变更明细
+
+见 [`CHANGELOG.md`](CHANGELOG.md) 的 `[0.11.1]` 段；设计稿 `docs/DESIGN-help-summary.md`，Roadmap R-16。
+
+---
+
 ## v0.11.0
 
 **发布日期**：2026-11-26
