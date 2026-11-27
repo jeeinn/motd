@@ -328,3 +328,108 @@ func TestAllAndBindingsAreDefensiveCopies(t *testing.T) {
 		t.Fatal("Bindings() 必须返回副本")
 	}
 }
+
+// R-16：摘要只列普通组命令与键位；管理员 / 游戏 / 彩蛋走索引下钻。
+func TestHelpSummaryExcludesGroupedCommands(t *testing.T) {
+	r := Default()
+	summary := r.HelpSummary()
+
+	for _, usage := range []string{"/top", "/delete [id]", "/edit [id]", "/help", "/quit"} {
+		if !strings.Contains(summary, usage) {
+			t.Errorf("摘要缺少普通命令 %q", usage)
+		}
+	}
+	for _, b := range r.Bindings() {
+		if !strings.Contains(summary, b.Key) {
+			t.Errorf("摘要缺少键位 %q", b.Key)
+		}
+	}
+
+	// 非普通组命令不进摘要正文。
+	for _, usage := range []string{"/hide [id]", "/game play <name>", "/node create"} {
+		if strings.Contains(summary, usage) {
+			t.Errorf("摘要不应包含分组命令 %q", usage)
+		}
+	}
+
+	// 索引行列出白名单分组与派生条数（Default：admin 9、game 4；无彩蛋故不列 egg）。
+	if !strings.Contains(summary, "/help admin（管理员 9）") {
+		t.Errorf("摘要索引行缺少 admin 组与条数: %q", summary)
+	}
+	if !strings.Contains(summary, "/help game（游戏 4）") {
+		t.Errorf("摘要索引行缺少 game 组与条数: %q", summary)
+	}
+	if strings.Contains(summary, "/help egg") {
+		t.Errorf("Default 无彩蛋命令，索引行不应出现 egg: %q", summary)
+	}
+}
+
+// R-16：非白名单 Group 值不进索引，避免「可见但下钻不可达」的假入口。
+func TestHelpSummaryIndexOnlyWhitelistedGroups(t *testing.T) {
+	r, err := New([]Command{
+		{Name: "top", Usage: "/top", Summary: "列表", MaxArgs: 0},
+		{Name: "hide", Usage: "/hide [id]", Summary: "隐藏", Group: GroupAdmin},
+		{Name: "custom", Usage: "/custom", Summary: "非白名单组", Group: "custom"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := r.HelpSummary()
+	if strings.Contains(summary, "/help custom") {
+		t.Errorf("非白名单分组不得进索引: %q", summary)
+	}
+	if !strings.Contains(summary, "/help admin（管理员 1）") {
+		t.Errorf("白名单 admin 应进索引: %q", summary)
+	}
+}
+
+// R-16：HelpGroup 分组隔离；空组返回空串，由路由层转固定提示。
+func TestHelpGroupIsolatedAndEmpty(t *testing.T) {
+	r, err := New([]Command{
+		{Name: "top", Usage: "/top", Summary: "列表", MaxArgs: 0},
+		{Name: "hide", Usage: "/hide [id]", Summary: "隐藏", Group: GroupAdmin},
+		{Name: "cowsay", Usage: "/cowsay", Summary: "牛", Group: GroupEgg},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := r.HelpGroup(GroupAdmin)
+	if !strings.Contains(admin, "/hide [id]") || strings.Contains(admin, "/cowsay") {
+		t.Errorf("管理员组只应出管理员命令: %q", admin)
+	}
+	egg := r.HelpGroup(GroupEgg)
+	if !strings.Contains(egg, "/cowsay") || strings.Contains(egg, "/hide") {
+		t.Errorf("彩蛋组只应出彩蛋命令: %q", egg)
+	}
+	if r.HelpGroup(GroupGame) != "" {
+		t.Errorf("空组应返回空串，实际 %q", r.HelpGroup(GroupGame))
+	}
+}
+
+// R-16：SectionGroup 白名单映射；/help 放开 1 个可选参数，多参数仍被 arity 挡下。
+func TestSectionGroupWhitelistAndHelpArity(t *testing.T) {
+	for _, tc := range []struct {
+		section string
+		group   string
+		ok      bool
+	}{
+		{"admin", GroupAdmin, true},
+		{"game", GroupGame, true},
+		{"egg", GroupEgg, true},
+		{"root", "", false},
+		{"", "", false},
+	} {
+		group, ok := SectionGroup(tc.section)
+		if ok != tc.ok || group != tc.group {
+			t.Errorf("SectionGroup(%q) = %q,%v，期望 %q,%v", tc.section, group, ok, tc.group, tc.ok)
+		}
+	}
+
+	inv, err := Default().Parse("/help admin")
+	if err != nil || inv.Name != "help" || len(inv.Args) != 1 || inv.Args[0] != "admin" {
+		t.Fatalf("/help admin 解析异常: %+v %v", inv, err)
+	}
+	if _, err := Default().Parse("/help a b"); !errors.Is(err, ErrArgCount) {
+		t.Fatalf("/help 多参数应报 ErrArgCount，实际 %v", err)
+	}
+}

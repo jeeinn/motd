@@ -129,18 +129,17 @@ func TestFormatResultNeverEchoesUserInput(t *testing.T) {
 		}
 	}
 
-	// /help 必须由注册表生成，包含全部命令用法。
-	inv, err := reg.Parse("/help")
-	out := formatResult(reg, inv, err)
+	// 全量命令清单由注册表 Help() 生成；formatResult 的 help 分支只出摘要口径，
+	// 不承担分组路由，全量口径直接对 Help() 断言。
 	for _, c := range reg.All() {
-		if !strings.Contains(out, c.Usage) {
-			t.Errorf("/help 输出缺少 %q", c.Usage)
+		if !strings.Contains(reg.Help(), c.Usage) {
+			t.Errorf("Help() 输出缺少 %q", c.Usage)
 		}
 	}
 
 	// 参数属于用户输入，不回显；命令名来自注册表白名单，可以出现。
-	inv, err = reg.Parse("/open 3")
-	out = formatResult(reg, inv, err)
+	inv, err := reg.Parse("/open 3")
+	out := formatResult(reg, inv, err)
 	if !strings.Contains(out, "/open") || strings.Contains(out, " 3") {
 		t.Fatalf("只应回显白名单命令名，不应回显参数: %q", out)
 	}
@@ -282,6 +281,39 @@ func TestMatrixNoForbiddenSequences(t *testing.T) {
 		if strings.Contains(out, bad) {
 			t.Fatalf("动画泄露禁止序列 %q: %q", bad, out)
 		}
+	}
+}
+
+// R-16：helpTextFor 路由——无参摘要、白名单分组下钻、未知 section 零回显、空组提示。
+func TestHelpTextForRouting(t *testing.T) {
+	reg := command.Default()
+
+	// 无参：摘要含普通命令，不含管理员明细。
+	summary := helpTextFor(reg, command.Invocation{})
+	if !strings.Contains(summary, "/top") || strings.Contains(summary, "/hide [id]") {
+		t.Errorf("无参应出摘要: %q", summary)
+	}
+
+	// 白名单分组：管理员组只出管理员命令。
+	admin := helpTextFor(reg, command.Invocation{Name: "help", Args: []string{"admin"}})
+	if !strings.Contains(admin, "/hide [id]") || strings.Contains(admin, "/game") {
+		t.Errorf("admin 下钻只应出管理员命令: %q", admin)
+	}
+
+	// 未知 section：固定用法提示，不回显原文、无 ESC。
+	unknown := helpTextFor(reg, command.Invocation{Name: "help", Args: []string{"\x1b[2Jpwned"}})
+	if !strings.Contains(unknown, "用法：/help") || strings.Contains(unknown, "pwned") || strings.Contains(unknown, "\x1b") {
+		t.Errorf("未知 section 应零回显: %q", unknown)
+	}
+
+	// 空组：HelpGroup 空串在此显式转固定提示。
+	plain, err := command.New([]command.Command{{Name: "ping", Usage: "/ping", Summary: "探针", MaxArgs: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := helpTextFor(plain, command.Invocation{Name: "help", Args: []string{"game"}})
+	if !strings.Contains(empty, "该分组暂无命令") {
+		t.Errorf("空组应出暂无命令提示: %q", empty)
 	}
 }
 

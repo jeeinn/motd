@@ -536,7 +536,7 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 	case actionQuit:
 		return outcomeQuit
 	case actionHelp:
-		_, _ = io.WriteString(sess, h.reg.Help())
+		writeSystem(sess, helpTextFor(h.reg, command.Invocation{}))
 	case actionCommandStart:
 		// 提示语若说「以 / 开头」，用户补打一个 / 会得到 //login → 未知命令
 		// （本机实测反馈）。具体措辞见 commandEntryHint 的回归测试。
@@ -564,7 +564,7 @@ func (h *inputHandler) handle(ctx context.Context, sess *sshd.Session, pc *pageC
 			_, _ = io.WriteString(sess, "再见\r\n")
 			return outcomeQuit
 		case "help":
-			_, _ = io.WriteString(sess, h.reg.Help())
+			writeSystem(sess, helpTextFor(h.reg, inv))
 		case "game":
 			// R-14 / ADR-078：游戏子系统。列表 / 开局 / 榜单；开局后 pc.game 接管按键。
 			h.runGame(ctx, sess, pc, inv)
@@ -1114,6 +1114,23 @@ func applyKey(cl *commandLine, m input.KeyMsg) (cmdAction, string, int) {
 	return actionNone, "", 0
 }
 
+// helpTextFor 是帮助文本的唯一路由纯函数；inv 为零值时出摘要。
+// section 只在 SectionGroup 白名单内匹配；未知 section 回固定提示，
+// 不回显 inv.Args 原文（ADR-026）。空组由 HelpGroup 返回空串，在此显式转提示。
+func helpTextFor(reg *command.Registry, inv command.Invocation) string {
+	if len(inv.Args) == 0 {
+		return reg.HelpSummary()
+	}
+	group, ok := command.SectionGroup(inv.Args[0])
+	if !ok {
+		return "用法：/help [admin|game|egg]\r\n"
+	}
+	if text := reg.HelpGroup(group); text != "" {
+		return text
+	}
+	return "该分组暂无命令\r\n"
+}
+
 // formatResult 只输出服务端生成的文本或注册表白名单里的命令名，
 // 绝不把用户提交的原始字节（含 ESC / CSI / OSC）写回终端。
 // 参数 inv.Args 也刻意不输出：它来自用户输入，不是注册表常量。
@@ -1130,7 +1147,9 @@ func formatResult(reg *command.Registry, inv command.Invocation, err error) stri
 	}
 	switch inv.Name {
 	case "help":
-		return reg.Help()
+		// 该分支生产不可达（解析失败在错误匹配处即返回），仅单测可达；
+		// 只出摘要口径，不承担 section 路由，也不接 writeSystem。
+		return reg.HelpSummary()
 	case "quit":
 		return "再见\r\n"
 	default:
